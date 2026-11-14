@@ -87,6 +87,18 @@ describe('agentActivityStore', () => {
     expect(plan[2].tool).toBeUndefined();
   });
 
+  it('ignores a replayed start for a callId that already ran (any state)', () => {
+    const { startRun, pushToolStart, pushToolEnd } =
+      useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'task');
+    pushToolStart('t1', 'search_arxiv', 'call-1');
+    pushToolEnd('t1', 'search_arxiv', true, 'call-1');
+    pushToolStart('t1', 'search_arxiv', 'call-1');
+    const steps = getRun('t1').steps;
+    expect(steps).toHaveLength(1);
+    expect(steps[0].status).toBe('done');
+  });
+
   it('a successful tool completion marks the matching plan item done', () => {
     const { startRun, setPlan, pushToolStart, pushToolEnd } =
       useAgentActivityStore.getState();
