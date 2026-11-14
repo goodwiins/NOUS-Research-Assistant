@@ -14,7 +14,9 @@ import {
   ThreadUpdate,
 } from '@/types/workspace';
 import type { Thread } from '@/types/workspace';
+import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
+import { dropConversationLocally } from '../conversationCache';
 import { captureChatSession } from '../requestCoordinator';
 import type { ChatSliceCreator } from '../types';
 import { removeItemFromRecord, updateItemInRecord } from '../recordIndex';
@@ -22,7 +24,6 @@ import {
   abortNewestPageRequest,
   markThreadDeleted,
 } from '../requestCoordinator';
-import { handleStaleDataRecovery } from './workspaceSlice';
 
 export interface ThreadSlice {
   loadThreads: (conversationId: string) => Promise<void>;
@@ -92,8 +93,7 @@ export const createThreadSlice: ChatSliceCreator<ThreadSlice> = (set, get) => ({
       console.error('[ChatStore] Error loading threads:', error);
 
       // Handle 404 - conversation not found (stale data)
-      const err = error as { response?: { status?: number } };
-      if (err?.response?.status === 404) {
+      if (getErrorStatus(error) === 404) {
         // A late 404 for a conversation the user has already navigated away
         // from must not nuke the (valid) current selection — only recover
         // when the failed load still targets the current conversation.
@@ -108,15 +108,19 @@ export const createThreadSlice: ChatSliceCreator<ThreadSlice> = (set, get) => ({
           return;
         }
         console.warn(
-          '[ChatStore] Conversation not found (404) - clearing stale data'
+          '[ChatStore] Conversation not found (404) - dropping it and reloading the workspace conversations'
         );
-        // Clear workspaces for consistency with loadConversations since we're triggering full reinit
-        const result = handleStaleDataRecovery(get, set, 'loadThreads', {
-          clearWorkspaces: true,
-          loadingKey: 'isLoadingThreads',
+        // Recover only the conversation (it may be deleted elsewhere, or
+        // access-denied which the backend also reports as 404). Keep the
+        // workspace selection and list; a workspace-level 404 is handled by
+        // loadConversations.
+        const workspaceId = get().currentWorkspaceId;
+        dropConversationLocally(get, set, conversationId);
+        set((state) => {
+          state.isLoadingThreads = false;
         });
-        if (result.shouldProceed) {
-          result.triggerReinit();
+        if (workspaceId) {
+          await get().loadConversations(workspaceId);
         }
         return;
       }

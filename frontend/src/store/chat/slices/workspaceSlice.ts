@@ -22,9 +22,18 @@ export interface WorkspaceSlice {
   deleteWorkspace: (id: string) => Promise<boolean>;
 }
 
+// Delay between re-init attempts (baseMs * attempt). Exposed so tests can
+// inject a no-op sleep instead of waiting.
+export const reinitBackoff = {
+  baseMs: 500,
+  sleep: (ms: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
 // Helper type for the recovery handler
 type RecoveryResult =
-  { shouldProceed: false } | { shouldProceed: true; triggerReinit: () => void };
+  | { shouldProceed: false }
+  | { shouldProceed: true; triggerReinit: () => Promise<void> };
 
 /**
  * Helper to handle stale data recovery (404 errors) atomically.
@@ -66,6 +75,14 @@ export function handleStaleDataRecovery(
       if (loadingKey) {
         state[loadingKey] = false;
       }
+      if (state.isReinitializing) {
+        // A workspace 404 while re-initializing means the recovery itself
+        // failed: drop the selection so triggerReinit can retry (bounded by
+        // MAX_REINIT_RETRIES) instead of leaving a half-selected workspace.
+        state.currentWorkspaceId = null;
+        state.currentConversationId = null;
+        state.currentThreadId = null;
+      }
       if (maxRetriesReached) {
         state.error = 'Failed to initialize workspace after multiple attempts';
       }
@@ -92,28 +109,58 @@ export function handleStaleDataRecovery(
     return { shouldProceed: false };
   }
 
-  // Return a trigger function that the caller can use to start reinitialization
+  // Return a trigger the caller awaits so the originating action settles
+  // only once recovery has reached a defined end state. The attempt bound is
+  // local (MAX_REINIT_RETRIES) so it never depends on the shared counter,
+  // which only remembers failures across mounts.
   return {
     shouldProceed: true,
-    triggerReinit: () => {
-      if (!isCurrentSession()) return;
-      // Use Promise-based approach instead of fire-and-forget setTimeout
-      (async () => {
-        try {
-          await get().initializeDefaultWorkspace();
-        } catch (err) {
-          console.error(
-            `[ChatStore] Reinitialization failed for ${context}:`,
-            err
-          );
-        } finally {
-          if (isCurrentSession()) {
+    triggerReinit: async () => {
+      try {
+        for (let attempt = 0; attempt < MAX_REINIT_RETRIES; attempt++) {
+          if (attempt > 0) {
+            await reinitBackoff.sleep(reinitBackoff.baseMs * attempt);
+            if (!isCurrentSession()) return;
+            // attempt 0 was marked by the atomic update above
             set((state) => {
-              state.isReinitializing = false;
+              state.reinitRetryCount += 1;
             });
           }
+          if (!isCurrentSession()) return;
+          try {
+            await get().initializeDefaultWorkspace();
+          } catch (err) {
+            console.error(
+              `[ChatStore] Reinitialization failed for ${context}:`,
+              err
+            );
+          }
+          if (!isCurrentSession()) return;
+          const after = get();
+          if (after.currentWorkspaceId && !after.error) {
+            // Recovery verifiably worked. Only here (never from inside the
+            // recovery-triggered init) is the retry counter reset.
+            set((state) => {
+              state.reinitRetryCount = 0;
+            });
+            return;
+          }
+          // A selected workspace or an error is a defined end state; only a
+          // workspace that 404'd again (selection cleared, no error) retries.
+          if (after.currentWorkspaceId || after.error) return;
         }
-      })();
+        if (!isCurrentSession()) return;
+        set((state) => {
+          state.error ??=
+            'Failed to initialize workspace after multiple attempts';
+        });
+      } finally {
+        if (isCurrentSession()) {
+          set((state) => {
+            state.isReinitializing = false;
+          });
+        }
+      }
     },
   };
 }

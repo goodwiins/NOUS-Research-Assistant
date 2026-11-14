@@ -155,6 +155,10 @@ function writeCachedWorkspace(
 // two "My Workspace" rows plus duplicate conversations.
 let _defaultWorkspaceInFlight: Promise<ApiWorkspace> | null = null;
 let cacheGeneration = 0;
+// Owner of the last default workspace this session created. While the server
+// still lists no workspace for them, a recovery retry must not create another
+// "My Workspace"; cleared as soon as a workspace is observed to exist.
+let _createdDefaultFor: string | null = null;
 
 function captureCacheGeneration(): () => void {
   const generation = cacheGeneration;
@@ -181,6 +185,7 @@ export function clearWorkspaceServiceCache(): void {
   removeCachedWorkspace();
   removeStorageKeys(['chat-storage']);
   _defaultWorkspaceInFlight = null;
+  _createdDefaultFor = null;
   _defaultConversationInFlight.clear();
 }
 
@@ -571,6 +576,7 @@ export const workspaceService = {
       try {
         const workspace = await this.getWorkspace(cached.id);
         cacheWorkspace(workspace);
+        _createdDefaultFor = null;
         return workspace;
       } catch (error: unknown) {
         assertCurrentSession();
@@ -598,6 +604,7 @@ export const workspaceService = {
           }, workspaces[0]);
 
           cacheWorkspace(bestWorkspace);
+          _createdDefaultFor = null;
           return bestWorkspace;
         }
         // Successfully got an empty list — no workspaces exist yet
@@ -621,6 +628,12 @@ export const workspaceService = {
       }
     }
 
+    // Only a known owner is remembered; an unknown principal never matches.
+    if (ownerUserId && _createdDefaultFor === ownerUserId) {
+      throw new Error(
+        'Default workspace already created this session but the server lists none'
+      );
+    }
     console.log(
       '[WorkspaceService] No workspaces found, creating default workspace'
     );
@@ -631,6 +644,7 @@ export const workspaceService = {
     });
 
     cacheWorkspace(newWorkspace);
+    _createdDefaultFor = ownerUserId ?? null;
     return newWorkspace;
   },
 
