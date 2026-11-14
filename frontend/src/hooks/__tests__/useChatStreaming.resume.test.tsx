@@ -153,7 +153,9 @@ describe('useChatStreaming stream resume on mount', () => {
     };
   }
 
-  function lastCommittedAssistant(setMessages: ReturnType<typeof vi.fn>) {
+  function lastCommittedAssistant(
+    setMessages: ReturnType<typeof vi.fn>
+  ): ChatPageMessage | undefined {
     const commits = setMessages.mock.calls
       .map(([arg]) => arg)
       .filter((arg): arg is ChatPageMessage[] => Array.isArray(arg));
