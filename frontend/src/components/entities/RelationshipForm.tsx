@@ -74,6 +74,8 @@ export const RelationshipForm: React.FC<RelationshipFormProps> = ({
 
   useEffect(() => {
     if (initialData) {
+      // Seed the form from the initialData prop (pre-existing pattern).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setFormData({
         source_entity_id: initialData.source || '',
         target_entity_id: initialData.target || '',
@@ -189,6 +191,7 @@ export const RelationshipForm: React.FC<RelationshipFormProps> = ({
                   setSelectedTarget(null);
                   setFormData(prev => ({ ...prev, target_entity_id: '' }));
                 }}
+                aria-label={`Clear target entity ${selectedTarget.name}`}
                 className="h-8 w-8 text-(--nous-fg-3) hover:text-red-400 hover:bg-red-400/10"
               >
                 <X className="h-4 w-4" />
@@ -339,6 +342,7 @@ export const RelationshipForm: React.FC<RelationshipFormProps> = ({
                   variant="ghost"
                   size="sm"
                   onClick={() => removeEvidence(index)}
+                  aria-label={`Remove evidence ${index + 1}`}
                   className="h-6 w-6 text-(--nous-fg-3) hover:text-red-400 hover:bg-red-400/10 p-0"
                 >
                   <X className="h-3 w-3" />

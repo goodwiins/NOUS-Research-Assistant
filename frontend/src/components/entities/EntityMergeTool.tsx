@@ -79,6 +79,9 @@ export const EntityMergeTool: React.FC = () => {
           setActiveJobId(null);
           setSelectedGroups(new Set());
           toast.success('Merge job completed');
+          // Runs inside a poll callback long after render, so the later
+          // `const findDuplicates` declaration is already initialised.
+          // eslint-disable-next-line react-hooks/immutability
           findDuplicates();
         }
 
@@ -483,6 +486,7 @@ export const EntityMergeTool: React.FC = () => {
                 </Button>
                 <Button
                   onClick={() => setError(null)}
+                  aria-label="Dismiss error"
                   size="sm"
                   variant="ghost"
                   className="font-mono text-[10px] text-red-400/60 px-2"
