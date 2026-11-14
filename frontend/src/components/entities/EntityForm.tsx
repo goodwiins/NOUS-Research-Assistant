@@ -83,6 +83,8 @@ export const EntityForm: React.FC<EntityFormProps> = ({
 
   useEffect(() => {
     if (entity) {
+      // Seed the form from the entity prop (pre-existing pattern).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setFormData({
         name: entity.name || '',
         type: entity.type || 'PERSON',
@@ -382,6 +384,7 @@ export const EntityForm: React.FC<EntityFormProps> = ({
                     <button
                       type="button"
                       onClick={() => removeAlias(index)}
+                      aria-label={`Remove alias ${alias}`}
                       className="text-(--nous-fg-3) hover:text-red-400 p-0.5 rounded transition-colors"
                     >
                       <X className="h-3 w-3" />
@@ -404,6 +407,7 @@ export const EntityForm: React.FC<EntityFormProps> = ({
                 <Button
                   type="button"
                   variant="outline"
+                  aria-label="Add alias"
                   onClick={(e) => {
                     const input = e.currentTarget.parentElement?.querySelector('input');
                     if (input) {
@@ -479,6 +483,7 @@ export const EntityForm: React.FC<EntityFormProps> = ({
                   variant="ghost"
                   size="sm"
                   onClick={() => removeMetadataField(index)}
+                  aria-label={`Remove metadata field ${field.key || index + 1}`}
                   className="h-8 w-8 text-red-500/50 hover:text-red-400 hover:bg-red-400/10"
                 >
                   <Trash2 className="h-4 w-4" />
