@@ -1737,3 +1737,54 @@ async def test_project_id_not_owned_falls_back_to_org_wide():
     # project-filtered result set derived from the unverified id.
     assert "error" not in result
     assert result["total"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_title_only_match_uses_body_preview_not_the_title():
+    """CodeRabbit on #2124: a title-only hit produced a "title snippet", so the
+    chunk's evidence was the highlighted title and the body preview was never
+    used. Evidence must come from document content, without <mark> tags."""
+    user = SimpleNamespace(id="user-1", organization_id=UUID(int=10))
+    hit = SimpleNamespace(
+        results=[
+            SimpleNamespace(
+                document_id=str(TARGET_ID),
+                title="Attention Is All You Need",
+                snippets=[
+                    SimpleNamespace(text="<mark>Attention</mark> Is All You Need")
+                ],
+                content_preview="The dominant sequence transduction models...",
+                relevance_score=0.5,
+            )
+        ]
+    )
+    p1, p2, p3, p4, p5 = _kb_off_patches(MagicMock(return_value=hit), AsyncMock(), AsyncMock())
+    with p1, p2, p3, p4, p5:
+        result = await _tool_do_kb_retrieve({"query": "attention"}, MagicMock(), user)
+
+    assert result["chunks"][0]["text"] == "The dominant sequence transduction models..."
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_content_snippets_drop_highlight_markup():
+    user = SimpleNamespace(id="user-1", organization_id=UUID(int=10))
+    hit = SimpleNamespace(
+        results=[
+            SimpleNamespace(
+                document_id=str(TARGET_ID),
+                title="Paper",
+                snippets=[
+                    SimpleNamespace(text="Multi-head <mark>attention</mark> lets the model attend.")
+                ],
+                content_preview="preview",
+                relevance_score=0.5,
+            )
+        ]
+    )
+    p1, p2, p3, p4, p5 = _kb_off_patches(MagicMock(return_value=hit), AsyncMock(), AsyncMock())
+    with p1, p2, p3, p4, p5:
+        result = await _tool_do_kb_retrieve({"query": "attention"}, MagicMock(), user)
+
+    assert result["chunks"][0]["text"] == "Multi-head attention lets the model attend."
