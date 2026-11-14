@@ -8,6 +8,7 @@ import {
   ConversationCreate,
   ConversationUpdate,
 } from '@/types/workspace';
+import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
 import { captureChatSession } from '../requestCoordinator';
 import type { ChatSliceCreator } from '../types';
@@ -88,8 +89,7 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
       console.error('[ChatStore] Error loading conversations:', error);
 
       // Handle 404 - workspace not found (stale data)
-      const err = error as { response?: { status?: number } };
-      if (err?.response?.status === 404) {
+      if (getErrorStatus(error) === 404) {
         // A late 404 for a workspace the user has already navigated away
         // from must not nuke the (valid) current selection — only recover
         // when the failed load still targets the current workspace.
@@ -164,8 +164,7 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
       console.error('[ChatStore] Error creating conversation:', error);
 
       // Handle 404 - workspace not found (stale data)
-      const err = error as { response?: { status?: number } };
-      if (err?.response?.status === 404) {
+      if (getErrorStatus(error) === 404) {
         console.warn(
           '[ChatStore] Workspace not found (404) while creating conversation - clearing stale data'
         );

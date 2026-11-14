@@ -14,6 +14,7 @@ import {
   ThreadUpdate,
 } from '@/types/workspace';
 import type { Thread } from '@/types/workspace';
+import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
 import { captureChatSession } from '../requestCoordinator';
 import type { ChatSliceCreator } from '../types';
@@ -92,8 +93,7 @@ export const createThreadSlice: ChatSliceCreator<ThreadSlice> = (set, get) => ({
       console.error('[ChatStore] Error loading threads:', error);
 
       // Handle 404 - conversation not found (stale data)
-      const err = error as { response?: { status?: number } };
-      if (err?.response?.status === 404) {
+      if (getErrorStatus(error) === 404) {
         // A late 404 for a conversation the user has already navigated away
         // from must not nuke the (valid) current selection — only recover
         // when the failed load still targets the current conversation.

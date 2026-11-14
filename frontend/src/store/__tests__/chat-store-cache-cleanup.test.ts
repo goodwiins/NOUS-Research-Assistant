@@ -48,6 +48,7 @@ vi.mock('@/services/workspaceService', () => ({
 }));
 
 import { workspaceService } from '@/services/workspaceService';
+import { APIErrorClass } from '@/types/api';
 import { useChatStore } from '@/store/chat-store';
 import { newestPageRequests } from '@/store/chat/requestCoordinator';
 import {
@@ -116,6 +117,15 @@ const pagination = (): {
   loadingOlder: false,
   loadedCount: 1,
 });
+
+// workspaceService goes through @/services/api-client, which throws
+// APIErrorClass (status on `error.status_code`), not an axios-shaped error.
+const notFound = (): APIErrorClass =>
+  new APIErrorClass({
+    message: 'Not Found',
+    status_code: 404,
+    type: 'http_error',
+  });
 
 describe('deleteConversation cascade cleanup', () => {
   beforeEach(() => {
@@ -310,7 +320,7 @@ describe('loadConversations request identity', () => {
       await fresh;
     });
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    rejectStale(Object.assign(new Error('Not Found'), { response: { status: 404 } }));
+    rejectStale(notFound());
     await act(async () => {
       await stale;
     });
@@ -331,9 +341,7 @@ describe('loadConversations request identity', () => {
     });
     (
       workspaceService.listConversations as ReturnType<typeof vi.fn>
-    ).mockRejectedValue(
-      Object.assign(new Error('Not Found'), { response: { status: 404 } })
-    );
+    ).mockRejectedValue(notFound());
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await act(async () => {
@@ -423,9 +431,6 @@ describe('loadThreads stale-404 recovery guard', () => {
     });
     vi.clearAllMocks();
   });
-
-  const notFound = (): Error =>
-    Object.assign(new Error('Not Found'), { response: { status: 404 } });
 
   it('ignores a late 404 for a conversation the user has already navigated away from', async () => {
     useChatStore.setState({
@@ -549,6 +554,81 @@ describe('loadThreads stale-404 recovery guard', () => {
     });
 
     expect(useChatStore.getState().currentConversationId).toBeNull();
+    await waitFor(() => {
+      expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalled();
+    });
+  });
+});
+
+describe('stale-404 recovery from a real APIErrorClass', () => {
+  beforeEach(() => {
+    act(() => {
+      useChatStore.getState().reset();
+    });
+    vi.clearAllMocks();
+  });
+
+  it('loadConversations recovers when the CURRENT workspace 404s', async () => {
+    useChatStore.setState({
+      currentWorkspaceId: 'ws-1',
+      workspaces: [makeWorkspace('ws-1')],
+    });
+    (
+      workspaceService.listConversations as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(notFound());
+    (
+      workspaceService.getOrCreateDefaultWorkspace as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({ id: 'ws-1', name: 'W' });
+    (
+      workspaceService.listConversations as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({
+      conversations: [],
+      total: 0,
+      page: 1,
+      limit: 50,
+      has_more: false,
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await act(async () => {
+      await useChatStore.getState().loadConversations('ws-1');
+    });
+    err.mockRestore();
+
+    await waitFor(() => {
+      expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalled();
+    });
+  });
+
+  it('createConversation recovers when the workspace 404s', async () => {
+    (
+      workspaceService.createConversation as ReturnType<typeof vi.fn>
+    ).mockRejectedValue(notFound());
+    (
+      workspaceService.getOrCreateDefaultWorkspace as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({ id: 'ws-1', name: 'W' });
+    (
+      workspaceService.listConversations as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({
+      conversations: [],
+      total: 0,
+      page: 1,
+      limit: 50,
+      has_more: false,
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    let result: unknown;
+    await act(async () => {
+      result = await useChatStore
+        .getState()
+        .createConversation({ workspace_id: 'ws-1', title: 'T' });
+    });
+    err.mockRestore();
+
+    expect(result).toBeNull();
     await waitFor(() => {
       expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalled();
     });
