@@ -9,8 +9,9 @@ source rank, so a deeper page could pull a candidate above ones an earlier page
 had already shown. Results then repeated or went missing across pages, and
 ``has_more`` read false as soon as ``offset + limit`` reached the pool.
 
-The arms now always fetch the same, fixed window (the ``SearchQuery.limit``
-maximum a source request accepts), so every page slices one ranking.
+The arms now fetch a window sized by the page size alone (five pages, kept
+between 20 and the ``SearchQuery.limit`` maximum of 100), never by the offset,
+so every page of one size slices one ranking.
 """
 
 from __future__ import annotations
@@ -28,15 +29,21 @@ from src.services.search import hybrid_search_service as hybrid_module
 
 pytestmark = pytest.mark.unit
 
-_WINDOW = hybrid_module.HybridSearchService._MAX_SOURCE_CANDIDATES
-
 
 @pytest.mark.parametrize(
-    ("offset", "limit"),
-    [(0, 10), (0, 50), (20, 10), (90, 10), (0, 100)],
+    ("limit", "window"),
+    [
+        (5, 25),  # agent RAG lookup: close to the old 20 rows
+        (2, 20),  # floor
+        (10, 50),  # five pages of 10
+        (20, 100),
+        (50, 100),  # research engine; capped at the source maximum
+        (100, 100),
+    ],
 )
-def test_source_arms_fetch_the_same_window_for_every_page(
-    monkeypatch: pytest.MonkeyPatch, offset: int, limit: int
+@pytest.mark.parametrize("offset", [0, 10, 20, 90])
+def test_source_window_depends_on_page_size_never_offset(
+    monkeypatch: pytest.MonkeyPatch, offset: int, limit: int, window: int
 ) -> None:
     seen: dict[str, int] = {}
 
@@ -61,7 +68,7 @@ def test_source_arms_fetch_the_same_window_for_every_page(
     )
 
     assert ft.success and kg.success
-    assert seen == {"fulltext": _WINDOW, "knowledge_graph": _WINDOW}
+    assert seen == {"fulltext": window, "knowledge_graph": window}
 
 
 _OLD = datetime(2020, 1, 1, tzinfo=timezone.utc)
