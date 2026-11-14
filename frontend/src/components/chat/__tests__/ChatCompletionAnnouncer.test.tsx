@@ -134,6 +134,7 @@ describe('ChatCompletionAnnouncer', () => {
         } as Msg,
       ])
     );
+    mutations.push(...observer.takeRecords());
     observer.disconnect();
     expect(region().textContent).toBe('Answer ready.');
     expect(mutations).toHaveLength(0);

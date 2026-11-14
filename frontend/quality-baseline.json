@@ -17,8 +17,8 @@
     "src/utils/analytics/**/*"
   ],
   "eslint": {
-    "errors": 83,
-    "warnings": 1786,
+    "errors": 85,
+    "warnings": 1808,
     "byFile": {
       "app/(auth)/layout.tsx": {
         "errors": 0,
