@@ -635,3 +635,80 @@ async def test_bulkhead_body_timeout_is_not_counted_as_rejection() -> None:
     # The slot was released, so the next caller gets in.
     async with bulkhead.acquire(timeout=1.0):
         pass
+
+
+async def _settle() -> None:
+    """Let every ready task run until it next blocks."""
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_bulkhead_cancel_after_permit_before_body_releases_slot() -> None:
+    """A task cancelled right after it got the semaphore permit (while the
+    stats lock is held elsewhere) must give the permit and its queue
+    reservation back. Otherwise the bulkhead stays full forever."""
+    bulkhead = Bulkhead("cancel-after-permit", max_concurrent=1, max_queue=0)
+    permit_taken = asyncio.Event()
+    real_acquire = bulkhead._semaphore.acquire
+
+    async def acquire_and_signal() -> bool:
+        result = await real_acquire()
+        permit_taken.set()
+        return result
+
+    bulkhead._semaphore.acquire = acquire_and_signal  # type: ignore[method-assign]
+
+    async def guarded() -> None:
+        async with bulkhead.acquire(timeout=1.0):
+            await asyncio.Event().wait()
+
+    # Hold the stats lock so the task blocks right after taking the permit.
+    await bulkhead._lock.acquire()
+    task = asyncio.create_task(guarded())
+    bulkhead._lock.release()
+    await permit_taken.wait()
+    await bulkhead._lock.acquire()
+    await _settle()
+
+    task.cancel()
+    bulkhead._lock.release()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    bulkhead._semaphore.acquire = real_acquire  # type: ignore[method-assign]
+    stats = bulkhead.get_stats()
+    assert stats.current_concurrent == 0
+    assert stats.queue_size == 0
+    async with bulkhead.acquire(timeout=0.5):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_bulkhead_cancel_during_release_keeps_capacity() -> None:
+    """Cancelling a task while it releases its slot (stats lock held
+    elsewhere) must still decrement the running count, or the slot is lost."""
+    bulkhead = Bulkhead("cancel-during-release", max_concurrent=1, max_queue=0)
+    body_done = asyncio.Event()
+
+    async def guarded() -> None:
+        async with bulkhead.acquire(timeout=1.0):
+            await bulkhead._lock.acquire()
+            body_done.set()
+
+    task = asyncio.create_task(guarded())
+    await body_done.wait()
+    await _settle()
+
+    task.cancel()
+    bulkhead._lock.release()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    stats = bulkhead.get_stats()
+    assert stats.current_concurrent == 0
+    assert stats.queue_size == 0
+    async with bulkhead.acquire(timeout=0.5):
+        pass
