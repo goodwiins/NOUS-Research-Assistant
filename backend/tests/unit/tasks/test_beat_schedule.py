@@ -36,6 +36,7 @@ _EXPECTED_KEYS = {
     "reconcile-lost-processing-jobs",  # celery_app (reconcile_jobs, Task 1.4)
     "drain-deposits",  # celery_app (deposit_tasks, GOO-318)
     "search-updates-tick",  # celery_app (search_update_tasks, GOO-319)
+    "bedrock-kb-sync-tick",  # bedrock_sync_tasks
 }
 
 
@@ -43,6 +44,7 @@ def test_all_task_modules_beat_schedules_coexist():
     # Import order intentionally matches celery_app.include; with the old
     # full-assignment the last import wins and only its keys remain.
     import src.tasks.agent_run_tasks  # noqa: F401
+    import src.tasks.bedrock_sync_tasks  # noqa: F401
     import src.tasks.document_processing_tasks  # noqa: F401
     import src.tasks.evaluation_tasks  # noqa: F401
     import src.tasks.processing_tasks  # noqa: F401
@@ -58,6 +60,7 @@ def test_all_task_modules_beat_schedules_coexist():
 
 def test_scheduled_tasks_resolve_to_registered_tasks():
     import src.tasks.agent_run_tasks  # noqa: F401
+    import src.tasks.bedrock_sync_tasks  # noqa: F401
     import src.tasks.deposit_tasks  # noqa: F401
     import src.tasks.document_processing_tasks  # noqa: F401
     import src.tasks.evaluation_tasks  # noqa: F401

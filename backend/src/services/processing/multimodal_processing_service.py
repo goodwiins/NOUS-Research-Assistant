@@ -1154,6 +1154,18 @@ class MultimodalProcessingService:
 
             start_time = time.time()
 
+            from src.services.bedrock_sync import (
+                bedrock_sync_enabled,
+                stage_document_sync,
+            )
+
+            if bedrock_sync_enabled():
+                # Staged only; the Bedrock queue tick marks it indexed later.
+                outcome = stage_document_sync(self.db, document)
+                self.db.commit()
+                results["bedrock_kb_stage"] = outcome.value
+                return results
+
             # Phase 5: DO KB owns retrieval. Push the document directly.
             ds_uuid: Optional[str] = None
             if getattr(settings, "DO_KB_ENABLED", False):

@@ -38,6 +38,7 @@ from src.models.document import Document, DocumentType, ProcessingStatus
 from src.models.organization import Organization
 from src.models.processing import JobPriority, JobStatus, JobType, ProcessingJob
 from src.models.user import User, UserRole
+from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
 from src.shared.enums import SatelliteSyncStatus
 
 logger = logging.getLogger(__name__)
@@ -1311,6 +1312,10 @@ class FileService:
                 }
                 if cascade:
                     document.neo4j_index_status = SatelliteSyncStatus.PENDING.value
+                # Bedrock KB: queue vector removal in this same transaction (no
+                # remote call, so a KB outage cannot block the delete); the
+                # queue tick deletes the S3 objects, then runs an ingestion job.
+                mark_bedrock_deleted(document)
                 document.soft_delete()
             await self.db.execute(
                 Organization.storage_usage_update(

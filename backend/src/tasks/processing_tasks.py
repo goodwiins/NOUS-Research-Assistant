@@ -26,6 +26,7 @@ from src.models.graph import EntityType as GraphEntityType
 from src.models.graph import ExtractionMethod as GraphExtractionMethod
 from src.models.graph import RelationshipType as GraphRelationshipType
 from src.models.processing import JobStatus, JobType, ProcessingJob
+from src.services.bedrock_sync import bedrock_sync_enabled, stage_document_sync
 from src.services.documents.satellite_state import begin_write, finish_write
 from src.services.knowledge_graph.knowledge_graph_service import (
     GraphExtractor,
@@ -608,7 +609,11 @@ def process_document_ingestion(self, job_id: str):
         job.update_progress("Generating embeddings", 75)
         commit_if_active()
 
-        if document.content_text:
+        if document.content_text and bedrock_sync_enabled():
+            # Bedrock: stage only. The queue tick marks completed once an
+            # ingestion job covering the file finishes (never here).
+            stage_document_sync(db, document)
+        elif document.content_text:
             if settings.DO_KB_ENABLED:
                 # Visible in-flight marker; overwritten by the outcome below.
                 document.do_kb_sync_status = SatelliteSyncStatus.PENDING.value
@@ -947,6 +952,15 @@ def generate_embeddings(self, job_id: str):
         # Start job
         job.start_job(worker_id=self.request.id)
         db.commit()
+
+        if bedrock_sync_enabled():
+            # Staged, not indexed: the Bedrock queue tick owns completion.
+            outcome = stage_document_sync(db, document)
+            db.commit()
+            result = {"status": outcome.value, "backend": "bedrock_kb"}
+            job.complete_job(result=result)
+            db.commit()
+            return result
 
         # Push the document to DO KB (retrieval backend; replaces dead Qdrant).
         if settings.DO_KB_ENABLED:

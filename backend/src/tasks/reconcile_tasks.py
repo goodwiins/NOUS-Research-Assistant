@@ -43,6 +43,7 @@ from sqlalchemy.orm import object_session
 
 from src.core.database import SessionLocal
 from src.models.document import Document, ProcessingStatus
+from src.services.bedrock_sync import bedrock_sync_enabled
 from src.services.documents.satellite_state import (
     PENDING_WRITES,
     begin_write,
@@ -366,7 +367,9 @@ def reconcile_satellite_indexes() -> dict:
     apply_mode = bool(settings_local.RECONCILER_APPLY)
     cap = max(1, int(settings_local.RECONCILER_MAX_DOCS_PER_RUN))
     page_size = max(1, int(settings_local.RECONCILER_BATCH_SIZE))
-    do_kb_enabled = bool(settings_local.DO_KB_ENABLED)
+    # With Bedrock sync on, do_kb_sync_status belongs to its queue tick
+    # (src.tasks.bedrock_sync_tasks); re-driving it here via DO KB would fight it.
+    do_kb_enabled = bool(settings_local.DO_KB_ENABLED) and not bedrock_sync_enabled()
 
     summary: dict = {
         "mode": "apply" if apply_mode else "report-only",

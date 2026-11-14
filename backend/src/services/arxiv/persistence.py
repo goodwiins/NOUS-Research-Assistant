@@ -226,8 +226,13 @@ def _managed_storage_fields(document: Document) -> Optional[dict[str, Any]]:
 
 
 def _needs_kb_sync(document: Document) -> bool:
+    from src.services.bedrock_sync import bedrock_sync_enabled, is_indexed
     from src.shared.enums import SatelliteSyncStatus
 
+    if bedrock_sync_enabled():
+        # Bedrock records no data-source uuid; anything not settled by a
+        # Bedrock job (pending, failed, or a DigitalOcean-era status) restages.
+        return not is_indexed(document.do_kb_sync_status, document.document_metadata)
     return (
         not document.do_kb_data_source_uuid
         or document.do_kb_sync_status != SatelliteSyncStatus.COMPLETED.value
@@ -665,8 +670,30 @@ async def persist_arxiv_documents(
 
     kb_sync_failed = False
     from src.core.config import settings
+    from src.services.bedrock_sync import (
+        StageOutcome,
+        bedrock_sync_enabled,
+        stage_document,
+    )
 
-    if settings.DO_KB_ENABLED and kb_document_ids:
+    if bedrock_sync_enabled() and kb_document_ids:
+        # Stage only: rows stay pending until the Bedrock queue tick sees an
+        # ingestion job that covered their files finish.
+        try:
+            async with AsyncSessionLocal() as kb_db:
+                stmt = select(Document).where(
+                    Document.id.in_(kb_document_ids),
+                    Document.organization_id == organization_id,
+                    Document.is_deleted.is_(False),
+                )
+                for document in (await kb_db.execute(stmt)).scalars().all():
+                    outcome = await stage_document(kb_db, document)
+                    kb_sync_failed |= outcome is StageOutcome.FAILED
+                    await kb_db.commit()
+        except Exception as exc:  # noqa: BLE001 - PostgreSQL remains authoritative
+            kb_sync_failed = True
+            logger.warning("bedrock_kb staging skipped for arxiv ingest: %s", exc)
+    elif settings.DO_KB_ENABLED and kb_document_ids:
         from src.services.do_kb import sync_documents_to_kb
         from src.shared.enums import SatelliteSyncStatus
 

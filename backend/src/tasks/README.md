@@ -12,6 +12,7 @@ Background work for the backend. The single Celery app is `celery_app` in `celer
 | `artifact_tasks.py`, `integration_action_tasks.py`, `deposit_tasks.py`, `search_update_tasks.py` | Beat tasks: artifact version announcements, approved integration actions, Zenodo sandbox deposits, scheduled search updates (no-op unless `SEARCH_UPDATES_ENABLED`). |
 | `research_tasks.py`, `research_run_tasks.py` | Research workflow execution and the sweeper for runs stuck in RUNNING. |
 | `reconcile_jobs.py`, `reconcile_tasks.py` | Lost-job reconciler and scheduled satellite-index reconciler. |
+| `bedrock_sync_tasks.py` | Per-minute Bedrock KB ingestion queue tick under one advisory lock (no-op unless `BEDROCK_KB_ID` and `BEDROCK_KB_DATA_SOURCE_ID` are set). |
 | `retention_tasks.py` | Data retention beat tasks, including the soft-deleted thread purge. |
 | `summarize_thread_task.py`, `evaluation_tasks.py` | Thread summarization and evaluation metrics. |
 | `analytics_processor.py`, `data_aggregator.py`, `recommendation_generator.py` | Analytics job processing and aggregation. |
