@@ -29,6 +29,8 @@ runs:
         CODECOV_TOKEN: ${{ inputs.token }}
         RESULT_FILE: ${{ inputs.file }}
         RESULT_FLAG: ${{ inputs.flags }}
+        CODECOV_CLI_VERSION: 11.3.2
+        CODECOV_CLI_SHA256: 8e1bfb71661378530f6ea21e82b414095899e565cbb4cf555c613064be17b973
       run: |
         if [ -z "${CODECOV_TOKEN:-}" ]; then
           echo "CODECOV_TOKEN not set — skipping test-results upload"
@@ -39,9 +41,16 @@ runs:
           exit 0
         fi
         # Saved as codecovcli (not codecov) so it can't clobber the legacy
-        # uploader if both ever run in the same job.
-        if ! curl -s -o codecovcli https://cli.codecov.io/latest/linux/codecov; then
+        # uploader if both ever run in the same job. Pinned release with a
+        # verified sha256 (from the published codecov.SHA256SUM for that
+        # version), never the mutable `latest`.
+        if ! curl -fsSLo codecovcli "https://cli.codecov.io/v${CODECOV_CLI_VERSION}/linux/codecov"; then
           echo "Codecov CLI download failed — skipping"
+          exit 0
+        fi
+        if ! echo "${CODECOV_CLI_SHA256}  codecovcli" | sha256sum -c -; then
+          echo "::warning::Codecov CLI checksum mismatch — not executing, skipping test-results upload"
+          rm -f codecovcli
           exit 0
         fi
         chmod +x codecovcli
