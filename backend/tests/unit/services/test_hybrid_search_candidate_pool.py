@@ -159,3 +159,35 @@ def test_has_more_is_true_when_the_first_page_fills_the_old_pool(
     assert not {r.document_id for r in first.results} & {
         r.document_id for r in second.results
     }
+
+
+def test_has_more_ends_at_the_window_not_the_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With more matches than the window, paging stops at the window's end."""
+    corpus = [_doc(rank) for rank in range(70)]
+
+    def _fulltext(search_request: SearchQuery, **_kwargs: Any) -> SimpleNamespace:
+        page = corpus[
+            search_request.offset : search_request.offset + search_request.limit
+        ]
+        return SimpleNamespace(
+            results=[d.model_copy(deep=True) for d in page],
+            total_results=len(corpus),
+        )
+
+    monkeypatch.setattr(hybrid_module.fulltext_search_service, "search", _fulltext)
+    monkeypatch.setattr(
+        type(hybrid_module.cohere_rerank_service),
+        "is_enabled",
+        property(lambda _self: False),
+    )
+    svc = hybrid_module.HybridSearchService(db=None)
+
+    last = _page(svc, 40, 10)  # window for limit 10 is 50 candidates
+    past = _page(svc, 50, 10)
+
+    assert len(last.results) == 10
+    assert last.has_more is False
+    assert last.total_results == 50
+    assert past.results == [] and past.has_more is False
