@@ -111,7 +111,7 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
           loadingKey: 'isLoadingConversations',
         });
         if (result.shouldProceed) {
-          result.triggerReinit();
+          await result.triggerReinit();
         }
         return;
       }
@@ -164,6 +164,18 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
       console.error('[ChatStore] Error creating conversation:', error);
 
       // Handle 404 - workspace not found (stale data)
+      if (
+        getErrorStatus(error) === 404 &&
+        get().currentWorkspaceId !== data.workspace_id
+      ) {
+        // A 404 for a workspace the user already left must not nuke the
+        // (valid) current selection.
+        console.warn(
+          '[ChatStore] Ignoring 404 for superseded workspace while creating conversation:',
+          data.workspace_id
+        );
+        return null;
+      }
       if (getErrorStatus(error) === 404) {
         console.warn(
           '[ChatStore] Workspace not found (404) while creating conversation - clearing stale data'
@@ -172,7 +184,14 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
           clearWorkspaces: true,
         });
         if (result.shouldProceed) {
-          result.triggerReinit();
+          await result.triggerReinit();
+        }
+        // Recovery clears `error`; leave a stable message so the failed send
+        // is visible (no raw exception text).
+        if (isCurrentSession()) {
+          set((state) => {
+            state.error = state.error ?? 'Failed to create conversation';
+          });
         }
         return null;
       }

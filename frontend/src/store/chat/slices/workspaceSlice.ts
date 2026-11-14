@@ -24,7 +24,8 @@ export interface WorkspaceSlice {
 
 // Helper type for the recovery handler
 type RecoveryResult =
-  { shouldProceed: false } | { shouldProceed: true; triggerReinit: () => void };
+  | { shouldProceed: false }
+  | { shouldProceed: true; triggerReinit: () => Promise<void> };
 
 /**
  * Helper to handle stale data recovery (404 errors) atomically.
@@ -66,6 +67,14 @@ export function handleStaleDataRecovery(
       if (loadingKey) {
         state[loadingKey] = false;
       }
+      if (state.isReinitializing) {
+        // A workspace 404 while re-initializing means the recovery itself
+        // failed: drop the selection so triggerReinit can retry (bounded by
+        // MAX_REINIT_RETRIES) instead of leaving a half-selected workspace.
+        state.currentWorkspaceId = null;
+        state.currentConversationId = null;
+        state.currentThreadId = null;
+      }
       if (maxRetriesReached) {
         state.error = 'Failed to initialize workspace after multiple attempts';
       }
@@ -92,28 +101,40 @@ export function handleStaleDataRecovery(
     return { shouldProceed: false };
   }
 
-  // Return a trigger function that the caller can use to start reinitialization
+  // Return a trigger the caller awaits so the originating action settles
+  // only once recovery has reached a defined end state.
   return {
     shouldProceed: true,
-    triggerReinit: () => {
+    triggerReinit: async () => {
       if (!isCurrentSession()) return;
-      // Use Promise-based approach instead of fire-and-forget setTimeout
-      (async () => {
-        try {
-          await get().initializeDefaultWorkspace();
-        } catch (err) {
-          console.error(
-            `[ChatStore] Reinitialization failed for ${context}:`,
-            err
-          );
-        } finally {
-          if (isCurrentSession()) {
-            set((state) => {
-              state.isReinitializing = false;
-            });
-          }
+      try {
+        await get().initializeDefaultWorkspace();
+      } catch (err) {
+        console.error(
+          `[ChatStore] Reinitialization failed for ${context}:`,
+          err
+        );
+      } finally {
+        if (isCurrentSession()) {
+          set((state) => {
+            state.isReinitializing = false;
+          });
         }
-      })();
+      }
+      if (!isCurrentSession()) return;
+      const after = get();
+      if (after.currentWorkspaceId && !after.error) {
+        // Recovery verifiably worked. Only here (never from inside the
+        // recovery-triggered init) is the retry counter reset.
+        set((state) => {
+          state.reinitRetryCount = 0;
+        });
+      } else if (!after.currentWorkspaceId && !after.error) {
+        // Workspace 404'd again during re-init: retry until the cap trips and
+        // sets the visible error.
+        const retry = handleStaleDataRecovery(get, set, context, options);
+        if (retry.shouldProceed) await retry.triggerReinit();
+      }
     },
   };
 }

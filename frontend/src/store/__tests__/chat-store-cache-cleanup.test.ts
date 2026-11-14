@@ -51,6 +51,7 @@ import { workspaceService } from '@/services/workspaceService';
 import { APIErrorClass } from '@/types/api';
 import { useChatStore } from '@/store/chat-store';
 import { newestPageRequests } from '@/store/chat/requestCoordinator';
+import { MAX_REINIT_RETRIES } from '@/store/chat/initialState';
 import {
   ChatMessage,
   Conversation,
@@ -157,7 +158,11 @@ describe('deleteConversation cascade cleanup', () => {
       threadToConversation: { t1: 'conv-a', t2: 'conv-a', t3: 'conv-b' },
       messages: { t1: [m1], t2: [m2], t3: [m3] },
       messageToThread: { m1: 't1', m2: 't2', m3: 't3' },
-      messagePagination: { t1: pagination(), t2: pagination(), t3: pagination() },
+      messagePagination: {
+        t1: pagination(),
+        t2: pagination(),
+        t3: pagination(),
+      },
       messageFreshness: { t1: 'fresh', t2: 'fresh', t3: 'fresh' },
     });
     const inFlight = new AbortController();
@@ -486,9 +491,9 @@ describe('loadThreads stale-404 recovery guard', () => {
     });
 
     // Old behavior: last-writer-wins, the stale response clobbered the list
-    expect(
-      useChatStore.getState().threads['conv-a'].map((t) => t.id)
-    ).toEqual(['t-new']);
+    expect(useChatStore.getState().threads['conv-a'].map((t) => t.id)).toEqual([
+      't-new',
+    ]);
   });
 
   it('ignores a superseded 404 even when the conversation is still current', async () => {
@@ -528,44 +533,72 @@ describe('loadThreads stale-404 recovery guard', () => {
     expect(workspaceService.getOrCreateDefaultWorkspace).not.toHaveBeenCalled();
   });
 
-  it('still runs stale-data recovery when the 404 is for the CURRENT conversation', async () => {
+  it('recovers only the conversation when the CURRENT conversation 404s', async () => {
     useChatStore.setState({
-      currentWorkspaceId: 'ws-1',
+      currentWorkspaceId: 'ws-b',
       currentConversationId: 'conv-a',
+      workspaces: [makeWorkspace('ws-a'), makeWorkspace('ws-b')],
+      conversations: {
+        'ws-b': [
+          makeConversation('conv-a', 'ws-b'),
+          makeConversation('conv-x', 'ws-b'),
+        ],
+      },
+      conversationToWorkspace: { 'conv-a': 'ws-b', 'conv-x': 'ws-b' },
     });
     (
       workspaceService.listThreads as ReturnType<typeof vi.fn>
     ).mockRejectedValue(notFound());
     (
-      workspaceService.getOrCreateDefaultWorkspace as ReturnType<typeof vi.fn>
-    ).mockResolvedValue({ id: 'ws-1', name: 'W' });
-    (
       workspaceService.listConversations as ReturnType<typeof vi.fn>
     ).mockResolvedValue({
-      conversations: [],
-      total: 0,
+      conversations: [makeConversation('conv-x', 'ws-b')],
+      total: 1,
       page: 1,
       limit: 50,
       has_more: false,
     });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await act(async () => {
       await useChatStore.getState().loadThreads('conv-a');
     });
+    err.mockRestore();
 
-    expect(useChatStore.getState().currentConversationId).toBeNull();
-    await waitFor(() => {
-      expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalled();
-    });
+    const state = useChatStore.getState();
+    // The user stays in the workspace they were in, with the sidebar intact
+    expect(state.currentWorkspaceId).toBe('ws-b');
+    expect(state.workspaces.map((w) => w.id)).toEqual(['ws-a', 'ws-b']);
+    expect(state.currentConversationId).toBeNull();
+    expect(state.currentThreadId).toBeNull();
+    expect(state.conversations['ws-b'].map((c) => c.id)).toEqual(['conv-x']);
+    expect(state.isLoadingThreads).toBe(false);
+    expect(state.isReinitializing).toBe(false);
+    expect(state.error).toBeNull();
+    expect(workspaceService.getOrCreateDefaultWorkspace).not.toHaveBeenCalled();
+    expect(workspaceService.listConversations).toHaveBeenCalledWith('ws-b');
   });
 });
 
-describe('stale-404 recovery from a real APIErrorClass', () => {
+describe('workspace-level stale-404 recovery end state', () => {
+  const page = (conversations: Conversation[] = []) => ({
+    conversations,
+    total: conversations.length,
+    page: 1,
+    limit: 50,
+    has_more: false,
+  });
+  const mocked = (fn: unknown): ReturnType<typeof vi.fn> =>
+    fn as ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     act(() => {
       useChatStore.getState().reset();
     });
     vi.clearAllMocks();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   it('loadConversations recovers when the CURRENT workspace 404s', async () => {
@@ -573,52 +606,66 @@ describe('stale-404 recovery from a real APIErrorClass', () => {
       currentWorkspaceId: 'ws-1',
       workspaces: [makeWorkspace('ws-1')],
     });
-    (
-      workspaceService.listConversations as ReturnType<typeof vi.fn>
-    ).mockRejectedValueOnce(notFound());
-    (
-      workspaceService.getOrCreateDefaultWorkspace as ReturnType<typeof vi.fn>
-    ).mockResolvedValue({ id: 'ws-1', name: 'W' });
-    (
-      workspaceService.listConversations as ReturnType<typeof vi.fn>
-    ).mockResolvedValue({
-      conversations: [],
-      total: 0,
-      page: 1,
-      limit: 50,
-      has_more: false,
-    });
-    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mocked(workspaceService.listConversations)
+      .mockRejectedValueOnce(notFound())
+      .mockResolvedValue(page());
+    mocked(workspaceService.getOrCreateDefaultWorkspace).mockResolvedValue(
+      makeWorkspace('ws-2')
+    );
 
     await act(async () => {
       await useChatStore.getState().loadConversations('ws-1');
     });
-    err.mockRestore();
 
-    await waitFor(() => {
-      expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalled();
-    });
+    const state = useChatStore.getState();
+    expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalledTimes(
+      1
+    );
+    expect(state.currentWorkspaceId).toBe('ws-2');
+    expect(state.isReinitializing).toBe(false);
+    expect(state.isLoadingConversations).toBe(false);
+    expect(state.error).toBeNull();
+    expect(state.reinitRetryCount).toBe(0);
   });
 
-  it('createConversation recovers when the workspace 404s', async () => {
-    (
-      workspaceService.createConversation as ReturnType<typeof vi.fn>
-    ).mockRejectedValue(notFound());
-    (
-      workspaceService.getOrCreateDefaultWorkspace as ReturnType<typeof vi.fn>
-    ).mockResolvedValue({ id: 'ws-1', name: 'W' });
-    (
-      workspaceService.listConversations as ReturnType<typeof vi.fn>
-    ).mockResolvedValue({
-      conversations: [],
-      total: 0,
-      page: 1,
-      limit: 50,
-      has_more: false,
+  it('createConversation 404 for a workspace the user already left changes nothing', async () => {
+    useChatStore.setState({
+      currentWorkspaceId: 'ws-b',
+      currentConversationId: 'conv-b',
+      currentThreadId: 't-b',
+      workspaces: [makeWorkspace('ws-a'), makeWorkspace('ws-b')],
     });
-    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mocked(workspaceService.createConversation).mockRejectedValue(notFound());
+
+    let result: unknown;
+    await act(async () => {
+      result = await useChatStore
+        .getState()
+        .createConversation({ workspace_id: 'ws-a', title: 'T' });
+    });
+
+    const state = useChatStore.getState();
+    expect(result).toBeNull();
+    expect(state.currentWorkspaceId).toBe('ws-b');
+    expect(state.currentConversationId).toBe('conv-b');
+    expect(state.currentThreadId).toBe('t-b');
+    expect(state.workspaces).toHaveLength(2);
+    expect(state.isReinitializing).toBe(false);
+    expect(state.reinitRetryCount).toBe(0);
+    expect(state.error).toBeNull();
+    expect(workspaceService.getOrCreateDefaultWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('createConversation 404 for the CURRENT workspace recovers and leaves a visible, stable error', async () => {
+    useChatStore.setState({
+      currentWorkspaceId: 'ws-1',
+      workspaces: [makeWorkspace('ws-1')],
+    });
+    mocked(workspaceService.createConversation).mockRejectedValue(notFound());
+    mocked(workspaceService.getOrCreateDefaultWorkspace).mockResolvedValue(
+      makeWorkspace('ws-2')
+    );
+    mocked(workspaceService.listConversations).mockResolvedValue(page());
 
     let result: unknown;
     await act(async () => {
@@ -626,11 +673,55 @@ describe('stale-404 recovery from a real APIErrorClass', () => {
         .getState()
         .createConversation({ workspace_id: 'ws-1', title: 'T' });
     });
-    err.mockRestore();
 
+    const state = useChatStore.getState();
     expect(result).toBeNull();
-    await waitFor(() => {
-      expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalled();
+    expect(state.currentWorkspaceId).toBe('ws-2');
+    expect(state.isReinitializing).toBe(false);
+    // The failed send must be visible, without raw exception text
+    expect(state.error).toBe('Failed to create conversation');
+  });
+
+  it('first-load 404 that keeps failing stops at the retry cap with a visible error', async () => {
+    mocked(workspaceService.getOrCreateDefaultWorkspace).mockResolvedValue(
+      makeWorkspace('ws-1')
+    );
+    mocked(workspaceService.listConversations).mockRejectedValue(notFound());
+
+    await act(async () => {
+      await useChatStore.getState().initializeDefaultWorkspace();
     });
+
+    const state = useChatStore.getState();
+    expect(state.reinitRetryCount).toBe(MAX_REINIT_RETRIES);
+    expect(state.isReinitializing).toBe(false);
+    expect(state.isLoadingConversations).toBe(false);
+    expect(state.currentWorkspaceId).toBeNull();
+    expect(state.error).toBe(
+      'Failed to initialize workspace after multiple attempts'
+    );
+    // 1 initial + MAX_REINIT_RETRIES recoveries, no unbounded loop
+    expect(workspaceService.getOrCreateDefaultWorkspace).toHaveBeenCalledTimes(
+      MAX_REINIT_RETRIES + 1
+    );
+  });
+
+  it('first-load 404 that clears on retry ends with a workspace selected and the counter reset', async () => {
+    mocked(workspaceService.getOrCreateDefaultWorkspace).mockResolvedValue(
+      makeWorkspace('ws-1')
+    );
+    mocked(workspaceService.listConversations)
+      .mockRejectedValueOnce(notFound())
+      .mockResolvedValue(page());
+
+    await act(async () => {
+      await useChatStore.getState().initializeDefaultWorkspace();
+    });
+
+    const state = useChatStore.getState();
+    expect(state.currentWorkspaceId).toBe('ws-1');
+    expect(state.isReinitializing).toBe(false);
+    expect(state.error).toBeNull();
+    expect(state.reinitRetryCount).toBe(0);
   });
 });

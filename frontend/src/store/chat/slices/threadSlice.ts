@@ -23,7 +23,6 @@ import {
   abortNewestPageRequest,
   markThreadDeleted,
 } from '../requestCoordinator';
-import { handleStaleDataRecovery } from './workspaceSlice';
 
 export interface ThreadSlice {
   loadThreads: (conversationId: string) => Promise<void>;
@@ -108,15 +107,26 @@ export const createThreadSlice: ChatSliceCreator<ThreadSlice> = (set, get) => ({
           return;
         }
         console.warn(
-          '[ChatStore] Conversation not found (404) - clearing stale data'
+          '[ChatStore] Conversation not found (404) - dropping it and reloading the workspace conversations'
         );
-        // Clear workspaces for consistency with loadConversations since we're triggering full reinit
-        const result = handleStaleDataRecovery(get, set, 'loadThreads', {
-          clearWorkspaces: true,
-          loadingKey: 'isLoadingThreads',
+        // Recover only the conversation (it may be deleted elsewhere, or
+        // access-denied which the backend also reports as 404). Keep the
+        // workspace selection and list; a workspace-level 404 is handled by
+        // loadConversations.
+        const workspaceId = get().currentWorkspaceId;
+        set((state) => {
+          removeItemFromRecord(
+            state.conversations,
+            conversationId,
+            state.conversationToWorkspace
+          );
+          delete state.threads[conversationId];
+          state.currentConversationId = null;
+          state.currentThreadId = null;
+          state.isLoadingThreads = false;
         });
-        if (result.shouldProceed) {
-          result.triggerReinit();
+        if (workspaceId) {
+          await get().loadConversations(workspaceId);
         }
         return;
       }
