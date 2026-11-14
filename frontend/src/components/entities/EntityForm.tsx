@@ -407,6 +407,7 @@ export const EntityForm: React.FC<EntityFormProps> = ({
                 <Button
                   type="button"
                   variant="outline"
+                  aria-label="Add alias"
                   onClick={(e) => {
                     const input = e.currentTarget.parentElement?.querySelector('input');
                     if (input) {

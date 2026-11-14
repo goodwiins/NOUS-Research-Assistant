@@ -9,9 +9,9 @@ import { entityService } from '@/services/entityService';
 import type { Entity, GraphEdge } from '@/types/entity';
 
 class MockResizeObserver {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
 }
 (global as typeof global & { ResizeObserver?: typeof MockResizeObserver }).ResizeObserver =
   MockResizeObserver;
@@ -64,6 +64,7 @@ describe('entity icon-only button names', () => {
     expect(
       screen.getByRole('button', { name: 'Remove metadata field born' })
     ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add alias' })).toBeInTheDocument();
   });
 
   it('RelationshipForm names clear-target and remove-evidence buttons', async () => {
@@ -85,6 +86,9 @@ describe('entity icon-only button names', () => {
 
     expect(
       screen.getByRole('button', { name: 'Remove evidence 1' })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Add evidence' })
     ).toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText(/search/i), {

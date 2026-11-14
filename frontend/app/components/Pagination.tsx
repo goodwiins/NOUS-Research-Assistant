@@ -72,7 +72,6 @@ export function Pagination({
           disabled={currentPage === 1}
           className="p-2 rounded-lg border border-(--nous-border-1) hover:bg-(--nous-bg-2) disabled:opacity-30 disabled:hover:bg-transparent transition-all"
           title="First Page"
-          aria-label="First Page"
         >
           <ChevronsLeft className="w-4 h-4 text-(--nous-fg-1)" />
         </button>
@@ -82,7 +81,6 @@ export function Pagination({
           disabled={currentPage === 1}
           className="p-2 rounded-lg border border-(--nous-border-1) hover:bg-(--nous-bg-2) disabled:opacity-30 disabled:hover:bg-transparent transition-all"
           title="Previous Page"
-          aria-label="Previous Page"
         >
           <ChevronLeft className="w-4 h-4 text-(--nous-fg-1)" />
         </button>
@@ -113,7 +111,6 @@ export function Pagination({
           disabled={currentPage === totalPages}
           className="p-2 rounded-lg border border-(--nous-border-1) hover:bg-(--nous-bg-2) disabled:opacity-30 disabled:hover:bg-transparent transition-all"
           title="Next Page"
-          aria-label="Next Page"
         >
           <ChevronRight className="w-4 h-4 text-(--nous-fg-1)" />
         </button>
@@ -123,7 +120,6 @@ export function Pagination({
           disabled={currentPage === totalPages}
           className="p-2 rounded-lg border border-(--nous-border-1) hover:bg-(--nous-bg-2) disabled:opacity-30 disabled:hover:bg-transparent transition-all"
           title="Last Page"
-          aria-label="Last Page"
         >
           <ChevronsRight className="w-4 h-4 text-(--nous-fg-1)" />
         </button>

@@ -17,8 +17,8 @@
     "src/utils/analytics/**/*"
   ],
   "eslint": {
-    "errors": 88,
-    "warnings": 1808,
+    "errors": 83,
+    "warnings": 1786,
     "byFile": {
       "app/(auth)/layout.tsx": {
         "errors": 0,
@@ -761,7 +761,7 @@
         "warnings": 5
       },
       "src/components/entities/EntityForm.tsx": {
-        "errors": 1,
+        "errors": 0,
         "warnings": 14
       },
       "src/components/entities/EntityGraph.tsx": {
@@ -773,7 +773,7 @@
         "warnings": 3
       },
       "src/components/entities/EntityMergeTool.tsx": {
-        "errors": 1,
+        "errors": 0,
         "warnings": 9
       },
       "src/components/entities/EntitySearch.tsx": {
@@ -801,7 +801,7 @@
         "warnings": 2
       },
       "src/components/entities/RelationshipForm.tsx": {
-        "errors": 1,
+        "errors": 0,
         "warnings": 9
       },
       "src/components/evidence/__tests__/EvidenceBreakdown.test.tsx": {

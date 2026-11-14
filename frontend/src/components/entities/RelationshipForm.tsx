@@ -327,6 +327,7 @@ export const RelationshipForm: React.FC<RelationshipFormProps> = ({
             <Button 
               type="button" 
               onClick={addEvidence}
+              aria-label="Add evidence"
               variant="outline"
               className="border-(--nous-border-1) bg-(--nous-bg-3) text-(--nous-fg-1) hover:text-(--nous-sol) hover:border-(--nous-sol)"
             >
