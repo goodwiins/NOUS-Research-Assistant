@@ -781,6 +781,28 @@ describe('workspace-level stale-404 recovery end state', () => {
     );
   });
 
+  it('writes nothing into the new session after a backoff that outlived the old one', async () => {
+    mocked(workspaceService.getOrCreateDefaultWorkspace).mockResolvedValue(
+      makeWorkspace('ws-1')
+    );
+    mocked(workspaceService.listConversations).mockRejectedValue(notFound());
+    let ended = false;
+    reinitBackoff.sleep = vi.fn().mockImplementation(async () => {
+      if (ended) return;
+      ended = true;
+      useChatStore.getState().reset(); // account switch mid-backoff
+    });
+
+    await act(async () => {
+      await useChatStore.getState().initializeDefaultWorkspace();
+    });
+
+    // The fresh session starts clean: no inherited retry count or error.
+    const state = useChatStore.getState();
+    expect(state.reinitRetryCount).toBe(0);
+    expect(state.error).toBeNull();
+  });
+
   it('terminates within the local attempt bound even if the shared counter never trips', async () => {
     mocked(workspaceService.getOrCreateDefaultWorkspace).mockResolvedValue(
       makeWorkspace('ws-1')

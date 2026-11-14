@@ -120,6 +120,7 @@ export function handleStaleDataRecovery(
         for (let attempt = 0; attempt < MAX_REINIT_RETRIES; attempt++) {
           if (attempt > 0) {
             await reinitBackoff.sleep(reinitBackoff.baseMs * attempt);
+            if (!isCurrentSession()) return;
             // attempt 0 was marked by the atomic update above
             set((state) => {
               state.reinitRetryCount += 1;
@@ -148,6 +149,7 @@ export function handleStaleDataRecovery(
           // workspace that 404'd again (selection cleared, no error) retries.
           if (after.currentWorkspaceId || after.error) return;
         }
+        if (!isCurrentSession()) return;
         set((state) => {
           state.error ??=
             'Failed to initialize workspace after multiple attempts';

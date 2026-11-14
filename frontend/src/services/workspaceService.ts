@@ -628,7 +628,8 @@ export const workspaceService = {
       }
     }
 
-    if (_createdDefaultFor === (ownerUserId ?? '')) {
+    // Only a known owner is remembered; an unknown principal never matches.
+    if (ownerUserId && _createdDefaultFor === ownerUserId) {
       throw new Error(
         'Default workspace already created this session but the server lists none'
       );
@@ -643,7 +644,7 @@ export const workspaceService = {
     });
 
     cacheWorkspace(newWorkspace);
-    _createdDefaultFor = ownerUserId ?? '';
+    _createdDefaultFor = ownerUserId ?? null;
     return newWorkspace;
   },
 
