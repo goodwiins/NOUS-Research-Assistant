@@ -135,7 +135,6 @@ class HybridSearchService:
 
         # Fusion parameters
         self.min_results_per_source = 3
-        self.max_results_per_source = 20
         self.diversity_boost = 0.1
         self.recency_boost_hours = 24
 
@@ -158,16 +157,18 @@ class HybridSearchService:
     def _source_candidate_limit(self, search_request: SearchQuery) -> int:
         """Candidates each source arm fetches for this request.
 
-        Fusion and pagination run over the arms' candidates, so a fixed pool
-        smaller than ``offset + limit`` silently shortened the page (the
-        research engine asks for 50) and emptied pages past the pool.
-        ``max_results_per_source`` stays the floor for small pages; the
-        result is capped at what a source ``SearchQuery`` accepts.
+        Fusion and pagination run over the arms' candidates, so the pool must
+        cover the page (a fixed 20 shortened the research engine's 50 and
+        emptied deeper pages, GOO-460). It must also be the same for every
+        page: fusion re-sorts with boosts that ignore source rank (recency,
+        multi-source diversity) and Cohere reranks the whole pool, so a pool
+        sized to ``offset + limit`` ranked each page differently, and results
+        repeated or went missing across pages. Every request therefore fetches
+        one fixed window, the most a source ``SearchQuery`` accepts; results
+        past it are not reachable, and ``has_more`` reads false at its end.
         """
-        wanted = search_request.offset + search_request.limit
-        return min(
-            max(self.max_results_per_source, wanted), self._MAX_SOURCE_CANDIDATES
-        )
+        del search_request  # the window must not depend on the page
+        return self._MAX_SOURCE_CANDIDATES
 
     async def search_documents(
         self,

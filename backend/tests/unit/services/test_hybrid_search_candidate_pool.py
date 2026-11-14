@@ -1,36 +1,42 @@
-"""GOO-460: the hybrid candidate pool covers the requested page.
+"""GOO-460: the hybrid candidate pool covers every page, identically.
 
-Each source arm fetched a fixed 20 candidates, so a caller asking for 50
-(the research engine does) got at most 20 results, and any page past the
-20th candidate was empty. The arms now fetch ``max(20, offset + limit)``,
-capped at the ``SearchQuery.limit`` maximum the source request accepts.
+Each source arm used to fetch a fixed 20 candidates, so a caller asking for 50
+(the research engine does) got at most 20 results, and any page past the 20th
+candidate was empty. #2141 sized the pool to ``offset + limit``, which made the
+pool, and therefore the fused ranking, depend on the page being asked for:
+fusion re-sorts with boosts (recency, multi-source diversity) that ignore the
+source rank, so a deeper page could pull a candidate above ones an earlier page
+had already shown. Results then repeated or went missing across pages, and
+``has_more`` read false as soon as ``offset + limit`` reached the pool.
+
+The arms now always fetch the same, fixed window (the ``SearchQuery.limit``
+maximum a source request accepts), so every page slices one ranking.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from src.models.search_schemas import SearchQuery, SearchType
+from src.models.document import DocumentType
+from src.models.search_schemas import SearchQuery, SearchResult, SearchType
 from src.services.knowledge_graph import knowledge_graph_service as kg_module
 from src.services.search import hybrid_search_service as hybrid_module
 
 pytestmark = pytest.mark.unit
 
+_WINDOW = hybrid_module.HybridSearchService._MAX_SOURCE_CANDIDATES
+
 
 @pytest.mark.parametrize(
-    ("offset", "limit", "expected"),
-    [
-        (0, 10, 20),  # small pages keep the old floor
-        (0, 50, 50),  # research engine asks for 50
-        (20, 10, 30),  # second page past the old cap
-        (90, 50, 100),  # clamped to the SearchQuery.limit maximum
-    ],
+    ("offset", "limit"),
+    [(0, 10), (0, 50), (20, 10), (90, 10), (0, 100)],
 )
-def test_source_arms_fetch_enough_candidates_for_the_page(
-    monkeypatch: pytest.MonkeyPatch, offset: int, limit: int, expected: int
+def test_source_arms_fetch_the_same_window_for_every_page(
+    monkeypatch: pytest.MonkeyPatch, offset: int, limit: int
 ) -> None:
     seen: dict[str, int] = {}
 
@@ -55,4 +61,94 @@ def test_source_arms_fetch_enough_candidates_for_the_page(
     )
 
     assert ft.success and kg.success
-    assert seen == {"fulltext": expected, "knowledge_graph": expected}
+    assert seen == {"fulltext": _WINDOW, "knowledge_graph": _WINDOW}
+
+
+_OLD = datetime(2020, 1, 1, tzinfo=timezone.utc)
+_RECENT_RANK = 24  # 25th by full-text rank; the recency boost lifts it to 1st
+
+
+def _doc(rank: int) -> SearchResult:
+    created = (
+        datetime.now(timezone.utc) - timedelta(minutes=5)
+        if rank == _RECENT_RANK
+        else _OLD
+    )
+    return SearchResult(
+        document_id=f"doc-{rank:03d}",
+        title=f"Document {rank}",
+        document_type=DocumentType.PDF,
+        content_preview="preview",
+        relevance_score=9.9 - 0.1 * rank,  # ts_rank_cd * 10, strictly descending
+        file_size_bytes=1,
+        created_at=created,
+        updated_at=created,
+        processing_status="completed",
+        is_public=False,
+        uploaded_by_user_id="u",
+        organization_id="org-1",
+    )
+
+
+@pytest.fixture
+def ranked_corpus(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """45 full-text matches; the arm honours the requested limit like SQL does."""
+    corpus = [_doc(rank) for rank in range(45)]
+
+    def _fulltext(search_request: SearchQuery, **_kwargs: Any) -> SimpleNamespace:
+        page = corpus[
+            search_request.offset : search_request.offset + search_request.limit
+        ]
+        return SimpleNamespace(
+            results=[d.model_copy(deep=True) for d in page],
+            total_results=len(corpus),
+        )
+
+    monkeypatch.setattr(hybrid_module.fulltext_search_service, "search", _fulltext)
+    monkeypatch.setattr(
+        type(hybrid_module.cohere_rerank_service),
+        "is_enabled",
+        property(lambda _self: False),
+    )
+    return [d.document_id for d in corpus]
+
+
+def _page(svc: Any, offset: int, limit: int) -> Any:
+    # "q" has no entity indicator, so only the full-text arm runs.
+    request = SearchQuery(
+        query="q", search_type=SearchType.HYBRID, limit=limit, offset=offset
+    )
+    return svc.search(request, user_id="u", organization_id="org-1", db=None)
+
+
+def test_pages_partition_one_ranking(ranked_corpus: list[str]) -> None:
+    svc = hybrid_module.HybridSearchService(db=None)
+
+    seen: list[str] = []
+    pages = []
+    for offset in range(0, 50, 10):
+        page = _page(svc, offset, 10)
+        pages.append(page)
+        seen.extend(r.document_id for r in page.results)
+
+    assert len(seen) == len(set(seen)), "a document appeared on two pages"
+    assert sorted(seen) == sorted(ranked_corpus), "a document appeared on no page"
+    # The boosted document leads page 1, not some deeper page.
+    assert pages[0].results[0].document_id == f"doc-{_RECENT_RANK:03d}"
+    assert [p.has_more for p in pages] == [True, True, True, True, False]
+    assert {p.total_results for p in pages} == {45}
+
+
+def test_has_more_is_true_when_the_first_page_fills_the_old_pool(
+    ranked_corpus: list[str],
+) -> None:
+    svc = hybrid_module.HybridSearchService(db=None)
+
+    first = _page(svc, 0, 20)
+    second = _page(svc, 20, 20)
+
+    assert first.has_more is True
+    assert len(second.results) == 20
+    assert not {r.document_id for r in first.results} & {
+        r.document_id for r in second.results
+    }
