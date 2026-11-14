@@ -137,6 +137,10 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
       // Return the existing state reference so Zustand's Object.is check
       // short-circuits and no subscribers are notified for this no-op.
       if (!run) return s;
+      // A callId names one tool call for good: a replayed start for a call
+      // that already ran (stream resume replays from seq 0) must not add a
+      // second step with the same id.
+      if (callId && run.steps.some((step) => step.callId === callId)) return s;
       const existing = run.steps.find(
         (step) =>
           step.status === 'active' &&

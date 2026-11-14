@@ -1128,6 +1128,12 @@ export function useChatStreaming(
        * reconstruction must not be shown as this turn's answer — the reconcile
        * that follows brings the complete server row instead. */
       suppressCommit?: () => boolean;
+      /** Resume: true while the frame being dispatched is at or below the
+       * cursor the earlier mount already applied. Per-turn content, steps and
+       * plan still rebuild from it, but the activity store and tool side
+       * effects (query invalidation, note auto-focus) ran the first time and
+       * must not run again. */
+      isReplayedPrefix?: () => boolean;
       /** Resume: consulted once the stream ends. True means the replay never
        * reached a terminal frame and the turn must yield entirely to the
        * server rows: drop the placeholder and reconcile with no assistant
@@ -1154,6 +1160,7 @@ export function useChatStreaming(
         assistantRuntimeId,
         quietWhenEmpty,
         suppressCommit,
+        isReplayedPrefix,
         abandonTurn,
         keepRunOnFailure,
         preserveRunId,
@@ -1451,7 +1458,7 @@ export function useChatStreaming(
             onToolStart: (tool, args, callId) => {
               if (!isCurrentSession()) return;
               console.log('[Agent] Tool start:', tool, args);
-              if (currentThreadId) {
+              if (currentThreadId && !isReplayedPrefix?.()) {
                 useAgentActivityStore
                   .getState()
                   .pushToolStart(currentThreadId, tool, callId);
@@ -1480,12 +1487,13 @@ export function useChatStreaming(
               console.log('[Agent] Tool end:', tool, result, { isError });
               const remainsPending = isPendingToolResult(result, isError);
               const resultFailed = isFailedToolResult(result, isError);
-              if (currentThreadId && !remainsPending) {
+              const replayedPrefix = isReplayedPrefix?.() ?? false;
+              if (currentThreadId && !remainsPending && !replayedPrefix) {
                 useAgentActivityStore
                   .getState()
                   .pushToolEnd(currentThreadId, tool, !resultFailed, callId);
               }
-              if (!remainsPending) {
+              if (!remainsPending && !replayedPrefix) {
                 invalidateProjectDataForTool(tool, result, resultFailed);
                 maybeAutoFocusCreatedNote(
                   tool,
@@ -2727,6 +2735,17 @@ export function useChatStreaming(
     // is still loading, the resumed commit appends to a stale list; a
     // reload reconciles from the server-persisted rows.
     let replayGapSeen = false;
+    // Cursor the earlier mount had already applied; the replay below starts
+    // at 0 to rebuild this turn's content, and frames up to here are repeats
+    // for everything outside the turn (activity store, tool side effects).
+    const savedCursor = Math.max(
+      run.streamSeq ?? 0,
+      pendingSeqRef.current?.threadId === threadId
+        ? pendingSeqRef.current.seq
+        : 0
+    );
+    let replayingPrefix = false;
+    let lastProcessedSeq = 0;
     let handOffUnsettled = false;
     void runStreamTurn({
       currentThreadId: threadId,
@@ -2735,6 +2754,7 @@ export function useChatStreaming(
       assistantRuntimeId: `resume:${threadId}:${run.startedAt}`,
       quietWhenEmpty: true,
       suppressCommit: () => replayGapSeen,
+      isReplayedPrefix: () => replayingPrefix,
       abandonTurn: () => handOffUnsettled,
       keepRunOnFailure: true,
       preserveRunId: true,
@@ -2752,6 +2772,8 @@ export function useChatStreaming(
           ...streamCallbacks,
           onSeq: (seq) => {
             turnProcessedFrame = true;
+            lastProcessedSeq = seq;
+            replayingPrefix = seq <= savedCursor;
             streamCallbacks.onSeq?.(seq);
           },
           onReplayGap: (firstSeq, expectedSeq) => {
@@ -2791,10 +2813,14 @@ export function useChatStreaming(
           }
           const res = await agentChatService.resumeStream(
             threadId,
-            turnProcessedFrame ||
-              harnessConnection.executionProvider === 'codex'
+            harnessConnection.executionProvider === 'codex'
               ? Math.max(latestRun.streamSeq ?? 0, pendingSeq)
-              : 0,
+              : // The store cursor can lag (rAF never runs in a background
+                // tab, or still holds the earlier mount's value), so retry
+                // from the last seq THIS turn processed.
+                turnProcessedFrame
+                ? lastProcessedSeq
+                : 0,
             gapAwareCallbacks,
             signal,
             harnessConnection.executionProvider === 'codex'
