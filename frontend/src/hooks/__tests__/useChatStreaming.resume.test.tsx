@@ -419,12 +419,11 @@ describe('useChatStreaming stream resume on mount', () => {
     resumeStreamMock.mockImplementation(
       (
         _t: string,
-        afterSeq: number,
+        _afterSeq: number,
         callbacks: ReplayCallbacks,
         signal: AbortSignal
       ) => {
         attempt += 1;
-        expect(afterSeq).toBe(0);
         callbacks.onSeq(1);
         callbacks.onToolStart('create_project_note', {}, 'c1');
         callbacks.onSeq(2);
@@ -470,10 +469,13 @@ describe('useChatStreaming stream resume on mount', () => {
     });
 
     expect(resumeStreamMock).toHaveBeenCalledTimes(2);
+    // Both mounts rebuild the turn from the start of the ledger.
+    expect(resumeStreamMock.mock.calls.map((call) => call[1])).toEqual([0, 0]);
     const run = useAgentActivityStore.getState().runs['thread-A'];
     expect(run.steps.filter((st) => st.callId === 'c1')).toHaveLength(1);
     expect(run.steps.filter((st) => st.callId === 'c2')).toHaveLength(1);
-    // Only seq 1-4 created the first two notes; the third item stays open.
+    // The earlier mount already ticked the first two items; the replayed tool
+    // ends (seq 2 and 4) must not tick again, so the third stays open.
     expect(run.plan.map((p) => p.done)).toEqual([true, true, false]);
     const projectInvalidations = invalidate.mock.calls.filter(
       ([filters]) =>

@@ -1083,7 +1083,8 @@ export function useChatStreaming(
       if (seqRafRef.current !== null) {
         cancelAnimationFrame(seqRafRef.current);
         // The cursor update was throttled through that rAF: dropping it here
-        // makes the next resume replay from an older seq than we actually saw.
+        // leaves the store cursor behind what this mount handled, so the next
+        // resume would treat those frames as new (or, for Codex, replay them).
         const pending = pendingSeqRef.current;
         if (pending) {
           // Carry the stream id too, exactly as the rAF callbacks do: without
@@ -2708,8 +2709,9 @@ export function useChatStreaming(
   // ---- Resume an in-flight stream on mount / thread switch ----
   // If the activity store still records a running run for the displayed
   // thread (e.g. the page remounted mid-stream), reattach to the backend's
-  // buffered stream and replay from the last seen seq through the exact
-  // same callbacks/commit path as a live submit.
+  // buffered stream and replay the turn (from seq 0, or after the cursor for
+  // Codex) through the exact same callbacks/commit path as a live submit;
+  // frames at or below the saved cursor rebuild content but skip side effects.
   useEffect(() => {
     const threadId = activeThreadId;
     if (!threadId || isLoading) return;
@@ -2788,8 +2790,8 @@ export function useChatStreaming(
         // A reattach can be killed by an idle proxy long before the run
         // itself is done (the resume path emits no heartbeats during silent
         // planner phases). One failure used to be terminal for the whole
-        // activation; retry with backoff, always from the latest cursor so a
-        // retry never replays what already committed.
+        // activation; retry with backoff, always from the furthest point this
+        // turn reached so a retry never replays what already committed.
         let lastError = 'Stream resume failed';
         for (let attempt = 0; attempt < RESUME_MAX_ATTEMPTS; attempt += 1) {
           if (signal.aborted) return;
@@ -2815,9 +2817,11 @@ export function useChatStreaming(
             threadId,
             harnessConnection.executionProvider === 'codex'
               ? Math.max(latestRun.streamSeq ?? 0, pendingSeq)
-              : // The store cursor can lag (rAF never runs in a background
-                // tab, or still holds the earlier mount's value), so retry
-                // from the last seq THIS turn processed.
+              : // The store cursor is not this turn's position: it can trail
+                // it (rAF never runs in a background tab) or sit ahead of it
+                // (it never drops below the earlier mount's cursor while this
+                // turn replays the prefix), so retry from the last seq THIS
+                // turn processed.
                 turnProcessedFrame
                 ? lastProcessedSeq
                 : 0,

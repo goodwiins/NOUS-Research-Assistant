@@ -437,6 +437,20 @@ describe('agentActivityStore — setStreamSeq cursor', () => {
     expect(run().streamSeq).toBe(51);
   });
 
+  it('does not notify subscribers for a replayed lower seq', () => {
+    const { startRun, setStreamSeq } = useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'task');
+    setStreamSeq('t1', 50, 's1');
+    let calls = 0;
+    const unsub = useAgentActivityStore.subscribe(() => {
+      calls++;
+    });
+    setStreamSeq('t1', 1, 's1');
+    setStreamSeq('t1', 2);
+    unsub();
+    expect(calls).toBe(0);
+  });
+
   it('keeps the higher cursor while adopting a stream id it did not have yet', () => {
     const { startRun, setStreamSeq } = useAgentActivityStore.getState();
     startRun('t1', 'NOUS', 'task');
