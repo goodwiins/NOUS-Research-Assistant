@@ -96,7 +96,7 @@ describe('useChatStreaming stream resume on mount', () => {
     } as never);
   });
 
-  it('resumes a stale running run from its streamSeq when not streaming', async () => {
+  it('asks the backend to replay from 0 when this turn holds no content, whatever the saved cursor', async () => {
     useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
     useAgentActivityStore.getState().setStreamSeq('thread-A', 7);
     resumeStreamMock.mockResolvedValue({ status: 'resumed' });
@@ -107,7 +107,152 @@ describe('useChatStreaming stream resume on mount', () => {
 
     expect(resumeStreamMock).toHaveBeenCalledTimes(1);
     expect(resumeStreamMock.mock.calls[0][0]).toBe('thread-A');
-    expect(resumeStreamMock.mock.calls[0][1]).toBe(7);
+    // Saved cursor was 7, but this resume turn starts with an empty answer:
+    // replaying from 7 would rebuild only the tail.
+    expect(resumeStreamMock.mock.calls[0][1]).toBe(0);
+  });
+
+  // Backend stand-in: a buffered ledger of seq-stamped token frames; replays
+  // only frames with seq > afterSeq, like /agent/stream/resume.
+  function replayLedger(
+    tokens: string[],
+    attemptHook?: (afterSeq: number) => void
+  ) {
+    return (
+      _threadId: string,
+      afterSeq: number,
+      callbacks: {
+        onSeq: (seq: number) => void;
+        onToken: (content: string) => void;
+        onDone: (payload?: unknown) => void;
+      }
+    ) => {
+      attemptHook?.(afterSeq);
+      tokens.forEach((token, i) => {
+        const seq = i + 1;
+        if (seq <= afterSeq) return;
+        callbacks.onSeq(seq);
+        callbacks.onToken(token);
+      });
+      callbacks.onDone({
+        assistant_message_id: 'resume-assistant-1',
+        client_message_id: 'resume-runtime-1',
+      });
+      return Promise.resolve({ status: 'resumed' });
+    };
+  }
+
+  function lastCommittedAssistant(setMessages: ReturnType<typeof vi.fn>) {
+    const commits = setMessages.mock.calls
+      .map(([arg]) => arg)
+      .filter((arg): arg is ChatPageMessage[] => Array.isArray(arg));
+    const last = commits[commits.length - 1] ?? [];
+    return last.filter((m) => m.role === 'assistant').pop();
+  }
+
+  it('rebuilds the FULL answer when resuming from a non-zero cursor', async () => {
+    // Tokens 1-3 streamed before the page was left; cursor saved at 3. This
+    // fresh turn holds none of them, so a replay from the cursor would commit
+    // only "tail" and drop the prefix until a reload.
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 3);
+    resumeStreamMock.mockImplementation(
+      replayLedger(['The ', 'whole ', 'answer ', 'tail'])
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    expect(resumeStreamMock).toHaveBeenCalledTimes(1);
+    expect(lastCommittedAssistant(params.setMessages)?.content).toBe(
+      'The whole answer tail'
+    );
+  });
+
+  it('retries from the latest cursor once this turn has processed frames', async () => {
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 3);
+    const ledger = ['a ', 'b ', 'c ', 'd ', 'e'];
+    const afterSeqs: number[] = [];
+    let attempt = 0;
+    resumeStreamMock.mockImplementation(
+      (
+        threadId: string,
+        afterSeq: number,
+        callbacks: {
+          onSeq: (seq: number) => void;
+          onToken: (c: string) => void;
+          onDone: (p?: unknown) => void;
+        },
+        ...rest: unknown[]
+      ) => {
+        attempt += 1;
+        afterSeqs.push(afterSeq);
+        if (attempt === 1) {
+          // connection drops after two frames, no terminal
+          callbacks.onSeq(1);
+          callbacks.onToken('a ');
+          callbacks.onSeq(2);
+          callbacks.onToken('b ');
+          useAgentActivityStore.getState().setStreamSeq('thread-A', 2);
+          return Promise.resolve({ status: 'failed', error: 'dropped' });
+        }
+        return replayLedger(ledger)(threadId, afterSeq, callbacks, ...rest);
+      }
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+    await waitFor(() => expect(resumeStreamMock).toHaveBeenCalledTimes(2), {
+      timeout: 10_000,
+    });
+
+    expect(afterSeqs).toEqual([0, 2]);
+    await waitFor(() =>
+      expect(lastCommittedAssistant(params.setMessages)?.content).toBe(
+        'a b c d e'
+      )
+    );
+  }, 20_000);
+
+  it('does not commit a partial replay when the buffer trimmed the prefix', async () => {
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 3);
+    resumeStreamMock.mockImplementation(
+      (
+        _t: string,
+        _after: number,
+        callbacks: {
+          onSeq: (seq: number) => void;
+          onToken: (c: string) => void;
+          onDone: (p?: unknown) => void;
+          onReplayGap?: (first: number, expected: number) => void;
+        }
+      ) => {
+        // buffer ring has dropped seq 1-4; replay starts at 5
+        callbacks.onReplayGap?.(5, 1);
+        callbacks.onSeq(5);
+        callbacks.onToken('tail only');
+        callbacks.onDone({ assistant_message_id: 'a1' });
+        return Promise.resolve({ status: 'resumed' });
+      }
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    const committed = params.setMessages.mock.calls
+      .flatMap(([arg]) => (Array.isArray(arg) ? arg : []))
+      .filter((m: ChatPageMessage) => m.role === 'assistant');
+    expect(committed.map((m: ChatPageMessage) => m.content)).not.toContain(
+      'tail only'
+    );
   });
 
   it('clears the stale run on idle and does not resume twice', async () => {

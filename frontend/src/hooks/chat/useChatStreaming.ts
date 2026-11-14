@@ -2743,8 +2743,17 @@ export function useChatStreaming(
         // whatever we rebuild locally is missing a prefix of the answer. The
         // server rows are complete, so mark the thread stale and let the
         // reconcile that follows this turn replace the overlay wholesale.
+        // This turn starts with an empty answer (runStreamTurn begins every
+        // turn at ''), so a replay that starts past seq 0 can only rebuild the
+        // tail. Until a frame has actually been processed by this turn, ask
+        // for the whole ledger; afterwards (retries) the cursor is exact.
+        let turnProcessedFrame = false;
         const gapAwareCallbacks: AgentStreamCallbacks = {
           ...streamCallbacks,
+          onSeq: (seq) => {
+            turnProcessedFrame = true;
+            streamCallbacks.onSeq?.(seq);
+          },
           onReplayGap: (firstSeq, expectedSeq) => {
             if (signal.aborted) return;
             console.warn(
@@ -2782,7 +2791,10 @@ export function useChatStreaming(
           }
           const res = await agentChatService.resumeStream(
             threadId,
-            Math.max(latestRun.streamSeq ?? 0, pendingSeq),
+            turnProcessedFrame ||
+              harnessConnection.executionProvider === 'codex'
+              ? Math.max(latestRun.streamSeq ?? 0, pendingSeq)
+              : 0,
             gapAwareCallbacks,
             signal,
             harnessConnection.executionProvider === 'codex'
