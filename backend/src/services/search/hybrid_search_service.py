@@ -135,7 +135,6 @@ class HybridSearchService:
 
         # Fusion parameters
         self.min_results_per_source = 3
-        self.max_results_per_source = 20
         self.diversity_boost = 0.1
         self.recency_boost_hours = 24
 
@@ -154,19 +153,30 @@ class HybridSearchService:
 
     # SearchQuery.limit's upper bound: a source request cannot ask for more.
     _MAX_SOURCE_CANDIDATES = 100
+    _MIN_SOURCE_CANDIDATES = 20
+    _PAGES_PER_WINDOW = 5
 
     def _source_candidate_limit(self, search_request: SearchQuery) -> int:
         """Candidates each source arm fetches for this request.
 
-        Fusion and pagination run over the arms' candidates, so a fixed pool
-        smaller than ``offset + limit`` silently shortened the page (the
-        research engine asks for 50) and emptied pages past the pool.
-        ``max_results_per_source`` stays the floor for small pages; the
-        result is capped at what a source ``SearchQuery`` accepts.
+        Fusion and pagination run over the arms' candidates, so the pool must
+        cover the page (a fixed 20 shortened the research engine's 50 and
+        emptied deeper pages, GOO-460). It must also be the same for every
+        page: fusion re-sorts with boosts that ignore source rank (recency,
+        multi-source diversity) and Cohere reranks the whole pool, so a pool
+        sized to ``offset + limit`` ranked each page differently, and results
+        repeated or went missing across pages. The window therefore depends on
+        the page size only, never the offset: every page of one size slices
+        the same ranking. ``_PAGES_PER_WINDOW`` pages are reachable (bounded by
+        the most a source ``SearchQuery`` accepts); ``has_more`` reads false
+        at the window's end. Sizing by ``limit`` instead of always fetching
+        the maximum keeps small, non-paginating lookups (agent RAG asks for 5)
+        near the old 20 rows: each full-text row carries ``content_text`` and
+        two ``ts_headline`` passes.
         """
-        wanted = search_request.offset + search_request.limit
+        window = search_request.limit * self._PAGES_PER_WINDOW
         return min(
-            max(self.max_results_per_source, wanted), self._MAX_SOURCE_CANDIDATES
+            max(self._MIN_SOURCE_CANDIDATES, window), self._MAX_SOURCE_CANDIDATES
         )
 
     async def search_documents(
