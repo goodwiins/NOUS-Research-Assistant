@@ -115,7 +115,7 @@ export const createThreadSlice: ChatSliceCreator<ThreadSlice> = (set, get) => ({
         // workspace selection and list; a workspace-level 404 is handled by
         // loadConversations.
         const workspaceId = get().currentWorkspaceId;
-        dropConversationLocally(get, set, conversationId);
+        dropConversationLocally(get, set, conversationId, 'not-found');
         set((state) => {
           state.isLoadingThreads = false;
         });

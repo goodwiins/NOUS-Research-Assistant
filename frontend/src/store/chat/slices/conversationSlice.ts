@@ -228,7 +228,7 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
     try {
       await workspaceService.deleteConversation(id);
       if (!isCurrentSession()) return false;
-      dropConversationLocally(get, set, id);
+      dropConversationLocally(get, set, id, 'deleted');
       return true;
     } catch (error) {
       if (!isCurrentSession()) return false;

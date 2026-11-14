@@ -1,8 +1,15 @@
 /**
  * Local-only cascade for a conversation that is gone (deleted by the user, or
  * reported 404 by the server). Shared by `deleteConversation` and the
- * `loadThreads` 404 recovery so both leave the same end state. Makes no
+ * `loadThreads` 404 recovery so both leave the same cache end state. Makes no
  * server call.
+ *
+ * Only a real delete (`reason: 'deleted'`) records the threads in the
+ * session-scoped `deletedThreadIds` set, which makes `refreshMessages` and
+ * `loadOlderMessages` refuse them until a full store reset. A 404 is not proof
+ * of deletion — the backend also reports access-denied as 404, and access can
+ * come back (org scope restored, a new conversation becoming readable) — so
+ * `reason: 'not-found'` clears the caches without that permanent block.
  */
 import { removeItemFromRecord } from './recordIndex';
 import {
@@ -11,10 +18,13 @@ import {
 } from './requestCoordinator';
 import type { ChatActions, ChatState } from './types';
 
+export type DropConversationReason = 'deleted' | 'not-found';
+
 export function dropConversationLocally(
   get: () => ChatState & ChatActions,
   set: (fn: (state: ChatState) => void) => void,
-  id: string
+  id: string,
+  reason: DropConversationReason
 ): void {
   // Cascade: the conversation's threads (and their message caches) are
   // unreachable once it's gone — deleting only the conversation row used
@@ -27,7 +37,9 @@ export function dropConversationLocally(
       (threadId) => snapshot.threadToConversation[threadId] === id
     ),
   ]);
-  threadIds.forEach(markThreadDeleted);
+  if (reason === 'deleted') {
+    threadIds.forEach(markThreadDeleted);
+  }
   threadIds.forEach(abortNewestPageRequest);
   set((state) => {
     // Use O(1) reverse index lookup (GOO-86); fall back to a scan when the

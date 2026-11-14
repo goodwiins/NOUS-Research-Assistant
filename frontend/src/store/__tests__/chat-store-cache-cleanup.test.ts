@@ -919,3 +919,124 @@ describe('404 of a conversation drops its local caches', () => {
     expect(state.conversations['ws-1'].map((c) => c.id)).toEqual(['conv-b']);
   });
 });
+
+describe('a transient conversation 404 does not permanently block its threads', () => {
+  // The backend reports access-denied as 404 too, so a 404 on listThreads can
+  // be temporary (access briefly revoked, org scope flipped and restored, a
+  // just-created conversation not yet readable). Regression from #2137: the
+  // recovery path recorded every thread as deleted for the whole session, so
+  // refreshMessages/loadOlderMessages short-circuited until logout.
+  const seed = (): void => {
+    useChatStore.setState({
+      currentWorkspaceId: 'ws-1',
+      currentConversationId: 'conv-a',
+      currentThreadId: 't1',
+      workspaces: [makeWorkspace('ws-1')],
+      conversations: { 'ws-1': [makeConversation('conv-a', 'ws-1')] },
+      conversationToWorkspace: { 'conv-a': 'ws-1' },
+      threads: { 'conv-a': [makeThread('t1', 'conv-a')] },
+      threadToConversation: { t1: 'conv-a' },
+      messages: { t1: [makeMessage('m1', 't1')] },
+      messageToThread: { m1: 't1' },
+      messagePagination: { t1: pagination() },
+      messageFreshness: { t1: 'fresh' },
+    });
+  };
+  const messagesPage = {
+    messages: [makeMessage('m1', 't1')],
+    total: 1,
+    has_more: false,
+  };
+
+  beforeEach(() => {
+    act(() => {
+      useChatStore.getState().reset();
+    });
+    vi.clearAllMocks();
+    newestPageRequests.clear();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('refreshMessages fetches again once the 404d conversation is listed again', async () => {
+    seed();
+    (
+      workspaceService.listThreads as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(notFound());
+    // The recovery reload no longer lists it (access briefly denied)...
+    (
+      workspaceService.listConversations as ReturnType<typeof vi.fn>
+    ).mockResolvedValueOnce({
+      conversations: [],
+      total: 0,
+      page: 1,
+      limit: 50,
+      has_more: false,
+    });
+
+    await act(async () => {
+      await useChatStore.getState().loadThreads('conv-a');
+    });
+    expect(useChatStore.getState().threads['conv-a']).toBeUndefined();
+
+    // ...then access is restored and the conversation is listed again.
+    (
+      workspaceService.listConversations as ReturnType<typeof vi.fn>
+    ).mockResolvedValueOnce({
+      conversations: [makeConversation('conv-a', 'ws-1')],
+      total: 1,
+      page: 1,
+      limit: 50,
+      has_more: false,
+    });
+    (
+      workspaceService.listThreads as ReturnType<typeof vi.fn>
+    ).mockResolvedValueOnce({ threads: [makeThread('t1', 'conv-a')] });
+    (
+      workspaceService.listMessages as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(messagesPage);
+
+    await act(async () => {
+      await useChatStore.getState().loadConversations('ws-1');
+      useChatStore.setState({ currentConversationId: 'conv-a' });
+      await useChatStore.getState().loadThreads('conv-a');
+    });
+    expect(useChatStore.getState().threads['conv-a']).toHaveLength(1);
+
+    let refreshed = false;
+    await act(async () => {
+      refreshed = await useChatStore.getState().refreshMessages('t1');
+    });
+
+    expect(workspaceService.listMessages).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ order: 'desc' })
+    );
+    expect(refreshed).toBe(true);
+    expect(useChatStore.getState().messages.t1?.map((m) => m.id)).toEqual([
+      'm1',
+    ]);
+  });
+
+  it('a real deleteConversation still blocks a late refresh of its threads', async () => {
+    seed();
+    (
+      workspaceService.deleteConversation as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(undefined);
+    (
+      workspaceService.listMessages as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(messagesPage);
+
+    await act(async () => {
+      await useChatStore.getState().deleteConversation('conv-a');
+    });
+    let refreshed = true;
+    await act(async () => {
+      refreshed = await useChatStore.getState().refreshMessages('t1');
+    });
+
+    expect(refreshed).toBe(false);
+    expect(workspaceService.listMessages).not.toHaveBeenCalled();
+    expect(useChatStore.getState().messages.t1).toBeUndefined();
+  });
+});
