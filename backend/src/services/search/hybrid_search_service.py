@@ -152,6 +152,23 @@ class HybridSearchService:
         self.max_inflight_searches = 12
         self._search_slots = threading.BoundedSemaphore(self.max_inflight_searches)
 
+    # SearchQuery.limit's upper bound: a source request cannot ask for more.
+    _MAX_SOURCE_CANDIDATES = 100
+
+    def _source_candidate_limit(self, search_request: SearchQuery) -> int:
+        """Candidates each source arm fetches for this request.
+
+        Fusion and pagination run over the arms' candidates, so a fixed pool
+        smaller than ``offset + limit`` silently shortened the page (the
+        research engine asks for 50) and emptied pages past the pool.
+        ``max_results_per_source`` stays the floor for small pages; the
+        result is capped at what a source ``SearchQuery`` accepts.
+        """
+        wanted = search_request.offset + search_request.limit
+        return min(
+            max(self.max_results_per_source, wanted), self._MAX_SOURCE_CANDIDATES
+        )
+
     async def search_documents(
         self,
         query: str,
@@ -681,7 +698,7 @@ class HybridSearchService:
             ft_search_request = SearchQuery(
                 query=search_request.query,
                 search_type=SearchType.FULLTEXT,
-                limit=self.max_results_per_source,
+                limit=self._source_candidate_limit(search_request),
                 offset=0,
                 filters=search_request.filters,
                 include_snippets=search_request.include_snippets,
@@ -777,7 +794,7 @@ class HybridSearchService:
             # context into this user's ranked search results.
             kg_result = knowledge_graph_service.search_entities(
                 query=search_request.query,
-                limit=self.max_results_per_source,
+                limit=self._source_candidate_limit(search_request),
                 organization_id=organization_id,
             )
 
