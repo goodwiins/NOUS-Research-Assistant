@@ -16,6 +16,7 @@ import {
 import type { Thread } from '@/types/workspace';
 import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
+import { dropConversationLocally } from '../conversationCache';
 import { captureChatSession } from '../requestCoordinator';
 import type { ChatSliceCreator } from '../types';
 import { removeItemFromRecord, updateItemInRecord } from '../recordIndex';
@@ -114,15 +115,8 @@ export const createThreadSlice: ChatSliceCreator<ThreadSlice> = (set, get) => ({
         // workspace selection and list; a workspace-level 404 is handled by
         // loadConversations.
         const workspaceId = get().currentWorkspaceId;
+        dropConversationLocally(get, set, conversationId);
         set((state) => {
-          removeItemFromRecord(
-            state.conversations,
-            conversationId,
-            state.conversationToWorkspace
-          );
-          delete state.threads[conversationId];
-          state.currentConversationId = null;
-          state.currentThreadId = null;
           state.isLoadingThreads = false;
         });
         if (workspaceId) {

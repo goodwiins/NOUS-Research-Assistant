@@ -117,6 +117,7 @@ export const useChatStore = create<ChatStore>()(
           if (
             !isReinitializing &&
             !get().isReinitializing &&
+            !get().error &&
             get().currentWorkspaceId === workspace.id
           ) {
             set((s) => {
