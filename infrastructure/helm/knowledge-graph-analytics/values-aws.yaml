@@ -243,8 +243,10 @@ backend:
       value: "true"
     - name: AGENT_SERVER_SIDE_HISTORY
       value: "true"
+    # 1.0 exhausted the Sentry quota on 2026-11-08. Probe paths are never
+    # traced (observability/sentry.py), so this applies to real requests.
     - name: SENTRY_TRACES_SAMPLE_RATE
-      value: "1.0"
+      value: "0.1"
     - name: SENTRY_PROFILES_SAMPLE_RATE
       value: "0.0"
     - name: NEO4J_URI

@@ -10,7 +10,7 @@ import ssl
 from typing import Any
 
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import beat_init, celeryd_init, worker_process_init
 
 from src.core.config import settings
 
@@ -228,6 +228,33 @@ celery_app.conf.update(
 )
 
 logger.info(f"Celery app configured with broker: {settings.REDIS_URL[:20]}...")
+
+
+@celeryd_init.connect
+def _init_sentry_in_worker(**_kwargs: Any) -> None:
+    """Report worker errors to Sentry.
+
+    ``init_sentry`` only ran in the API process, so task failures in the
+    worker never reached Sentry. ``celeryd_init`` fires once in the worker's
+    main process before the pool forks; children inherit the client.
+    """
+    from src.observability.sentry import init_sentry
+
+    try:
+        init_sentry(service="nous-celery-worker")
+    except Exception:  # noqa: BLE001 - observability must not stop the worker
+        logger.warning("Sentry init failed in Celery worker", exc_info=True)
+
+
+@beat_init.connect
+def _init_sentry_in_beat(**_kwargs: Any) -> None:
+    """Report scheduler errors to Sentry (see ``_init_sentry_in_worker``)."""
+    from src.observability.sentry import init_sentry
+
+    try:
+        init_sentry(service="nous-celery-beat")
+    except Exception:  # noqa: BLE001 - observability must not stop beat
+        logger.warning("Sentry init failed in Celery beat", exc_info=True)
 
 
 @worker_process_init.connect
