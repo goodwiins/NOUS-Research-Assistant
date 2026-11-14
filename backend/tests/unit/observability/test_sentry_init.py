@@ -10,6 +10,7 @@ or drop the ``celeryd_init`` receiver in ``celery_app.py``, and this file fails.
 
 from __future__ import annotations
 
+import importlib
 import logging
 from typing import Any
 from unittest.mock import MagicMock
@@ -121,16 +122,27 @@ def test_celery_processes_initialise_sentry(
     assert calls == [service]
 
 
+@pytest.mark.parametrize(
+    "receiver_name", ["_init_sentry_in_worker", "_init_sentry_in_beat"]
+)
 def test_celery_init_failure_does_not_stop_the_worker(
+    receiver_name: str,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from celery import signals
-
-    import src.tasks.celery_app  # noqa: F401 - registers the receivers
+    # Call the receiver directly: Celery's Signal.send already swallows
+    # receiver exceptions, so sending the signal would pass even without
+    # the receiver's own guard.
+    # importlib, not ``from src.tasks import celery_app``: the package
+    # re-exports the Celery instance under the module's name.
+    celery_app = importlib.import_module("src.tasks.celery_app")
 
     def _boom(service: str = "nous-backend") -> bool:
         raise RuntimeError("bad dsn")
 
     monkeypatch.setattr(sentry, "init_sentry", _boom)
 
-    signals.celeryd_init.send(sender=None)  # must not raise
+    with caplog.at_level(logging.WARNING):
+        getattr(celery_app, receiver_name)()  # must not raise
+
+    assert any("Sentry init failed" in r.getMessage() for r in caplog.records)
