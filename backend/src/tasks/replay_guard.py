@@ -15,6 +15,7 @@ lock Document -> ProcessingJob, matching cancellation and stage writes.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -46,14 +47,44 @@ class ClaimResult:
     ``proceed`` is True when the caller owns the job and must process it;
     ``reason`` names the branch that was taken ("claimed", "reclaimed_stale",
     "deleted", "terminal", "running", "missing") for logging + the task's skip response.
+    ``stale_in_seconds`` is set only for ``"running"``: how long until the RUNNING
+    row crosses ``stale_after_seconds`` and a redelivery may reclaim it.
     """
 
     proceed: bool
     reason: str
+    stale_in_seconds: Optional[float] = None
 
     @property
     def skipped(self) -> bool:
         return not self.proceed
+
+
+# Padding added to a "running" skip's retry countdown so the redelivered message
+# lands after the row has actually crossed the stale threshold (clock skew,
+# scheduler granularity), not on it.
+REDELIVERY_GRACE_SECONDS = 5
+
+
+def redelivery_countdown_seconds(
+    claim: ClaimResult,
+    *,
+    stale_after_seconds: int = DEFAULT_STALE_RUNNING_SECONDS,
+) -> int:
+    """Seconds a task should wait before re-attempting a ``"running"`` claim.
+
+    A redelivered message that meets a young RUNNING row must not be acked and
+    dropped (GOO-462): if that row's worker is dead, nobody else will ever
+    finish the job and only the sweeper fails it ~30 min later. Instead the task
+    retries with this countdown so it comes back once the row can be reclaimed.
+    Bounded to ``[REDELIVERY_GRACE_SECONDS, stale_after_seconds + grace]`` so a
+    bad ``started_at`` can never schedule it hours out.
+    """
+    remaining = claim.stale_in_seconds
+    if remaining is None:
+        remaining = float(stale_after_seconds)
+    remaining = min(max(remaining, 0.0), float(stale_after_seconds))
+    return int(math.ceil(remaining)) + REDELIVERY_GRACE_SECONDS
 
 
 def _running_age_seconds(job: ProcessingJob) -> Optional[float]:
@@ -165,7 +196,9 @@ def claim_job_for_processing(
         age = _running_age_seconds(locked)
         if age is not None and age < stale_after_seconds:
             db.rollback()
-            return ClaimResult(False, "running")
+            return ClaimResult(
+                False, "running", stale_in_seconds=stale_after_seconds - age
+            )
         locked.start_job(worker_id=worker_id, celery_task_id=celery_task_id)
         db.commit()
         return ClaimResult(True, "reclaimed_stale")

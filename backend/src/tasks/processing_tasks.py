@@ -11,6 +11,7 @@ from typing import Any, Dict
 from uuid import uuid4
 
 from celery import Task, current_app
+from celery.exceptions import MaxRetriesExceededError, Retry
 from sqlalchemy import and_, or_, select, tuple_
 
 from src.core.config import settings
@@ -45,7 +46,10 @@ from src.tasks.processing_lifecycle import (
     fail_document_unless_owned,
     require_active_ingestion,
 )
-from src.tasks.replay_guard import claim_job_for_processing
+from src.tasks.replay_guard import (
+    claim_job_for_processing,
+    redelivery_countdown_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -436,16 +440,43 @@ def process_document_ingestion(self, job_id: str):
             celery_task_id=self.request.id,
         )
         if not claim.proceed:
+            skip_result = {
+                "status": job.status.value,
+                "document_id": str(document.id),
+                "skipped": claim.reason,
+            }
+            if claim.reason == "running":
+                # A young RUNNING row is either live on another worker or left
+                # by one that just died: this delivery cannot tell. Returning
+                # would ack and drop the message, so a dead worker's job sits
+                # RUNNING until the sweeper fails it (GOO-462). Retry instead,
+                # timed to land once the row can be reclaimed. The next
+                # delivery then sees terminal (live worker finished), or
+                # reclaimed_stale and re-runs the idempotent pipeline. Celery's
+                # retry budget (task_max_retries) is spent only by this path,
+                # never by real failures, which re-raise below without retry.
+                countdown = redelivery_countdown_seconds(claim)
+                logger.info(
+                    "Job %s RUNNING on another attempt; retrying redelivered "
+                    "ingestion in %ss",
+                    job_id,
+                    countdown,
+                )
+                try:
+                    raise self.retry(countdown=countdown)
+                except MaxRetriesExceededError:
+                    logger.warning(
+                        "Job %s still RUNNING after retry budget; skipping "
+                        "redelivered ingestion run (sweeper will reconcile)",
+                        job_id,
+                    )
+                    return skip_result
             logger.info(
                 "Job %s not claimable (%s); skipping redelivered ingestion run",
                 job_id,
                 claim.reason,
             )
-            return {
-                "status": job.status.value,
-                "document_id": str(document.id),
-                "skipped": claim.reason,
-            }
+            return skip_result
 
         # Every stage commit re-checks, under Document -> ProcessingJob row
         # locks, that this attempt is still the live one: the document can be
@@ -693,6 +724,12 @@ def process_document_ingestion(self, job_id: str):
         if stop.reason == "deleted" and remote_writes and document_ids:
             _compensate_late_remote_writes(db, *document_ids, remote_writes)
         return {"status": "stopped", "job_id": job_id, "skipped": stop.reason}
+
+    except Retry:
+        # self.retry() signals Celery to redeliver later; it is not a failure.
+        # Letting the broad handler below see it would mark a job that another
+        # worker may still own as FAILED.
+        raise
 
     except Exception as e:
         logger.error(f"Document ingestion failed for job {job_id}: {str(e)}")
