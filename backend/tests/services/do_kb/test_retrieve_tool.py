@@ -1759,7 +1759,9 @@ async def test_title_only_match_uses_body_preview_not_the_title():
             )
         ]
     )
-    p1, p2, p3, p4, p5 = _kb_off_patches(MagicMock(return_value=hit), AsyncMock(), AsyncMock())
+    p1, p2, p3, p4, p5 = _kb_off_patches(
+        MagicMock(return_value=hit), AsyncMock(), AsyncMock()
+    )
     with p1, p2, p3, p4, p5:
         result = await _tool_do_kb_retrieve({"query": "attention"}, MagicMock(), user)
 
@@ -1776,14 +1778,18 @@ async def test_content_snippets_drop_highlight_markup():
                 document_id=str(TARGET_ID),
                 title="Paper",
                 snippets=[
-                    SimpleNamespace(text="Multi-head <mark>attention</mark> lets the model attend.")
+                    SimpleNamespace(
+                        text="Multi-head <mark>attention</mark> lets the model attend."
+                    )
                 ],
                 content_preview="preview",
                 relevance_score=0.5,
             )
         ]
     )
-    p1, p2, p3, p4, p5 = _kb_off_patches(MagicMock(return_value=hit), AsyncMock(), AsyncMock())
+    p1, p2, p3, p4, p5 = _kb_off_patches(
+        MagicMock(return_value=hit), AsyncMock(), AsyncMock()
+    )
     with p1, p2, p3, p4, p5:
         result = await _tool_do_kb_retrieve({"query": "attention"}, MagicMock(), user)
 

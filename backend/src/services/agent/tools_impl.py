@@ -3543,7 +3543,11 @@ async def _local_fulltext_chunks(
     )
 
     def _plain(text: str) -> str:
-        return text.replace(_HIGHLIGHT_PRE_TAG, "").replace(_HIGHLIGHT_POST_TAG, "").strip()
+        return (
+            text.replace(_HIGHLIGHT_PRE_TAG, "")
+            .replace(_HIGHLIGHT_POST_TAG, "")
+            .strip()
+        )
 
     chunks: list[Dict[str, Any]] = []
     for result in response.results[:top_k]:
@@ -3551,7 +3555,10 @@ async def _local_fulltext_chunks(
         # that is just the highlighted title; drop it so the body preview is
         # used instead, and strip the <mark> highlight markup.
         title = (result.title or "").strip()
-        parts = [_plain(str(getattr(snippet, "text", "") or "")) for snippet in (result.snippets or [])]
+        parts = [
+            _plain(str(getattr(snippet, "text", "") or ""))
+            for snippet in (result.snippets or [])
+        ]
         evidence = "\n".join(part for part in parts if part and part != title)
         if not evidence:
             evidence = result.content_preview or ""
