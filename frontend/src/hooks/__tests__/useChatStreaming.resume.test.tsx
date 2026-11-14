@@ -382,6 +382,108 @@ describe('useChatStreaming stream resume on mount', () => {
     expect(lastCommittedAssistant(params.setMessages)?.content).toBe('rest');
   });
 
+  it('keeps the saved cursor when the page remounts mid-replay, so frames already handled never re-run side effects', async () => {
+    // The unmount flush is the path under test: with rAF never running, the
+    // replayed prefix seq sits in the pending ref until cleanup writes it.
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+    const noteFor = (id: string): string =>
+      JSON.stringify({ note_id: id, project_id: 'p1', title: id });
+    const store = useAgentActivityStore.getState();
+    store.startRun('thread-A', 'Agent', 'task');
+    store.setPlan('thread-A', [
+      { text: 'first note', tool: 'create_project_note' },
+      { text: 'second note', tool: 'create_project_note' },
+      { text: 'third note', tool: 'create_project_note' },
+    ]);
+    // Seq 1-4 already ran on the earliest mount: two finished tools, two
+    // plan items ticked.
+    store.pushToolStart('thread-A', 'create_project_note', 'c1');
+    store.pushToolEnd('thread-A', 'create_project_note', true, 'c1');
+    store.pushToolStart('thread-A', 'create_project_note', 'c2');
+    store.pushToolEnd('thread-A', 'create_project_note', true, 'c2');
+    store.setStreamSeq('thread-A', 4);
+    const invalidate = vi.spyOn(testQueryClient, 'invalidateQueries');
+    const openArtifact = vi.spyOn(
+      useArtifactPanelStore.getState(),
+      'openArtifact'
+    );
+    type ReplayCallbacks = {
+      onSeq: (seq: number) => void;
+      onToolStart: (t: string, a: unknown, id?: string) => void;
+      onToolEnd: (t: string, r: string, e: boolean, id?: string) => void;
+      onToken: (c: string) => void;
+      onDone: (p?: unknown) => void;
+    };
+    let attempt = 0;
+    resumeStreamMock.mockImplementation(
+      (
+        _t: string,
+        afterSeq: number,
+        callbacks: ReplayCallbacks,
+        signal: AbortSignal
+      ) => {
+        attempt += 1;
+        expect(afterSeq).toBe(0);
+        callbacks.onSeq(1);
+        callbacks.onToolStart('create_project_note', {}, 'c1');
+        callbacks.onSeq(2);
+        callbacks.onToolEnd('create_project_note', noteFor('n1'), false, 'c1');
+        if (attempt === 1) {
+          // First mount goes away while still inside the replayed prefix.
+          return new Promise((resolve) => {
+            signal.addEventListener('abort', () =>
+              resolve({ status: 'aborted' })
+            );
+          });
+        }
+        callbacks.onSeq(3);
+        callbacks.onToolStart('create_project_note', {}, 'c2');
+        callbacks.onSeq(4);
+        callbacks.onToolEnd('create_project_note', noteFor('n2'), false, 'c2');
+        callbacks.onSeq(5);
+        callbacks.onToken('rest');
+        callbacks.onSeq(6);
+        callbacks.onDone({ assistant_message_id: 'a1' });
+        return Promise.resolve({ status: 'resumed' });
+      }
+    );
+
+    let unmount: () => void = () => {};
+    await act(async () => {
+      ({ unmount } = renderHook(() => useChatStreaming(makeParams()), {
+        wrapper,
+      }));
+    });
+    await act(async () => {
+      unmount();
+    });
+
+    // Replaying seq 1-2 must not walk the cursor back below what was seen.
+    const afterUnmount = useAgentActivityStore.getState().runs['thread-A'];
+    expect(afterUnmount.state).toBe('running');
+    expect(afterUnmount.streamSeq).toBe(4);
+
+    const params = makeParams();
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    expect(resumeStreamMock).toHaveBeenCalledTimes(2);
+    const run = useAgentActivityStore.getState().runs['thread-A'];
+    expect(run.steps.filter((st) => st.callId === 'c1')).toHaveLength(1);
+    expect(run.steps.filter((st) => st.callId === 'c2')).toHaveLength(1);
+    // Only seq 1-4 created the first two notes; the third item stays open.
+    expect(run.plan.map((p) => p.done)).toEqual([true, true, false]);
+    const projectInvalidations = invalidate.mock.calls.filter(
+      ([filters]) =>
+        Array.isArray(filters?.queryKey) && filters.queryKey[0] === 'project'
+    );
+    expect(projectInvalidations).toHaveLength(0);
+    expect(openArtifact).not.toHaveBeenCalled();
+    expect(lastCommittedAssistant(params.setMessages)?.content).toBe('rest');
+  });
+
   it('pins current behaviour for a confirmation continuation: first frame past seq 1 reads as a gap, commit is suppressed and the thread is marked stale for reconcile', async () => {
     // A confirm stream continues seq numbering in a NEW buffer (N+1...), and
     // the client has no state that distinguishes that from a trimmed ring

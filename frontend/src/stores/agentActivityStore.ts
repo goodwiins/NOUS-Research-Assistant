@@ -228,15 +228,30 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
   setStreamSeq: (threadId, seq, streamId) =>
     set((s) => {
       const run = s.runs[threadId];
-      if (!run || (run.streamSeq === seq && run.streamId === streamId))
-        return s;
+      if (!run) return s;
+      const nextStreamId = streamId ?? run.streamId;
+      // The cursor only moves forward within one stream. A resume replays the
+      // turn from seq 0 to rebuild its answer; letting those replayed seqs
+      // overwrite the cursor would make a remount mid-replay treat frames it
+      // already handled as new and re-run their side effects. A different
+      // stream id is a different buffer, so its numbering starts over. A
+      // new run never inherits a cursor (startRun builds a fresh record).
+      const sameStream =
+        streamId === undefined ||
+        run.streamId === undefined ||
+        streamId === run.streamId;
+      const nextSeq =
+        sameStream && run.streamSeq !== undefined
+          ? Math.max(run.streamSeq, seq)
+          : seq;
+      if (run.streamSeq === nextSeq && run.streamId === nextStreamId) return s;
       return {
         runs: {
           ...s.runs,
           [threadId]: {
             ...run,
-            streamSeq: seq,
-            streamId: streamId ?? run.streamId,
+            streamSeq: nextSeq,
+            streamId: nextStreamId,
           },
         },
       };
