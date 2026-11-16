@@ -273,18 +273,6 @@ def setup_observability(app):
         else:
             return {"error": "Metrics not available"}
 
-    # Add performance testing endpoints
-    @app.post("/admin/performance-test")
-    async def run_performance_test(request: Request):
-        """Run performance tests (admin only)."""
-        try:
-            test_config = await request.json()
-            result = await test_runner.run_load_test(test_config)
-            return {"status": "completed", "result": result}
-        except Exception as e:
-            logger.error(f"Performance test failed: {e}")
-            return {"status": "error", "message": str(e)}
-
     logger.info("Observability middleware and endpoints configured")
 
 
