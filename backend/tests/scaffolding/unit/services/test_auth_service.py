@@ -7,15 +7,15 @@ and rate limiting with proper mocking.
 All tests use mocks - no external services required.
 """
 
-import pytest
-from unittest.mock import Mock, MagicMock, patch, AsyncMock
-from uuid import uuid4
-from datetime import datetime, timedelta, timezone
-from jose import jwt
 import hashlib
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from uuid import uuid4
+
+import jwt
+import pytest
 
 from tests.mocks.services import MockAsyncSession, MockRedisClient
-
 
 # ============================================================================
 # Constants
@@ -30,6 +30,7 @@ REFRESH_TOKEN_EXPIRE_DAYS = 30
 # ============================================================================
 # Test Data Builders
 # ============================================================================
+
 
 class UserBuilder:
     """Builder pattern for user test data."""
@@ -153,6 +154,7 @@ class TokenPayloadBuilder:
 # Fixtures
 # ============================================================================
 
+
 @pytest.fixture
 def mock_db():
     """Create mock async session."""
@@ -180,6 +182,7 @@ def mock_admin_user():
 # ============================================================================
 # Password Validation Tests
 # ============================================================================
+
 
 class TestPasswordValidation:
     """Test password strength validation."""
@@ -260,6 +263,7 @@ class TestPasswordValidation:
 # ============================================================================
 # Authentication Tests
 # ============================================================================
+
 
 class TestUserAuthentication:
     """Test user authentication logic."""
@@ -342,6 +346,7 @@ class TestPasswordVerification:
 # JWT Token Tests
 # ============================================================================
 
+
 class TestTokenGeneration:
     """Test JWT token generation."""
 
@@ -356,10 +361,12 @@ class TestTokenGeneration:
 
     def test_creates_refresh_token(self):
         """Should create valid refresh token."""
-        payload = TokenPayloadBuilder() \
-            .with_type("refresh") \
-            .expiring_in(minutes=60 * 24 * 30) \
+        payload = (
+            TokenPayloadBuilder()
+            .with_type("refresh")
+            .expiring_in(minutes=60 * 24 * 30)
             .build()
+        )
 
         token = jwt.encode(payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM)
 
@@ -373,11 +380,13 @@ class TestTokenGeneration:
         email = "user@example.com"
         role = "admin"
 
-        payload = TokenPayloadBuilder() \
-            .with_sub(user_id) \
-            .with_email(email) \
-            .with_role(role) \
+        payload = (
+            TokenPayloadBuilder()
+            .with_sub(user_id)
+            .with_email(email)
+            .with_role(role)
             .build()
+        )
 
         token = jwt.encode(payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM)
         decoded = jwt.decode(token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM])
@@ -407,7 +416,7 @@ class TestTokenVerification:
         try:
             decoded = jwt.decode(token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM])
             is_valid = True
-        except jwt.JWTError:
+        except jwt.PyJWTError:
             is_valid = False
 
         assert is_valid is True
@@ -433,7 +442,7 @@ class TestTokenVerification:
         try:
             jwt.decode(token, "wrong-secret-key", algorithms=[TEST_ALGORITHM])
             is_valid = True
-        except jwt.JWTError:
+        except jwt.PyJWTError:
             is_valid = False
 
         assert is_valid is False
@@ -445,7 +454,7 @@ class TestTokenVerification:
         try:
             jwt.decode(malformed_token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM])
             is_valid = True
-        except jwt.JWTError:
+        except jwt.PyJWTError:
             is_valid = False
 
         assert is_valid is False
@@ -457,40 +466,53 @@ class TestTokenRefresh:
     def test_refresh_token_generates_new_access_token(self):
         """Refresh token should generate new access token."""
         # Create refresh token
-        refresh_payload = TokenPayloadBuilder() \
-            .with_type("refresh") \
-            .expiring_in(minutes=60 * 24) \
+        refresh_payload = (
+            TokenPayloadBuilder()
+            .with_type("refresh")
+            .expiring_in(minutes=60 * 24)
             .build()
+        )
 
-        refresh_token = jwt.encode(refresh_payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM)
+        refresh_token = jwt.encode(
+            refresh_payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM
+        )
 
         # Decode refresh token
-        decoded = jwt.decode(refresh_token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM])
+        decoded = jwt.decode(
+            refresh_token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM]
+        )
 
         # Generate new access token
-        access_payload = TokenPayloadBuilder() \
-            .with_sub(decoded["sub"]) \
-            .with_email(decoded["email"]) \
-            .with_role(decoded["role"]) \
-            .with_type("access") \
-            .expiring_in(minutes=30) \
+        access_payload = (
+            TokenPayloadBuilder()
+            .with_sub(decoded["sub"])
+            .with_email(decoded["email"])
+            .with_role(decoded["role"])
+            .with_type("access")
+            .expiring_in(minutes=30)
             .build()
+        )
 
-        new_access_token = jwt.encode(access_payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM)
+        new_access_token = jwt.encode(
+            access_payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM
+        )
 
         # Verify new token
-        new_decoded = jwt.decode(new_access_token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM])
+        new_decoded = jwt.decode(
+            new_access_token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM]
+        )
         assert new_decoded["type"] == "access"
         assert new_decoded["sub"] == decoded["sub"]
 
     def test_rejects_expired_refresh_token(self):
         """Should reject expired refresh token."""
-        refresh_payload = TokenPayloadBuilder() \
-            .with_type("refresh") \
-            .expired(minutes_ago=1) \
-            .build()
+        refresh_payload = (
+            TokenPayloadBuilder().with_type("refresh").expired(minutes_ago=1).build()
+        )
 
-        refresh_token = jwt.encode(refresh_payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM)
+        refresh_token = jwt.encode(
+            refresh_payload, TEST_SECRET_KEY, algorithm=TEST_ALGORITHM
+        )
 
         try:
             jwt.decode(refresh_token, TEST_SECRET_KEY, algorithms=[TEST_ALGORITHM])
@@ -504,6 +526,7 @@ class TestTokenRefresh:
 # ============================================================================
 # Rate Limiting Tests
 # ============================================================================
+
 
 class TestLoginRateLimiting:
     """Test login attempt rate limiting."""
@@ -572,6 +595,7 @@ class TestLoginRateLimiting:
 # Token Revocation Tests
 # ============================================================================
 
+
 class TestTokenRevocation:
     """Test token revocation."""
 
@@ -621,6 +645,7 @@ class TestTokenRevocation:
 # User Session Tests
 # ============================================================================
 
+
 class TestUserSession:
     """Test user session management."""
 
@@ -633,7 +658,7 @@ class TestUserSession:
         session_data = {
             "user_id": str(mock_user.id),
             "email": mock_user.email,
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
         }
 
         await mock_redis.set(session_key, str(session_data), ex=60 * 60 * 24)
@@ -672,6 +697,7 @@ class TestUserSession:
 # ============================================================================
 # Organization Access Tests
 # ============================================================================
+
 
 class TestOrganizationAccess:
     """Test organization-based access control."""

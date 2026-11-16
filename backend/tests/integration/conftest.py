@@ -440,7 +440,7 @@ def tenant_gate_headers(test_db, test_user, monkeypatch):
     ``test_user``. The middleware logic itself is untouched: an unknown,
     inactive or unauthenticated caller still gets 401, a lookup failure 500.
     """
-    from jose import jwt
+    import jwt
 
     from src.core.config import settings
     from src.middleware import multi_tenancy

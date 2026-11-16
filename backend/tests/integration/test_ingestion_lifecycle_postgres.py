@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import Any, AsyncIterator, Iterator, cast
 from uuid import UUID, uuid4
 
+import jwt
 import pytest
 import redis
 import spacy
@@ -28,7 +29,6 @@ from celery.app.amqp import AMQP
 from celery.signals import task_postrun, worker_ready
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from jose import jwt
 from sqlalchemy.orm import Session
 
 from src.api.documents import documents, files

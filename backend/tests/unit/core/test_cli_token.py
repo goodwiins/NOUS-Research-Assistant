@@ -14,10 +14,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import jwt
 
 from src.core.config import settings
 from src.core.security import (
