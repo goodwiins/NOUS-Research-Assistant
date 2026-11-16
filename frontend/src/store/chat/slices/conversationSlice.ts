@@ -8,14 +8,11 @@ import {
   ConversationCreate,
   ConversationUpdate,
 } from '@/types/workspace';
+import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
 import { captureChatSession } from '../requestCoordinator';
 import type { ChatSliceCreator } from '../types';
-import { removeItemFromRecord } from '../recordIndex';
-import {
-  abortNewestPageRequest,
-  markThreadDeleted,
-} from '../requestCoordinator';
+import { dropConversationLocally } from '../conversationCache';
 import { handleStaleDataRecovery } from './workspaceSlice';
 
 export interface ConversationSlice {
@@ -88,8 +85,7 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
       console.error('[ChatStore] Error loading conversations:', error);
 
       // Handle 404 - workspace not found (stale data)
-      const err = error as { response?: { status?: number } };
-      if (err?.response?.status === 404) {
+      if (getErrorStatus(error) === 404) {
         // A late 404 for a workspace the user has already navigated away
         // from must not nuke the (valid) current selection — only recover
         // when the failed load still targets the current workspace.
@@ -111,7 +107,7 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
           loadingKey: 'isLoadingConversations',
         });
         if (result.shouldProceed) {
-          result.triggerReinit();
+          await result.triggerReinit();
         }
         return;
       }
@@ -164,8 +160,19 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
       console.error('[ChatStore] Error creating conversation:', error);
 
       // Handle 404 - workspace not found (stale data)
-      const err = error as { response?: { status?: number } };
-      if (err?.response?.status === 404) {
+      if (
+        getErrorStatus(error) === 404 &&
+        get().currentWorkspaceId !== data.workspace_id
+      ) {
+        // A 404 for a workspace the user already left must not nuke the
+        // (valid) current selection.
+        console.warn(
+          '[ChatStore] Ignoring 404 for superseded workspace while creating conversation:',
+          data.workspace_id
+        );
+        return null;
+      }
+      if (getErrorStatus(error) === 404) {
         console.warn(
           '[ChatStore] Workspace not found (404) while creating conversation - clearing stale data'
         );
@@ -173,7 +180,14 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
           clearWorkspaces: true,
         });
         if (result.shouldProceed) {
-          result.triggerReinit();
+          await result.triggerReinit();
+        }
+        // Recovery clears `error`; leave a stable message so the failed send
+        // is visible (no raw exception text).
+        if (isCurrentSession()) {
+          set((state) => {
+            state.error = state.error ?? 'Failed to create conversation';
+          });
         }
         return null;
       }
@@ -214,44 +228,7 @@ export const createConversationSlice: ChatSliceCreator<ConversationSlice> = (
     try {
       await workspaceService.deleteConversation(id);
       if (!isCurrentSession()) return false;
-      // Cascade: the conversation's threads (and their message caches) are
-      // unreachable once it's gone — deleting only the conversation row used
-      // to orphan cached threads/messages/pagination/freshness and their
-      // reverse-index entries, and left descendant requests in flight.
-      const snapshot = get();
-      const threadIds = new Set([
-        ...(snapshot.threads[id] || []).map((t) => t.id),
-        ...Object.keys(snapshot.threadToConversation).filter(
-          (threadId) => snapshot.threadToConversation[threadId] === id
-        ),
-      ]);
-      threadIds.forEach(markThreadDeleted);
-      threadIds.forEach(abortNewestPageRequest);
-      set((state) => {
-        // Use O(1) reverse index lookup (GOO-86)
-        removeItemFromRecord(
-          state.conversations,
-          id,
-          state.conversationToWorkspace
-        );
-        for (const threadId of threadIds) {
-          for (const message of state.messages[threadId] || []) {
-            delete state.messageToThread[message.id];
-          }
-          delete state.messages[threadId];
-          delete state.messagePagination[threadId];
-          delete state.messageFreshness[threadId];
-          delete state.threadToConversation[threadId];
-          if (state.currentThreadId === threadId) {
-            state.currentThreadId = null;
-          }
-        }
-        delete state.threads[id];
-        if (state.currentConversationId === id) {
-          state.currentConversationId = null;
-          state.currentThreadId = null;
-        }
-      });
+      dropConversationLocally(get, set, id, 'deleted');
       return true;
     } catch (error) {
       if (!isCurrentSession()) return false;

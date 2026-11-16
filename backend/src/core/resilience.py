@@ -271,27 +271,30 @@ class Bulkhead:
                 raise BulkheadFullError(self.name, self.max_concurrent)
             self._queue_size += 1
 
+        # From here on the counters are updated without awaiting. Every update
+        # is synchronous, so the event loop cannot interleave another task
+        # mid-update, and a cancellation cannot land between taking the permit
+        # and entering the try/finally that returns it (or between releasing
+        # the permit and decrementing the running count). Awaiting the stats
+        # lock at those points leaked a permit or a running slot on cancel.
         try:
             await asyncio.wait_for(self._semaphore.acquire(), timeout=effective_timeout)
         except asyncio.TimeoutError:
-            async with self._lock:
-                self._queue_size -= 1
-                self._total_rejected += 1
+            self._queue_size -= 1
+            self._total_rejected += 1
             raise
         except BaseException:
             # Cancelled while waiting: give the reservation back.
-            async with self._lock:
-                self._queue_size -= 1
+            self._queue_size -= 1
             raise
 
-        async with self._lock:
-            self._queue_size -= 1
-            self._current += 1
-            self._total_acquired += 1
-            self._wait_times.append(time.time() - start_time)
-            # Keep only last 100 wait times
-            if len(self._wait_times) > 100:
-                self._wait_times = self._wait_times[-100:]
+        self._queue_size -= 1
+        self._current += 1
+        self._total_acquired += 1
+        self._wait_times.append(time.time() - start_time)
+        # Keep only last 100 wait times
+        if len(self._wait_times) > 100:
+            self._wait_times = self._wait_times[-100:]
 
         # The guarded body runs outside the reservation handlers above, so a
         # TimeoutError raised by the caller's own code is not miscounted as a
@@ -300,8 +303,7 @@ class Bulkhead:
             yield
         finally:
             self._semaphore.release()
-            async with self._lock:
-                self._current -= 1
+            self._current -= 1
 
     def get_stats(self) -> BulkheadStats:
         """Get current bulkhead statistics."""

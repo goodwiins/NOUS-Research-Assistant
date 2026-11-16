@@ -198,6 +198,68 @@ describe('workspaceService default workspace cache', () => {
     });
   });
 
+  it('does not create a second default workspace when the list stays empty after creating one', async () => {
+    const { workspaceService } = await loadService();
+    const created = { id: 'ws-new', name: 'My Workspace' } as Workspace;
+    vi.spyOn(workspaceService, 'listWorkspaces').mockResolvedValue([]);
+    const create = vi
+      .spyOn(workspaceService, 'createWorkspace')
+      .mockResolvedValue(created);
+
+    await expect(
+      workspaceService.getOrCreateDefaultWorkspace('user-A')
+    ).resolves.toEqual(created);
+    // A recovery retry after the new workspace failed: must not create again
+    await expect(
+      workspaceService.getOrCreateDefaultWorkspace('user-A')
+    ).rejects.toThrow(/already created/);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not remember an unknown owner, so a later principal can still bootstrap', async () => {
+    const { workspaceService } = await loadService();
+    vi.spyOn(workspaceService, 'listWorkspaces').mockResolvedValue([]);
+    const create = vi
+      .spyOn(workspaceService, 'createWorkspace')
+      .mockResolvedValue({ id: 'ws-new' } as Workspace);
+
+    await workspaceService.getOrCreateDefaultWorkspace();
+    await workspaceService.getOrCreateDefaultWorkspace();
+    await workspaceService.getOrCreateDefaultWorkspace('user-B');
+
+    expect(create).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not block a different owner after creating for another', async () => {
+    const { workspaceService } = await loadService();
+    vi.spyOn(workspaceService, 'listWorkspaces').mockResolvedValue([]);
+    const create = vi
+      .spyOn(workspaceService, 'createWorkspace')
+      .mockResolvedValue({ id: 'ws-new' } as Workspace);
+
+    await workspaceService.getOrCreateDefaultWorkspace('user-A');
+    await workspaceService.getOrCreateDefaultWorkspace('user-B');
+
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows creating again once the server has listed a workspace in between', async () => {
+    const { workspaceService } = await loadService();
+    const list = vi.spyOn(workspaceService, 'listWorkspaces');
+    const create = vi
+      .spyOn(workspaceService, 'createWorkspace')
+      .mockResolvedValue({ id: 'ws-new' } as Workspace);
+
+    list.mockResolvedValueOnce([]);
+    await workspaceService.getOrCreateDefaultWorkspace('user-A');
+    list.mockResolvedValueOnce([liveWorkspace as Workspace]);
+    await workspaceService.getOrCreateDefaultWorkspace('user-A');
+    list.mockResolvedValueOnce([]);
+    await workspaceService.getOrCreateDefaultWorkspace('user-A');
+
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
   it('cannot restore the old account’s cache after it was cleared', async () => {
     const { workspaceService, clearWorkspaceServiceCache } =
       await import('@/services/workspaceService');

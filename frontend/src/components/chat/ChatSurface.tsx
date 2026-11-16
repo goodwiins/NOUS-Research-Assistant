@@ -18,6 +18,7 @@ import { ChatHeader } from '@/components/chat/ChatHeader';
 import { HarnessSelector } from '@/components/chat/HarnessSelector';
 import { ChatSidebar } from '@/components/chat/ChatSidebar';
 import { ChatTranscriptState } from '@/components/chat/ChatTranscriptState';
+import { ChatCompletionAnnouncer } from '@/components/chat/ChatCompletionAnnouncer';
 import { ChatRuntimeProvider } from '@/components/chat/aui/ChatRuntimeProvider';
 import type { UseChatSessionReturn } from '@/hooks/chat/useChatSession';
 import {
@@ -452,6 +453,11 @@ export function ChatSurface({
             onCommandItemAction={handleCommandItemAction}
             onLoadOlder={loadOlderMessages}
             messagePagination={messagePagination}
+          />
+          <ChatCompletionAnnouncer
+            isStreaming={isTranscriptGrowing}
+            threadId={activeThreadId}
+            messages={displayedMessages}
           />
 
           {/* Raises a Quote action on a selection inside a committed

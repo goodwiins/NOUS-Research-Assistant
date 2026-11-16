@@ -355,9 +355,11 @@ describe('useChatStreaming pending-confirmation probe (cold thread load)', () =>
       const { result } = await renderStreaming();
 
       await waitFor(() => expect(resumeStreamMock).toHaveBeenCalledTimes(1));
+      // A fresh mount holds no content for the run, so it replays from 0 to
+      // rebuild the whole answer rather than only the frames after cursor 7.
       expect(resumeStreamMock).toHaveBeenCalledWith(
         'thread-A',
-        7,
+        0,
         expect.any(Object),
         expect.any(AbortSignal),
         'stream-A'
