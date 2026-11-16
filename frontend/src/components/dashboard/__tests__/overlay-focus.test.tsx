@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, type RenderResult } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
@@ -32,7 +32,7 @@ function Harness({
 }: {
   Overlay: React.ComponentType<OverlayProps>;
   onClose?: () => void;
-}) {
+}): React.ReactElement {
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -51,11 +51,11 @@ function Harness({
   );
 }
 
-function CreateProjectOverlay(props: OverlayProps) {
+function CreateProjectOverlay(props: OverlayProps): React.ReactElement {
   return <CreateProjectModal {...props} onCreated={() => {}} />;
 }
 
-function renderWithQuery(ui: React.ReactElement) {
+function renderWithQuery(ui: React.ReactElement): RenderResult {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
