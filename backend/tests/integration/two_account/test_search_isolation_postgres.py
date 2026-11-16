@@ -178,6 +178,7 @@ def graph_calls(
         source_document_ids: Optional[List[str]] = None,
         organization_id: Optional[str] = None,
         require_source_document: bool = False,
+        offset: int = 0,
     ) -> list:
         calls.append(
             {
@@ -188,7 +189,14 @@ def graph_calls(
         )
         return list(graph_entities)
 
+    def count_search_entities(query: str, **scope: Any) -> int:
+        # A full page asks Neo4j for the total (GOO-497); keep that stubbed too.
+        return len(graph_entities)
+
     monkeypatch.setattr(knowledge_graph_service, "search_entities", search_entities)
+    monkeypatch.setattr(
+        knowledge_graph_service, "count_search_entities", count_search_entities
+    )
     monkeypatch.setattr(cohere_rerank_service, "_enabled", False)
     return calls
 
