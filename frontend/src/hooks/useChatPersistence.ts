@@ -23,6 +23,10 @@ import {
 } from '@/types/workspace';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { MAX_REINIT_RETRIES } from '@/store/chat/initialState';
+import {
+  extractStructuredCitationTitle,
+  MAX_CITATION_TITLE_INPUT_LENGTH,
+} from '@/utils/citationNormalizer';
 
 const debugLog =
   process.env.NODE_ENV === 'development'
@@ -103,14 +107,7 @@ const TITLE_PATTERNS: Array<{
   pattern: RegExp;
   group: number;
   minLength?: number;
-  skipAuthorCheck?: boolean;
 }> = [
-  // "Title: <title>" pattern (common in arXiv papers)
-  {
-    pattern: /^Title:\s*(.+?)(?:\s*Authors:|$)/i,
-    group: 1,
-    skipAuthorCheck: true,
-  },
   // arXiv ID formats: "arXiv:2401.12345 - Title"
   {
     pattern: /arXiv:\d{4}\.\d{4,5}(?:v\d+)?\s*[-:]\s*(.+?)(?:\n|$)/i,
@@ -150,27 +147,27 @@ function truncateTitle(text: string, maxLength: number = 150): string {
  * Check if text looks like an author list
  */
 function looksLikeAuthorList(text: string): boolean {
-  return /^[A-Z][a-z]+(?:\s+[A-Z]\.?\s*)+(?:,|and)/.test(text);
+  return /^[A-Z][a-z]+(?:\s+[A-Z]\.?)+\s*(?:,|and)/.test(text);
 }
 
 function extractTitleFromSnippet(snippet?: string): string | null {
   if (!snippet) return null;
 
-  const trimmedSnippet = snippet.trim();
+  const trimmedSnippet = snippet
+    .slice(0, MAX_CITATION_TITLE_INPUT_LENGTH)
+    .trim();
   if (!trimmedSnippet) return null;
 
+  const structuredTitle = extractStructuredCitationTitle(trimmedSnippet);
+  if (structuredTitle) return truncateTitle(structuredTitle);
+
   // Try configured patterns
-  for (const {
-    pattern,
-    group,
-    minLength = 0,
-    skipAuthorCheck = false,
-  } of TITLE_PATTERNS) {
+  for (const { pattern, group, minLength = 0 } of TITLE_PATTERNS) {
     const match = trimmedSnippet.match(pattern);
     if (match?.[group] && match[group].length > minLength) {
       const extracted = match[group].trim();
-      // Skip if it looks like an author list (unless configured to skip this check)
-      if (!skipAuthorCheck && looksLikeAuthorList(extracted)) {
+      // Skip if it looks like an author list
+      if (looksLikeAuthorList(extracted)) {
         continue;
       }
       return truncateTitle(extracted);
@@ -213,15 +210,13 @@ export function mapDbMessageToUI(dbMsg: ChatMessage): UIMessage {
       // 2. Extracted from snippet content
       // 3. External reference ID (e.g., arXiv ID like "2401.12345")
       // 4. Generic fallback
-      const extractedTitle =
-        extractTitleFromSnippet(c.snippet) ||
-        extractTitleFromSnippet(c.snippet_preview);
       const title =
-        c.document_title ??
-        extractedTitle ??
+        c.document_title?.trim() ||
+        extractTitleFromSnippet(c.snippet) ||
+        extractTitleFromSnippet(c.snippet_preview) ||
         (c.external_reference_id
           ? `Reference: ${c.external_reference_id}`
-          : null) ??
+          : null) ||
         'Untitled Document';
 
       return {

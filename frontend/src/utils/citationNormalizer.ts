@@ -1,6 +1,22 @@
 import type { Citation as DBCitation } from '@/types/workspace';
 import type { Citation } from '@/utils/citationParser';
 
+export const MAX_CITATION_TITLE_INPUT_LENGTH = 4096;
+
+export function extractStructuredCitationTitle(snippet: string): string | null {
+  const boundedSnippet = snippet.slice(0, MAX_CITATION_TITLE_INPUT_LENGTH);
+  if (!/^Title:/i.test(boundedSnippet)) return null;
+
+  const text = boundedSnippet.slice(6).trimStart();
+  const lineEnd = text.search(/[\r\n]/);
+  const firstLine = lineEnd < 0 ? text : text.slice(0, lineEnd);
+  const authorsAt = firstLine.search(/\sAuthors:/i);
+  const title = (
+    authorsAt < 0 ? firstLine : firstLine.slice(0, authorsAt)
+  ).trim();
+  return title || null;
+}
+
 /**
  * Extract title from snippet content (for legacy citations without document_title)
  * Handles formats like "Title: Some Title Authors: ..." or plain text
@@ -8,14 +24,14 @@ import type { Citation } from '@/utils/citationParser';
 export function extractTitleFromSnippet(snippet?: string): string | null {
   if (!snippet) return null;
 
+  const boundedSnippet = snippet.slice(0, MAX_CITATION_TITLE_INPUT_LENGTH);
+
   // Try to extract "Title: <title>" pattern (common in arXiv papers)
-  const titleMatch = snippet.match(/^Title:\s*(.+?)(?:\s*Authors:|$)/i);
-  if (titleMatch && titleMatch[1]) {
-    return titleMatch[1].trim();
-  }
+  const structuredTitle = extractStructuredCitationTitle(boundedSnippet);
+  if (structuredTitle) return structuredTitle;
 
   // Fallback: use first line IF it looks like a title (not code, URLs, or log lines)
-  const firstLine = snippet.split('\n')[0].trim();
+  const firstLine = boundedSnippet.split('\n')[0].trim();
   if (firstLine.length > 0 && firstLine.length <= 120) {
     // Skip lines that look like code, URLs, logs, or raw data
     const looksLikeNonTitle =
