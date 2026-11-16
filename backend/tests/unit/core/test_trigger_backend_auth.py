@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt
@@ -36,7 +37,7 @@ def _token(token_scope: str, key: str, sub: str, **claims: object) -> str:
         "exp": int((now + timedelta(minutes=90)).timestamp()),
     }
     payload.update(claims)
-    return jwt.encode(payload, key, algorithm="HS256")
+    return cast(str, jwt.encode(payload, key, algorithm="HS256"))
 
 
 def _authenticate(token: str, method: str, path: str) -> TokenData:
