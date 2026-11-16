@@ -188,6 +188,30 @@ def _entity_scope_predicate(
     return "(" + " OR ".join(preds) + ")"
 
 
+def _entity_search_filters(
+    source_document_ids: Optional[List[str]],
+    organization_id: Optional[str],
+    entity_types: Optional[List[EntityType]],
+    require_source_document: bool,
+    params: Dict[str, Any],
+) -> List[str]:
+    """Scope/type filters (alias ``e``) shared by ``search_entities`` and
+    ``count_search_entities``, so a page and its total always agree.
+    Mutates ``params`` with the bind vars it uses."""
+    filters: List[str] = []
+    scope = _entity_scope_predicate("e", source_document_ids, organization_id, params)
+    if scope:
+        filters.append(scope)
+    if entity_types:
+        filters.append("e.type IN $entity_types")
+        params["entity_types"] = [t.value for t in entity_types]
+    if require_source_document:
+        filters.append(
+            "e.source_document_id IS NOT NULL AND e.source_document_id <> ''"
+        )
+    return filters
+
+
 def _two_endpoint_scope(
     alias_a: str,
     alias_b: str,
@@ -1245,32 +1269,27 @@ class KnowledgeGraphService:
         source_document_ids: Optional[List[str]] = None,
         organization_id: Optional[str] = None,
         require_source_document: bool = False,
+        offset: int = 0,
     ) -> List[EntityResponse]:
         """Search for entities by name or properties, optionally scoped to organization documents
 
         ``require_source_document`` keeps only entities that carry a
         ``source_document_id``, applied in the query so ``limit`` counts only
-        those (callers that map entities to documents need it).
+        those (callers that map entities to documents need it). ``offset``
+        skips that many matches (GOO-497); ``e.id`` breaks ordering ties so
+        pages are stable.
         """
         try:
             with self.get_session() as session:
                 query_str = (query or "").strip()
-                # Shared scope/type filters (reference `e`).
-                filters: List[str] = []
-                params: Dict[str, Any] = {"limit": limit}
-                scope = _entity_scope_predicate(
-                    "e", source_document_ids, organization_id, params
+                params: Dict[str, Any] = {"limit": limit, "offset": offset}
+                filters = _entity_search_filters(
+                    source_document_ids,
+                    organization_id,
+                    entity_types,
+                    require_source_document,
+                    params,
                 )
-                if scope:
-                    filters.append(scope)
-                if entity_types:
-                    filters.append("e.type IN $entity_types")
-                    params["entity_types"] = [t.value for t in entity_types]
-                if require_source_document:
-                    filters.append(
-                        "e.source_document_id IS NOT NULL"
-                        " AND e.source_document_id <> ''"
-                    )
 
                 result = None
                 if query_str:
@@ -1284,7 +1303,8 @@ class KnowledgeGraphService:
                     YIELD node AS e, score
                     {ft_where}
                     RETURN e
-                    ORDER BY score DESC
+                    ORDER BY score DESC, e.id
+                    SKIP $offset
                     LIMIT $limit
                     """
                     try:
@@ -1311,7 +1331,8 @@ class KnowledgeGraphService:
                     MATCH (e:Entity)
                     {where_clause}
                     RETURN e
-                    ORDER BY e.confidence_score DESC
+                    ORDER BY e.confidence_score DESC, e.id
+                    SKIP $offset
                     LIMIT $limit
                     """
                     result = session.run(search_query, params)
@@ -1346,6 +1367,70 @@ class KnowledgeGraphService:
         except Exception as e:
             # Re-raise like get_all_entities: an outage is not an empty graph.
             logger.error(f"Error searching entities: {e}")
+            raise
+
+    def count_search_entities(
+        self,
+        query: str,
+        entity_types: Optional[List[EntityType]] = None,
+        source_document_ids: Optional[List[str]] = None,
+        organization_id: Optional[str] = None,
+        require_source_document: bool = False,
+    ) -> int:
+        """Count every match ``search_entities`` would page over (GOO-497).
+
+        Same scope, filters and fulltext-then-CONTAINS fallback, without
+        SKIP/LIMIT. Raises on driver / breaker failure.
+        """
+        try:
+            with self.get_session() as session:
+                query_str = (query or "").strip()
+                params: Dict[str, Any] = {}
+                filters = _entity_search_filters(
+                    source_document_ids,
+                    organization_id,
+                    entity_types,
+                    require_source_document,
+                    params,
+                )
+                if query_str:
+                    ft_where = (" WHERE " + " AND ".join(filters)) if filters else ""
+                    ft_query = f"""
+                    CALL db.index.fulltext.queryNodes('entity_fulltext_idx', $lucene)
+                    YIELD node AS e, score
+                    {ft_where}
+                    RETURN count(e) AS total
+                    """
+                    try:
+                        rows = list(
+                            session.run(
+                                ft_query,
+                                {**params, "lucene": _to_lucene_prefix(query_str)},
+                            )
+                        )
+                        return int(rows[0]["total"]) if rows else 0
+                    except Exception as ft_err:
+                        logger.warning(
+                            "Fulltext count failed, falling back to CONTAINS: %s",
+                            ft_err,
+                        )
+
+                conditions = list(filters)
+                if query_str:
+                    conditions.insert(0, "e.name CONTAINS $query")
+                    params["query"] = query_str
+                where_clause = (
+                    (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                )
+                rows = list(
+                    session.run(
+                        f"MATCH (e:Entity){where_clause} RETURN count(e) AS total",
+                        params,
+                    )
+                )
+                return int(rows[0]["total"]) if rows else 0
+        except Exception as e:
+            logger.error(f"Error counting entity search matches: {e}")
             raise
 
     def get_all_entities(
@@ -3160,16 +3245,16 @@ class KnowledgeGraphService:
                     "scoping by organization_id only: %s",
                     e,
                 )
-        entities = self.search_entities(
-            query_text,
-            limit=limit,
-            source_document_ids=source_document_ids,
-            organization_id=organization_id,
+        scope_kwargs: Dict[str, Any] = {
+            "source_document_ids": source_document_ids,
+            "organization_id": organization_id,
             # Filter source-less entities in the query, before LIMIT, so they
             # cannot crowd document-backed matches out of the page.
-            require_source_document=True,
+            "require_source_document": True,
+        }
+        entities = self.search_entities(
+            query_text, limit=limit, offset=offset, **scope_kwargs
         )
-
         results = []
         now = datetime.utcnow()
         for entity in entities:
@@ -3201,18 +3286,31 @@ class KnowledgeGraphService:
                 )
             )
 
+        # GOO-497: a real total. A non-empty short page ends the result set,
+        # so offset + page size is exact; only a full page, or an empty page
+        # past the start, needs the count query.
+        if entities and len(entities) < limit:
+            total_results = offset + len(results)
+            has_more = False
+        elif not entities and offset == 0:
+            total_results = 0
+            has_more = False
+        else:
+            total_results = self.count_search_entities(query_text, **scope_kwargs)
+            has_more = offset + len(entities) < total_results
+
         search_time_ms = (time.time() - start_time) * 1000
         return SearchResponse(
             query=query_text,
             search_id=str(uuid.uuid4()),
             search_type=search_type,
             results=results,
-            total_results=len(results),
+            total_results=total_results,
             returned_results=len(results),
             search_time_ms=search_time_ms,
             limit=limit,
             offset=offset,
-            has_more=False,
+            has_more=has_more,
         )
 
     def create_entity_node(
