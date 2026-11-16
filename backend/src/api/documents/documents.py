@@ -1253,12 +1253,17 @@ async def reprocess_document(
         # post-commit window leaves the job PENDING/celery_task_id=NULL, which
         # the lost-job reconciler (src.tasks.reconcile_jobs) re-enqueues —
         # durability without the pre-commit race.
-        from src.tasks.enqueue import enqueue_after_commit
+        from src.tasks.enqueue import enqueue_after_commit, record_dispatched_task_id
         from src.tasks.processing_tasks import process_document_ingestion
 
-        enqueue_after_commit(db, process_document_ingestion, str(processing_job.id))
+        dispatch = enqueue_after_commit(
+            db, process_document_ingestion, str(processing_job.id)
+        )
 
         await db.commit()
+        # GOO-463: a stamped id tells the reconciler the message landed, so a
+        # backlog past its stale window is not re-published.
+        await record_dispatched_task_id(db, processing_job.id, dispatch.task_id)
 
         return {
             "message": "Document queued for reprocessing",

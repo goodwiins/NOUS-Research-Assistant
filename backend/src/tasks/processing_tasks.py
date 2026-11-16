@@ -1097,6 +1097,27 @@ def index_in_graph(self, job_id: str):
         db.close()
 
 
+def _skip_if_terminal_under_lock(db: Any, job: Any, job_id: str) -> dict | None:
+    """Re-read ``job`` under a row lock; return a skip result if it is terminal.
+
+    GOO-464: the KG job endpoints reserve a job (QUEUED, committed) and then
+    publish; a publish that raises fails the reservation. A broker can accept
+    the message and still raise, so this worker's unlocked read can see QUEUED
+    while the producer commits FAILED. ``start_job()`` on that stale object
+    would write RUNNING over FAILED. Call immediately before ``start_job()``;
+    the lock is held until the caller's commit.
+    """
+    db.refresh(job, with_for_update=True)
+    if job.status not in _TERMINAL_PROCESSING_STATUSES:
+        return None
+    logger.info("Job %s is %s under lock; skipping start", job_id, job.status.value)
+    return {
+        "status": job.status.value,
+        "job_id": job_id,
+        "skipped": "duplicate_delivery",
+    }
+
+
 @current_app.task(base=ProcessingTask, bind=True, name="kg_extract_entities_job")
 def kg_extract_entities_job(self, job_id: str):
     """Extract entities from a document and index them into knowledge graph."""
@@ -1120,6 +1141,11 @@ def kg_extract_entities_job(self, job_id: str):
                 "skipped": "duplicate_delivery",
             }
 
+        # FAILED/CANCELLED are terminal too (a failed publish, a cancel), and
+        # the producer may write them after the unlocked read above.
+        skipped = _skip_if_terminal_under_lock(db, job, job_id)
+        if skipped is not None:
+            return skipped
         job.start_job(worker_id=self.request.id, celery_task_id=self.request.id)
         db.commit()
 
@@ -1386,6 +1412,9 @@ def kg_merge_entities_job(self, job_id: str):
         # is passed through.
         job_org_id = str(job.organization_id) if job.organization_id else None
 
+        skipped = _skip_if_terminal_under_lock(db, job, job_id)
+        if skipped is not None:
+            return skipped
         job.start_job(worker_id=self.request.id, celery_task_id=self.request.id)
         db.commit()
 

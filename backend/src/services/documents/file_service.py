@@ -708,9 +708,14 @@ class FileService:
             await self.db.refresh(processing_job)
 
             # Queue the job for processing
+            from src.tasks.enqueue import record_dispatched_task_id
             from src.tasks.processing_tasks import process_document_ingestion
 
-            process_document_ingestion.delay(str(processing_job.id))
+            dispatched = process_document_ingestion.delay(str(processing_job.id))
+            # GOO-463: a stamped id tells the reconciler the message landed.
+            await record_dispatched_task_id(
+                self.db, processing_job.id, getattr(dispatched, "id", None)
+            )
 
             return document
 

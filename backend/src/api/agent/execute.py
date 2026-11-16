@@ -11,6 +11,7 @@ concerns lives in the service layer (audit B1/B5):
 - streaming.py (sibling)              — SSE event generators for /stream and /stream/confirm
 """
 
+import asyncio
 import logging
 import time
 import uuid as _uuid
@@ -430,7 +431,10 @@ async def _celery_dispatch(
     try:
         from src.tasks.agent_run_tasks import run_agent_job
 
-        run_agent_job.delay(
+        # GOO-466: .delay() blocks on the broker round-trip; keep it off the
+        # event loop so a slow Redis does not stall every other request.
+        await asyncio.to_thread(
+            run_agent_job.delay,
             job_id=job_id,
             request_payload=_stored_request_payload(request),
             user_id=str(current_user.id),
