@@ -229,6 +229,22 @@ export function appendProgressStep(
   return [...steps, next].slice(-MAX_PROGRESS_STEPS);
 }
 
+/**
+ * Monotonic claim on the chat store's live-streaming slice. runStreamTurn and
+ * the confirm-resume path are separate stream owners that can overlap across
+ * an await (approve lands while the paused turn is still reconciling), so
+ * each stamps a token and only tears the slice down while it still holds the
+ * claim.
+ *
+ * The claim is shared by every useChatStreaming instance because the slice it
+ * guards is global. It used to be a per-instance ref. Leaving
+ * /chat mid-stream and returning at once mounts a second instance whose
+ * resume turn claims the slice while the old instance is still awaiting its
+ * terminal reconcile; the old instance's teardown must then see that it no
+ * longer owns the slice (GOO-602).
+ */
+const streamSliceOwner = { current: 0 };
+
 function resetStreamingTurnState(): void {
   useChatStore.setState({
     isStreaming: false,
@@ -546,7 +562,7 @@ export function useChatStreaming(
   // ---- Refs ----
   const lastStreamedContentRef = useRef<string>('');
   const abortControllerRef = useRef<AbortController | null>(null);
-  // Which stream-owner claim (see streamOwnerRef) the user's Stop targets.
+  // Which stream-owner claim (see streamSliceOwner) the user's Stop targets.
   // Stamped by handleStop with the claim that is live at that instant; every
   // reader compares against its own turn's claim, so a stop can only ever
   // affect the turn it was aimed at. This is what makes Stop locally
@@ -563,12 +579,6 @@ export function useChatStreaming(
   const activeRunThreadRef = useRef<string | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const submitLockRef = useRef(false);
-  // Monotonic claim on the store's live-streaming slice. runStreamTurn and
-  // the confirm-resume path are separate stream owners that can overlap
-  // across an await (approve lands while the paused turn is still
-  // reconciling), so each stamps a token and only tears the slice down
-  // while it still holds the claim.
-  const streamOwnerRef = useRef(0);
   // CX1 belt: isConfirming (React state) is not synchronous, so two
   // Approve clicks in the same tick both see isConfirming === false before
   // either setState flushes. A ref mirrors submitLockRef's guard so a
@@ -1030,7 +1040,7 @@ export function useChatStreaming(
         } else if (recoveryAttempt) {
           finishAuthRecoveryAttempt(recoveryAttempt);
         }
-        streamOwnerRef.current += 1;
+        streamSliceOwner.current += 1;
         abortControllerRef.current?.abort();
         abortControllerRef.current = null;
         probeAbortRef.current?.abort();
@@ -1169,8 +1179,8 @@ export function useChatStreaming(
         start,
       } = opts;
 
-      // Claim the store's streaming slice for this turn (see streamOwnerRef).
-      const streamOwner = (streamOwnerRef.current += 1);
+      // Claim the store's streaming slice for this turn (see streamSliceOwner).
+      const streamOwner = (streamSliceOwner.current += 1);
       const isStoppedByUser = (): boolean =>
         stopTargetRef.current === streamOwner;
 
@@ -1385,7 +1395,10 @@ export function useChatStreaming(
             },
             onRunId: (runId) => {
               if (!isCurrentSession()) return;
-              if (!currentThreadId || streamOwnerRef.current !== streamOwner) {
+              if (
+                !currentThreadId ||
+                streamSliceOwner.current !== streamOwner
+              ) {
                 return;
               }
               runIdByThreadRef.current[currentThreadId] = runId;
@@ -2016,16 +2029,16 @@ export function useChatStreaming(
           // slot is shared, so cancelling it while a confirm stream owns the
           // slice would drop that stream's first flush.
           if (
-            streamOwnerRef.current === streamOwner &&
+            streamSliceOwner.current === streamOwner &&
             streamingRafRef.current !== null
           ) {
             cancelAnimationFrame(streamingRafRef.current);
             streamingRafRef.current = null;
           }
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             flushPendingSeq();
           }
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             pendingStreamContentRef.current = null;
           }
           // Only tear the slice down if nothing newer claimed it. On a
@@ -2033,10 +2046,10 @@ export function useChatStreaming(
           // card; approving starts the confirm stream, and an unconditional wipe
           // here orphaned it — streaming UI gone, carried citations lost,
           // composer unlocked into a second concurrent SSE writer.
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             resetStreamingTurnState();
           }
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             // Same ownership rule: these refs are shared with the confirm
             // stream; a newer owner's state must not be torn down here.
             lastStreamedContentRef.current = '';
@@ -2651,7 +2664,7 @@ export function useChatStreaming(
         // Acceptance may reach the browser before it carries the durable run
         // id. Keep observing and retain Stop intent; onRunId will issue the
         // fenced cancellation once that identity arrives.
-        stopTargetRef.current = streamOwnerRef.current;
+        stopTargetRef.current = streamSliceOwner.current;
       }
       // Keep observing: the request may lose a completion race, and only the
       // persisted terminal event can say whether Codex stopped or completed.
@@ -2660,7 +2673,7 @@ export function useChatStreaming(
 
     // For the native in-process path Stop aborts the reader immediately. Mark
     // it first so the local completion path preserves the stopped partial.
-    stopTargetRef.current = streamOwnerRef.current;
+    stopTargetRef.current = streamSliceOwner.current;
     stopCitationsRef.current = useChatStore.getState().streamingCitations;
     if (normalRunStop && runThread && expectedRunId) {
       // Issue the durable command before aborting the local transport. The
@@ -3143,7 +3156,7 @@ export function useChatStreaming(
         // runStreamTurn (a resumed HITL turn belongs to the confirmation's
         // workspace thread, which may differ from whatever thread is
         // currently displayed) — stamp it the same way.
-        const confirmStreamOwner = (streamOwnerRef.current += 1);
+        const confirmStreamOwner = (streamSliceOwner.current += 1);
         const isConfirmStopped = (): boolean =>
           stopTargetRef.current === confirmStreamOwner;
         useChatStore.setState({
@@ -3310,7 +3323,7 @@ export function useChatStreaming(
                 if (!isCurrentSession()) return;
                 if (
                   !confirmationThreadId ||
-                  streamOwnerRef.current !== confirmStreamOwner
+                  streamSliceOwner.current !== confirmStreamOwner
                 ) {
                   return;
                 }
@@ -3728,7 +3741,7 @@ export function useChatStreaming(
             // this reset and resurrect stale streamingContent into the store.
             // Owner-guarded like runStreamTurn's teardown: a newer stream that
             // claimed the shared slot must not lose its first scheduled flush.
-            if (streamOwnerRef.current === confirmStreamOwner) {
+            if (streamSliceOwner.current === confirmStreamOwner) {
               if (streamingRafRef.current !== null) {
                 cancelAnimationFrame(streamingRafRef.current);
                 streamingRafRef.current = null;
@@ -3739,7 +3752,7 @@ export function useChatStreaming(
             // Same ownership rule as runStreamTurn: a nested interrupt (or any
             // newer stream started while this one was reconciling) owns the
             // slice now, and must not be wiped by this turn's teardown.
-            if (streamOwnerRef.current === confirmStreamOwner) {
+            if (streamSliceOwner.current === confirmStreamOwner) {
               resetStreamingTurnState();
             }
             if (activeRunThreadRef.current === confirmationThreadId) {
