@@ -81,6 +81,7 @@ function ScopedShareDialog({
   const request = useRef<AbortController | null>(null);
   const closed = useRef(false);
   const input = useRef<HTMLTextAreaElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const audienceId = useId();
   const expiryId = useId();
   useEffect(() => {
@@ -237,7 +238,9 @@ function ScopedShareDialog({
           }
         }}
       >
-        <DialogTitle>Share this version</DialogTitle>
+        <DialogTitle ref={titleRef} tabIndex={-1}>
+          Share this version
+        </DialogTitle>
         <DialogDescription>
           {version.title} · This link stays on the selected version. Only the
           listed signed-in users in your organization can open it, for up to
@@ -347,6 +350,7 @@ function ScopedShareDialog({
                   confirmLabel="Revoke link"
                   variant="destructive"
                   onConfirm={() => void revoke(share.id)}
+                  focusAfterConfirmRef={titleRef}
                   trigger={
                     <button
                       type="button"

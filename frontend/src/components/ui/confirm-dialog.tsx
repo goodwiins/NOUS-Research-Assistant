@@ -21,6 +21,13 @@ interface ConfirmDialogProps {
   variant?: 'default' | 'destructive';
   onConfirm: () => void;
   onCancel?: () => void;
+  /**
+   * Where focus goes after the user confirms. Radix returns focus to the
+   * trigger on close, but a confirmed action often disables that trigger
+   * while it runs, and a disabled button cannot take focus, so focus falls
+   * to <body>. Point this at a stable element (a heading with tabIndex={-1}).
+   */
+  focusAfterConfirmRef?: React.RefObject<HTMLElement | null>;
 }
 
 export function ConfirmDialog({
@@ -32,10 +39,13 @@ export function ConfirmDialog({
   variant = 'default',
   onConfirm,
   onCancel,
+  focusAfterConfirmRef,
 }: ConfirmDialogProps) {
   const [open, setOpen] = React.useState(false);
+  const confirmed = React.useRef(false);
 
   const handleConfirm = () => {
+    confirmed.current = true;
     onConfirm();
     setOpen(false);
   };
@@ -48,7 +58,19 @@ export function ConfirmDialog({
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
       <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>
-      <AlertDialogContent className="rounded-(--nous-radius-lg) border border-(--nous-border-1) bg-(--nous-bg-1) shadow-(--nous-shadow-lg)">
+      <AlertDialogContent
+        onCloseAutoFocus={(event) => {
+          const target = confirmed.current
+            ? focusAfterConfirmRef?.current
+            : null;
+          confirmed.current = false;
+          if (target) {
+            event.preventDefault();
+            target.focus();
+          }
+        }}
+        className="rounded-(--nous-radius-lg) border border-(--nous-border-1) bg-(--nous-bg-1) shadow-(--nous-shadow-lg)"
+      >
         <AlertDialogHeader>
           <AlertDialogTitle className="text-(--nous-fg-1) tracking-tight">
             {title}

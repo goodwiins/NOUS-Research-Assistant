@@ -258,6 +258,11 @@ describe('ArtifactShareDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Revoke link' }));
     await waitFor(() =>
       expect(
+        screen.getByRole('heading', { name: 'Share this version' })
+      ).toHaveFocus()
+    );
+    await waitFor(() =>
+      expect(
         screen.queryByRole('link', { name: 'Open shared version' })
       ).toBeNull()
     );

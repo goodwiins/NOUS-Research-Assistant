@@ -477,7 +477,8 @@ describe('ProjectWorkflow', () => {
         created_at: '2026-01-01T00:00:00Z',
       },
     ] as Awaited<ReturnType<typeof listProjectRoles>>);
-    vi.mocked(removeProjectRole).mockResolvedValue(undefined as never);
+    // Never settles, so the trigger stays disabled after confirm.
+    vi.mocked(removeProjectRole).mockReturnValue(new Promise(() => {}));
     const user = userEvent.setup();
     render(
       <QueryClientProvider client={new QueryClient()}>
@@ -512,6 +513,13 @@ describe('ProjectWorkflow', () => {
         'someone-else',
         'reviewer'
       )
+    );
+    // The trigger is disabled while the request runs, so focus goes to the
+    // section heading instead of falling to <body>.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('heading', { name: 'Workflow role assignments' })
+      ).toHaveFocus()
     );
   });
 });
