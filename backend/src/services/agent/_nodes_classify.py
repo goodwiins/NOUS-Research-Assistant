@@ -128,7 +128,12 @@ async def _classify_core(state: AgentState, config: RunnableConfig) -> dict:
             break
 
     if not last_user_msg:
-        return {"intent": "general", "intent_confidence": 0.0}
+        return {
+            "intent": "general",
+            "intent_confidence": 0.0,
+            "intent_source": "fallback",
+            "intent_fallback_reason": "empty_query",
+        }
 
     previous_turn = ""
     found_user = False
@@ -150,11 +155,20 @@ async def _classify_core(state: AgentState, config: RunnableConfig) -> dict:
         previous_turn=previous_turn,
         prior_tool=prior_tool,
     )
-    logger.debug(
-        "Classified intent: %s (confidence=%.2f, source=%s)",
+    # INFO, not DEBUG: a route chosen by fallback must be visible in the
+    # normal logs, not only when someone turns debug logging on (GOO-472).
+    log = logger.info if result.fallback_reason else logger.debug
+    log(
+        "Classified intent: %s (confidence=%.2f, source=%s, fallback_reason=%s)",
         result.intent,
         result.confidence,
         result.source,
+        result.fallback_reason or "-",
+        extra={
+            "intent": result.intent,
+            "intent_source": result.source,
+            "intent_fallback_reason": result.fallback_reason,
+        },
     )
     try:
         from src.services.agent.observability import (
@@ -166,7 +180,14 @@ async def _classify_core(state: AgentState, config: RunnableConfig) -> dict:
         record_intent_confidence(source=result.source, confidence=result.confidence)
     except Exception:
         pass
-    return {"intent": result.intent, "intent_confidence": result.confidence}
+    # Recorded in state so the preprocessing node's traced output, the
+    # iteration ledger and evals can tell a semantic route from a fallback.
+    return {
+        "intent": result.intent,
+        "intent_confidence": result.confidence,
+        "intent_source": result.source,
+        "intent_fallback_reason": result.fallback_reason,
+    }
 
 
 # ``intent_classifier_node`` is the tracked graph-node version of
@@ -287,7 +308,14 @@ async def preprocessing_node(state: AgentState, config: RunnableConfig) -> dict:
 
     defaults = [
         {"retrieved_contexts": [], "retrieval_status": "error"},
-        {"intent": "general", "intent_confidence": 0.0},
+        {
+            "intent": "general",
+            "intent_confidence": 0.0,
+            # The classify subtask itself raised; distinct from every
+            # classifier-internal fallback so it is not mistaken for one.
+            "intent_source": "error",
+            "intent_fallback_reason": "classifier_exception",
+        },
         {"user_memories": []},
     ]
     merged: dict = {

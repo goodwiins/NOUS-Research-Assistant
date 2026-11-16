@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Literal, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -37,6 +37,17 @@ logger = logging.getLogger(__name__)
 # Type alias matching the state schema
 IntentType = Literal["research", "writing", "knowledge_graph", "general"]
 ClassifierSource = Literal["llm", "typesafe", "keyword", "shortcut", "fallback"]
+# Why the semantic (LLM) verdict was not the one returned. Bounded so it can
+# be used as a log field or trace tag without cardinality blow-up.
+FallbackReason = Literal[
+    "",
+    "empty_query",
+    "llm_timeout",
+    "llm_deployment_not_found",
+    "llm_error",
+    "llm_low_confidence",
+    "weak_specialized_llm",
+]
 
 # Confidence threshold below which the LLM result is discarded in favour of
 # the keyword classifier.
@@ -94,12 +105,19 @@ class ClassificationResult:
         source:     Which classifier produced this result
                     ("llm", "typesafe", "keyword", "shortcut", or
                     "fallback").
+        fallback_reason:
+                    Why the semantic classifier's verdict was not used, or
+                    "" when it was (or was never consulted by design). One
+                    of ``FallbackReason``. Without it a timed-out or failing
+                    LLM is indistinguishable from a keyword decision in
+                    state and traces (GOO-472).
     """
 
     intent: IntentType
     confidence: float
     reasoning: str
     source: ClassifierSource
+    fallback_reason: FallbackReason = ""
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +467,7 @@ async def classify_intent_with_fallback(
             confidence=0.0,
             reasoning="Empty query — defaulted to general.",
             source="fallback",
+            fallback_reason="empty_query",
         )
 
     if (
@@ -472,6 +491,9 @@ async def classify_intent_with_fallback(
     if retry_result is not None:
         return retry_result
     deadline = asyncio.get_running_loop().time() + _CLASSIFIER_LLM_TIMEOUT_SECONDS
+    # Every path that falls through to the keyword result below sets this,
+    # so the returned result records why the semantic verdict was dropped.
+    fallback_reason: FallbackReason = "llm_low_confidence"
     try:
         if settings.AGENT_INTENT_PROVIDER == "typesafe":
             from src.services.agent.typesafe_classifier import classify_intent_typesafe
@@ -525,6 +547,7 @@ async def classify_intent_with_fallback(
                     f"{_SPECIALIZED_LLM_MIN_CONFIDENCE:.2f})."
                 ),
                 source="fallback",
+                fallback_reason="weak_specialized_llm",
             )
 
         if (
@@ -553,9 +576,11 @@ async def classify_intent_with_fallback(
             _LLM_CONFIDENCE_THRESHOLD,
         )
     except asyncio.TimeoutError:
+        fallback_reason = "llm_timeout"
         logger.warning(
             "LLM classifier timed out after %.1fs, using keyword result",
             _CLASSIFIER_LLM_TIMEOUT_SECONDS,
+            extra={"classifier_decision": "keyword_fallback_llm_timeout"},
         )
     except asyncio.CancelledError:
         # Caller aborted the request — propagate, don't swallow.
@@ -571,14 +596,19 @@ async def classify_intent_with_fallback(
         if is_not_found:
             from src.services.agent.llm_factory import get_lightweight_model_name
 
+            fallback_reason = "llm_deployment_not_found"
             logger.error(
                 "Classifier LLM deployment '%s' returned 404 — check "
                 "AZURE_OPENAI_LIGHTWEIGHT_DEPLOYMENT. Falling back to keyword classifier.",
                 get_lightweight_model_name(),
+                extra={"classifier_decision": "keyword_fallback_llm_not_found"},
             )
         else:
+            fallback_reason = "llm_error"
             logger.warning(
-                "LLM classifier failed, using keyword result (%s)", type(exc).__name__
+                "LLM classifier failed, using keyword result (%s)",
+                type(exc).__name__,
+                extra={"classifier_decision": "keyword_fallback_llm_error"},
             )
 
     # Last-resort heuristic, not a capability guarantee. General is not a
@@ -588,9 +618,11 @@ async def classify_intent_with_fallback(
         and keyword_result.confidence < _WEAK_KEYWORD_MIN_CONFIDENCE
     ):
         logger.info(
-            "Rejected weak keyword intent '%s' at %.2f: single-keyword evidence",
+            "Rejected weak keyword intent '%s' at %.2f: single-keyword evidence "
+            "(semantic verdict unused: %s)",
             keyword_result.intent,
             keyword_result.confidence,
+            fallback_reason,
             extra={"classifier_decision": "rejected_weak_keyword"},
         )
         return ClassificationResult(
@@ -603,6 +635,7 @@ async def classify_intent_with_fallback(
                 f"{_WEAK_KEYWORD_MIN_CONFIDENCE:.2f})."
             ),
             source="fallback",
+            fallback_reason=fallback_reason,
         )
 
-    return keyword_result
+    return replace(keyword_result, fallback_reason=fallback_reason)
