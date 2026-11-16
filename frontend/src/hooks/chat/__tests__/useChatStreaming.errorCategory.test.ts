@@ -11,6 +11,7 @@ import type { ChatPageMessage } from '@/components/chat/shared/cloudMessageView'
 import { useChatStore } from '@/store/chat-store';
 import { useAgentActivityStore } from '@/stores/agentActivityStore';
 import type { UseChatStreamingParams } from '@/hooks/chat/useChatStreaming';
+import { workspaceService } from '@/services/workspaceService';
 
 function wrapper({ children }: { children: ReactNode }): ReactNode {
   const client = new QueryClient({
@@ -199,18 +200,45 @@ describe('useChatStreaming NOUS stream that ends without a terminal frame', () =
     });
   });
 
-  it('reattaches to the run instead of showing a failure bubble', async () => {
+  type LostStreamCallbacks = {
+    onConnectionLost?: () => void;
+    onError?: (error: string) => void;
+    onToken?: (content: string) => void;
+  };
+
+  /**
+   * Submit a turn whose live stream ends with no terminal frame, then let the
+   * resume effect reattach. The stream yields a tick first so the loading
+   * state actually renders (the resume effect re-runs on its release), and
+   * optionally streams one token before the drop. Returns the setMessages spy
+   * and the resumeStream calls made after the submit (the mount-time
+   * confirmation probe also calls resumeStream).
+   */
+  async function loseStream(opts: {
+    tokenBeforeDrop: boolean;
+    resume: { status: string };
+    persisted?: Array<Record<string, unknown>>;
+  }): Promise<{
+    setMessages: ReturnType<typeof vi.fn>;
+    resumeCalls: unknown[][];
+  }> {
+    vi.mocked(workspaceService.listMessages).mockResolvedValue({
+      messages: opts.persisted ?? [],
+      has_more: false,
+    } as never);
+    resumeStreamMock.mockResolvedValue({ status: 'idle' });
+    // The drop is held until the loading state has rendered: the resume
+    // effect only re-runs when isLoading actually flips back to false.
+    let dropStream!: () => void;
+    const dropped = new Promise<void>((resolve) => {
+      dropStream = resolve;
+    });
     streamMessageMock.mockImplementation(
-      (
-        _req: unknown,
-        cb: {
-          onConnectionLost?: () => void;
-          onError?: (error: string) => void;
-        }
-      ) => {
+      async (_req: unknown, cb: LostStreamCallbacks) => {
+        await dropped;
+        if (opts.tokenBeforeDrop) cb.onToken?.('partial');
         cb.onConnectionLost?.();
         cb.onError?.('Stream ended before completion. Please retry.');
-        return Promise.resolve();
       }
     );
     const setMessages = vi.fn();
@@ -220,14 +248,105 @@ describe('useChatStreaming NOUS stream that ends without a terminal frame', () =
       { wrapper }
     );
     await act(async () => {
-      await result.current.handleSubmit('hello');
+      await new Promise((r) => setTimeout(r, 10));
     });
+    const probeCalls = resumeStreamMock.mock.calls.length;
+    resumeStreamMock.mockResolvedValue(opts.resume);
+    let submitted!: Promise<void>;
+    await act(async () => {
+      submitted = result.current.handleSubmit('hello');
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(result.current.isLoading).toBe(true);
+    await act(async () => {
+      dropStream();
+      await submitted;
+    });
+    await waitFor(() =>
+      expect(resumeStreamMock.mock.calls.length).toBeGreaterThan(probeCalls)
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    return {
+      setMessages,
+      resumeCalls: resumeStreamMock.mock.calls.slice(probeCalls),
+    };
+  }
 
+  it('reattaches to the run instead of showing a failure bubble', async () => {
+    const { setMessages, resumeCalls } = await loseStream({
+      tokenBeforeDrop: true,
+      resume: { status: 'resumed' },
+    });
+    expect(resumeCalls[0][0]).toBe(THREAD_ID);
     expect(lastErrorBubble(setMessages.mock.calls as never)).toBeUndefined();
-    await waitFor(() => expect(resumeStreamMock).toHaveBeenCalled());
-    expect(resumeStreamMock.mock.calls[0][0]).toBe(THREAD_ID);
     expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).not.toBe(
       'error'
+    );
+  });
+
+  // The reattach finds no active run (the worker died, or the stream closed
+  // before its first frame and the backend cleared the active stream without
+  // an assistant row). The turn must not finish silently: reconcile from the
+  // server, show the persisted reply if there is one, and otherwise the
+  // generation-failure bubble.
+  it.each([
+    ['before the first frame', false],
+    ['after a streamed token', true],
+  ])(
+    'shows the failure bubble when the run is gone and no reply was persisted (%s)',
+    async (_label, tokenBeforeDrop) => {
+      const { setMessages } = await loseStream({
+        tokenBeforeDrop,
+        resume: { status: 'idle' },
+      });
+      await waitFor(() =>
+        expect(
+          lastErrorBubble(setMessages.mock.calls as never)?.error?.message
+        ).toBe('This response failed to generate. Please try again.')
+      );
+      expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).toBe(
+        'error'
+      );
+    }
+  );
+
+  it('shows no error when the run is gone but its reply was persisted', async () => {
+    // Newest first, as the API pages them.
+    const { setMessages } = await loseStream({
+      tokenBeforeDrop: false,
+      resume: { status: 'idle' },
+      persisted: [
+        {
+          id: 'a-1',
+          thread_id: THREAD_ID,
+          role: 'assistant',
+          content: 'the persisted answer',
+          created_at: '2026-11-16T00:00:02Z',
+        },
+        {
+          id: 'u-1',
+          thread_id: THREAD_ID,
+          role: 'user',
+          content: 'hello',
+          created_at: '2026-11-16T00:00:01Z',
+        },
+      ],
+    });
+    await waitFor(() =>
+      expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).toBe(
+        'done'
+      )
+    );
+    expect(lastErrorBubble(setMessages.mock.calls as never)).toBeUndefined();
+    expect(
+      useChatStore
+        .getState()
+        .messages[THREAD_ID]?.some((m) => m.content === 'the persisted answer')
+    ).toBe(true);
+    expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).toBe(
+      'done'
     );
   });
 });

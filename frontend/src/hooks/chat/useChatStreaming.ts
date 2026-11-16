@@ -245,6 +245,32 @@ export function appendProgressStep(
  */
 const streamSliceOwner = { current: 0 };
 
+/**
+ * Whether the chat store holds a persisted assistant reply for the turn whose
+ * user message carries `userRuntimeId` (its id or client_message_id). With no
+ * runtime id, or when that user row is not loaded, fall back to whether the
+ * thread's newest persisted message is an assistant reply.
+ */
+function hasPersistedReply(
+  threadId: string,
+  userRuntimeId: string | null
+): boolean {
+  const rows = useChatStore.getState().messages[threadId] ?? [];
+  const isAssistant = (row: (typeof rows)[number]): boolean =>
+    String(row.role) === 'assistant';
+  const userIndex = userRuntimeId
+    ? rows.findIndex(
+        (row) =>
+          row.id === userRuntimeId || row.client_message_id === userRuntimeId
+      )
+    : -1;
+  if (userIndex === -1) {
+    const last = rows[rows.length - 1];
+    return !!last && isAssistant(last);
+  }
+  return rows.slice(userIndex + 1).some(isAssistant);
+}
+
 function resetStreamingTurnState(): void {
   useChatStore.setState({
     isStreaming: false,
@@ -640,6 +666,11 @@ export function useChatStreaming(
   // even though the run has been finished as 'error' (server-authored error
   // frames deliberately do not land here — those turns really are over).
   const transportFailureRef = useRef<Set<string>>(new Set());
+  // Threads whose live NOUS turn ended on a clean EOF with no terminal frame,
+  // keyed to that turn's user runtime id (null when unknown). The resume
+  // effect hands such a turn off; if the server then has no active run, the
+  // turn must not finish silently (see the 'idle' branch there).
+  const lostTransportTurnRef = useRef<Record<string, string | null>>({});
   // Threads already asked whether they hold a parked HITL confirmation —
   // one probe per thread activation (see the cold-load effect below).
   const confirmationProbedRef = useRef<Set<string>>(new Set());
@@ -1134,6 +1165,11 @@ export function useChatStreaming(
       /** Resume: a replay that yields no tokens (nothing buffered / 204)
        * must unwind quietly instead of rendering a "no response" bubble. */
       quietWhenEmpty?: boolean;
+      /** Resume: consulted when the turn ends with no content. True means the
+       * turn this resume picked up after a lost connection is known to have
+       * failed (the server has no active run and persisted no reply), so it
+       * renders the generation-failure bubble instead of unwinding quietly. */
+      failWhenEmpty?: () => boolean;
       /** Resume: consulted before committing the rebuilt answer. A replay that
        * started past our cursor is missing a prefix, so the local
        * reconstruction must not be shown as this turn's answer — the reconcile
@@ -1170,6 +1206,7 @@ export function useChatStreaming(
         newMessages,
         assistantRuntimeId,
         quietWhenEmpty,
+        failWhenEmpty,
         suppressCommit,
         isReplayedPrefix,
         abandonTurn,
@@ -1452,6 +1489,8 @@ export function useChatStreaming(
                 // resume effect reattaches once this turn unwinds. Re-arm it
                 // in case this activation already spent its one attempt.
                 resumeTriedRef.current.delete(currentThreadId);
+                lostTransportTurnRef.current[currentThreadId] =
+                  userRuntimeId ?? null;
               }
             },
             onSeq: (seq) => {
@@ -1815,9 +1854,31 @@ export function useChatStreaming(
         const finalReasoningSummary =
           doneIds.reasoning_summary ?? turnReasoning;
         if (!finalContent.trim() && !finalReasoningSummary.trim()) {
-          // A user-stop before the first token: just unwind quietly — no error
-          // bubble for an answer the user chose not to wait for.
-          if (!isStoppedByUser() && !quietWhenEmpty) {
+          const lostRunGone = !isStoppedByUser() && !!failWhenEmpty?.();
+          if (lostRunGone) {
+            // The connection dropped without a terminal frame and the server
+            // has neither an active run nor a persisted reply for this turn:
+            // the generation failed, so say so instead of leaving the user's
+            // message unanswered.
+            const lostRunMessage: ChatPageMessage = {
+              runtimeId: crypto.randomUUID(),
+              source: 'local-only',
+              role: 'assistant',
+              content: '',
+              timestamp: Date.now(),
+              error: {
+                message: 'This response failed to generate. Please try again.',
+                category: 'stream-error',
+              },
+            };
+            if (isTurnDisplayed())
+              setMessages([
+                ...withoutReplacementMarkers(newMessages),
+                lostRunMessage,
+              ]);
+          } else if (!isStoppedByUser() && !quietWhenEmpty) {
+            // A user-stop before the first token: just unwind quietly — no
+            // error bubble for an answer the user chose not to wait for.
             const emptyResponseMessage: ChatPageMessage = {
               runtimeId: crypto.randomUUID(),
               source: 'local-only',
@@ -2755,6 +2816,11 @@ export function useChatStreaming(
     resumeTriedRef.current.add(threadId);
     transportFailureRef.current.delete(threadId);
     const handedOff = handedOffRunRef.current.delete(threadId);
+    // Set only when this resume follows a NOUS turn whose stream ended with
+    // no terminal frame (undefined otherwise).
+    const lostTurn = lostTransportTurnRef.current[threadId];
+    delete lostTransportTurnRef.current[threadId];
+    let lostRunGone = false;
     console.log('[Chat] Resuming in-flight agent stream:', threadId);
     // ponytail: messages is the snapshot at effect time — if thread history
     // is still loading, the resumed commit appends to a stale list; a
@@ -2778,6 +2844,7 @@ export function useChatStreaming(
       newMessages: messages,
       assistantRuntimeId: `resume:${threadId}:${run.startedAt}`,
       quietWhenEmpty: true,
+      failWhenEmpty: () => lostRunGone,
       suppressCommit: () => replayGapSeen,
       isReplayedPrefix: () => replayingPrefix,
       abandonTurn: () => handOffUnsettled,
@@ -2861,6 +2928,20 @@ export function useChatStreaming(
               // completed. Keep the visible outcome unknown until replay has
               // delivered a persisted terminal event.
               harnessConnection.markConnectionLost(threadId);
+              return;
+            }
+            if (lostTurn !== undefined && !turnProcessedFrame) {
+              // The live stream for this turn dropped without a terminal
+              // frame and the server now has no active run (e.g. the worker
+              // died). Reconcile from the server, which is the sole persisted
+              // writer: a persisted reply is shown as-is, otherwise the turn
+              // failed and must say so rather than finish silently.
+              await useChatStore.getState().refreshMessages(threadId);
+              if (signal.aborted) return;
+              lostRunGone = !hasPersistedReply(threadId, lostTurn);
+              useAgentActivityStore
+                .getState()
+                .finishRun(threadId, lostRunGone ? 'error' : 'done');
               return;
             }
             // Nothing active server-side — clear the stale run record.

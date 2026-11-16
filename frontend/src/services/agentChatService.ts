@@ -134,9 +134,11 @@ export interface AgentStreamCallbacks {
   ) => void;
   /** External Codex requested an exact, one-shot native approval or input. */
   onApprovalRequired?: (requestId: string) => void;
-  /** The stream ended before a terminal frame. The durable run may still be
-   * alive; only this browser's observation of it ended. Fired for every
-   * execution provider, immediately before the matching `onError`. */
+  /** streamMessage only: the stream ended before a terminal frame. The
+   * durable run may still be alive; only this browser's observation of it
+   * ended. Fired for every execution provider, immediately before the
+   * matching `onError`. streamConfirm still reports a terminal-less EOF only
+   * through `onError`, and resumeStream through a 'failed' result. */
   onConnectionLost?: () => void;
   onTrace?: (threadId: string) => void;
   /** Keepalive emitted roughly every 15s during silent planner/LLM phases,
