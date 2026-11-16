@@ -3483,11 +3483,13 @@ async def _tool_search_documents(
             # this the model reported "no documents found" while do_kb_retrieve
             # sat unused one call away (live miss 2026-08-12).
             payload["suggestion"] = (
-                "No title/filename matched. If the user requested a specific named "
-                "source, state that it could not be identified and do not substitute "
-                "broad retrieval. This tool does not search document content; for "
-                "topical discovery not tied to a named source, retry with "
-                "do_kb_retrieve before telling the user nothing was found."
+                "No title/filename matched. If the user named a published paper and "
+                "an arXiv search tool is available, look its exact title up on arXiv "
+                "before saying it could not be found. Otherwise, if the user requested "
+                "a specific named source, state that it could not be identified and do "
+                "not substitute broad retrieval. This tool does not search document "
+                "content; for topical discovery not tied to a named source, retry "
+                "with do_kb_retrieve before telling the user nothing was found."
             )
         return payload
     except Exception as e:
