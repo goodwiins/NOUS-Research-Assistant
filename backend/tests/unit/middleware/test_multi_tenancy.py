@@ -214,7 +214,6 @@ async def test_agent_stream_path_sets_tenant_context():
         "/openapi.json",
         # enumerated exempt routes (_MIDDLEWARE_EXEMPT_PATH_REGEXES)
         "/",
-        "/api/v1/arxiv/search",
         "/api/v1/arxiv/tracking/stats",
         "/api/v1/agent/health",
         "/api/v1/evaluation/health",
@@ -275,9 +274,10 @@ def test_should_skip_tenant_validation_matches_mounted_paths(path):
         # _MIDDLEWARE_EXEMPT_PATH_REGEXES look-alikes: exemptions are
         # exact-route only, so sibling routes (all authenticated) keep tenant
         # validation.
+        "/api/v1/arxiv/search",  # arXiv proxy consumes shared upstream quota
         "/api/v1/arxiv/searchX",
         "/api/v1/arxiv/search/extra",
-        "/api/v1/arxiv/ingest",  # authenticated sibling of the public search
+        "/api/v1/arxiv/ingest",
         "/api/v1/arxiv/tracking/statsX",
         "/api/v1/arxiv/tracking/history",
         "/api/v1/agent/healthX",
@@ -568,7 +568,6 @@ _PUBLIC_ROUTE_STUBS = [
     ("get", "/docs/oauth2-redirect", "oauth2_redirect"),
     ("get", "/redoc", "redoc"),
     ("get", "/openapi.json", "openapi"),
-    ("post", "/api/v1/arxiv/search", "arxiv_search"),
     ("get", "/api/v1/arxiv/tracking/stats", "tracking_stats"),
     ("get", "/api/v1/agent/health", "agent_health"),
     ("get", "/api/v1/evaluation/health", "evaluation_health"),

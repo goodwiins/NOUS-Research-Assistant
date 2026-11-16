@@ -145,7 +145,11 @@ async def get_arxiv_service() -> ArXivIngestionService:
 
 
 # Endpoints
-@router.post("/search", response_model=List[ArXivPaperResponse])
+@router.post(
+    "/search",
+    response_model=List[ArXivPaperResponse],
+    dependencies=[Depends(get_current_user)],
+)
 async def search_arxiv_papers(
     request: ArXivSearchRequest,
 ):

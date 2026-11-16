@@ -39854,6 +39854,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Search Arxiv Papers",
         "tags": [
           "arxiv"

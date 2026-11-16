@@ -63,7 +63,7 @@ EXPENSIVE = {
     "/force-sync",
 }
 CHEAP = {
-    "/api/v1/arxiv/search",  # public discovery search, own row cap
+    "/api/v1/arxiv/search",  # authenticated discovery search, own row cap
     "/api/v1/arxiv/categories",  # static
     "/history",
     "/stats",
