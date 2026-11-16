@@ -99,7 +99,8 @@ async def _call(
 
 
 async def _only_job(db: AsyncSession) -> ProcessingJob:
-    return (await db.execute(select(ProcessingJob))).scalar_one()
+    job: ProcessingJob = (await db.execute(select(ProcessingJob))).scalar_one()
+    return job
 
 
 async def test_reprocess_document_responds_when_the_stamp_fails(
