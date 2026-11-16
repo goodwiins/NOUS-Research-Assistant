@@ -4,7 +4,7 @@ Knowledge Graph API endpoints
 
 import logging
 from typing import Any, Dict, Iterable, List, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -52,6 +52,7 @@ from src.services.processing.entity_extraction_service import EntityExtractionSe
 from src.services.processing.entity_extraction_service import (
     EntityType as ProcessingEntityType,
 )
+from src.services.processing.job_reservation import fail_unpublished_job, reserve_job
 from src.tasks.processing_tasks import kg_extract_entities_job, kg_merge_entities_job
 
 logger = logging.getLogger(__name__)
@@ -146,21 +147,14 @@ def _raise_kg_http_error(error: Exception, context: str) -> None:
 
 
 def _reserve_and_publish_job(db, job: ProcessingJob, task: Any, queue: str) -> None:
-    """Commit ``job`` as a QUEUED attempt, then publish ``task`` for it.
+    """Reserve ``job`` durably, then publish ``task`` for it.
 
     GOO-464: publishing before the commit let a fast worker look up a job row
-    that was not durable yet. Same reserve-then-publish shape as
-    ``ProcessingService.queue_processing_job``: the task id is generated up
-    front, stamped on the row and committed, and only then is the message
-    published under that id. If publication raises, the reserved attempt is
-    failed (unless a worker already moved it on) and the caller gets a 503.
+    that was not durable yet. The persistence (reserve; fail on publish error)
+    is owned by ``services/processing/job_reservation.py``; this helper only
+    publishes under the reserved task id and maps a publish failure to 503.
     """
-    task_id = str(uuid4())
-    db.add(job)
-    db.flush()
-    job.celery_task_id = task_id
-    job.queue_job(queue_name=queue)
-    db.commit()
+    task_id = reserve_job(db, job, queue)
 
     try:
         task.apply_async(args=[str(job.id)], queue=queue, task_id=task_id)
@@ -168,12 +162,7 @@ def _reserve_and_publish_job(db, job: ProcessingJob, task: Any, queue: str) -> N
         logger.error(
             "Failed to publish job %s (task %s)", job.id, task_id, exc_info=True
         )
-        # The broker may have accepted the message and still raised; only fail
-        # the attempt this request reserved, never a worker's newer state.
-        db.refresh(job, with_for_update=True)
-        if job.status == JobStatus.QUEUED and job.celery_task_id == task_id:
-            job.fail_job("Failed to queue job: broker unavailable")
-        db.commit()
+        fail_unpublished_job(db, job, task_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Job queue temporarily unavailable",

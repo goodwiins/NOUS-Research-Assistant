@@ -53,13 +53,23 @@ def test_endpoints_delegate_to_reserve_then_publish():
         )
 
 
-def test_helper_commits_before_publishing_with_the_reserved_id():
+def test_helper_reserves_before_publishing_with_the_reserved_id():
     fn = _fn_source("_reserve_and_publish_job")
     publish = fn.index(".apply_async(")
-    assert "db.commit()" in fn[:publish], "reservation must commit before publish"
+    assert (
+        "reserve_job(db, job," in fn[:publish]
+    ), "the reservation must be committed (reserve_job) before publish"
     assert (
         "task_id=task_id" in fn[publish:]
     ), "the message must carry the task id persisted on the reserved row"
     assert (
-        "fail_job(" in fn[publish:]
+        "fail_unpublished_job(db, job, task_id)" in fn[publish:]
     ), "a publish failure must fail the reserved attempt, not orphan it"
+
+
+def test_router_helper_owns_no_transaction():
+    """Persistence lives in services/processing/job_reservation.py (one commit
+    per function); the router helper only publishes and maps errors to HTTP."""
+    fn = _fn_source("_reserve_and_publish_job")
+    for call in ("db.commit(", "db.flush(", "db.refresh(", "db.add("):
+        assert call not in fn, f"_reserve_and_publish_job must not call {call}...)"
