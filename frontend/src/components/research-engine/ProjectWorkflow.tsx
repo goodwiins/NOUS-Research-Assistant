@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Loader2, Trash2, Workflow } from 'lucide-react';
 import { DraftClaimsPanel } from '@/components/research/DraftClaimsPanel';
 import { useAuth } from '@/hooks/useAuth';
@@ -373,15 +374,23 @@ function ProjectRoles({
                 {assignment.role}
               </span>
               {canManage && (
-                <button
-                  type="button"
-                  aria-label={`Remove ${assignment.role} role from ${assignment.user_id}`}
-                  onClick={() => remove.mutate(assignment)}
-                  disabled={remove.isPending}
-                  className="rounded p-1 text-muted-foreground hover:text-destructive disabled:opacity-50"
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                </button>
+                <ConfirmDialog
+                  title={`Remove ${assignment.role} role?`}
+                  description={`${assignment.user_id} will lose the ${assignment.role} role on this project.`}
+                  confirmLabel="Remove role"
+                  variant="destructive"
+                  onConfirm={() => remove.mutate(assignment)}
+                  trigger={
+                    <button
+                      type="button"
+                      aria-label={`Remove ${assignment.role} role from ${assignment.user_id}`}
+                      disabled={remove.isPending}
+                      className="rounded p-1 text-muted-foreground hover:text-destructive disabled:opacity-50"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                  }
+                />
               )}
             </li>
           ))}

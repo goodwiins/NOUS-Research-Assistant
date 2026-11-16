@@ -253,6 +253,9 @@ describe('ArtifactShareDialog', () => {
     );
     await screen.findByRole('link', { name: 'Open shared version' });
     await user.click(screen.getByRole('button', { name: 'Revoke share link' }));
+    // Nothing is revoked until the confirmation is accepted.
+    expect(artifactService.revokeArtifactShare).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Revoke link' }));
     await waitFor(() =>
       expect(
         screen.queryByRole('link', { name: 'Open shared version' })

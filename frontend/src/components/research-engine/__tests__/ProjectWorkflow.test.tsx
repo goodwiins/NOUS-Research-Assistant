@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectWorkflow } from '../ProjectWorkflow';
 import { projectService } from '@/services/projectService';
@@ -7,6 +8,7 @@ import { useProjectStore } from '@/store/projectStore';
 import {
   createProject,
   listProjectRoles,
+  removeProjectRole,
 } from '@/services/researchEngineService';
 
 vi.mock('../JourneyRail', () => ({
@@ -462,5 +464,54 @@ describe('ProjectWorkflow', () => {
     expect(
       screen.getByText('Conflicts for collection-3 (read only)')
     ).toBeInTheDocument();
+  });
+
+  it('asks before removing a project role', async () => {
+    vi.mocked(listProjectRoles).mockResolvedValue([
+      {
+        id: 'a-2',
+        collection_id: 'collection-1',
+        user_id: 'someone-else',
+        role: 'reviewer',
+        assigned_by_id: 'owner-1',
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    ] as Awaited<ReturnType<typeof listProjectRoles>>);
+    vi.mocked(removeProjectRole).mockResolvedValue(undefined as never);
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectWorkflow
+          project={{
+            id: 'collection-1',
+            workspace_id: 'workspace-1',
+            name: 'Journey',
+            research_engine_project_id: 'engine-1',
+            can_edit: true,
+            can_manage: true,
+            workspace_archived: false,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          }}
+        />
+      </QueryClientProvider>
+    );
+    const trigger = await screen.findByRole('button', {
+      name: 'Remove reviewer role from someone-else',
+    });
+
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(removeProjectRole).not.toHaveBeenCalled();
+
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: 'Remove role' }));
+    await waitFor(() =>
+      expect(removeProjectRole).toHaveBeenCalledWith(
+        'collection-1',
+        'someone-else',
+        'reviewer'
+      )
+    );
   });
 });

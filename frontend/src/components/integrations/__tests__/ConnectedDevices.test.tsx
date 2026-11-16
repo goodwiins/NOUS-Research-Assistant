@@ -121,6 +121,7 @@ describe('ConnectedDevices', () => {
         name: 'Revoke Laptop (d1) access to your whole account',
       })
     );
+    await user.click(screen.getByRole('button', { name: 'Revoke access' }));
     expect(integrationConnectionsService.revokeConsent).toHaveBeenCalledTimes(
       1
     );
@@ -144,6 +145,7 @@ describe('ConnectedDevices', () => {
         name: 'Revoke Laptop (d1) access to Thesis',
       })
     );
+    await user.click(screen.getByRole('button', { name: 'Revoke access' }));
     expect(integrationConnectionsService.revokeConsent).toHaveBeenCalledWith(
       'r1'
     );
@@ -254,6 +256,7 @@ describe('ConnectedDevices', () => {
         name: 'Revoke Laptop (d1) access to workspace Lab',
       })
     );
+    await user.click(screen.getByRole('button', { name: 'Revoke access' }));
     expect(integrationConnectionsService.revokeConsent).toHaveBeenCalledTimes(
       1
     );
@@ -501,6 +504,7 @@ describe('ConnectedDevices', () => {
           name: 'Revoke Laptop (d1) access to Thesis',
         })
       );
+      await user.click(screen.getByRole('button', { name: 'Revoke access' }));
       await waitFor(() =>
         expect(invalidated(client, ['harness', 'devices', 'u1'])).toBe(true)
       );

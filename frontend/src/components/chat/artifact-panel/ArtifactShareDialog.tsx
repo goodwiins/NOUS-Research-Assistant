@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Dialog,
   DialogContent,
@@ -340,14 +341,22 @@ function ScopedShareDialog({
                 >
                   Copy share link
                 </button>
-                <button
-                  type="button"
-                  disabled={pending !== null}
-                  onClick={() => void revoke(share.id)}
-                  className="rounded-md border px-2 py-1"
-                >
-                  {pending === share.id ? 'Revoking…' : 'Revoke share link'}
-                </button>
+                <ConfirmDialog
+                  title="Revoke share link?"
+                  description="Anyone with this link will lose access. You cannot restore a revoked link; create a new one instead."
+                  confirmLabel="Revoke link"
+                  variant="destructive"
+                  onConfirm={() => void revoke(share.id)}
+                  trigger={
+                    <button
+                      type="button"
+                      disabled={pending !== null}
+                      className="rounded-md border px-2 py-1"
+                    >
+                      {pending === share.id ? 'Revoking…' : 'Revoke share link'}
+                    </button>
+                  }
+                />
               </li>
             ))}
           </ul>
