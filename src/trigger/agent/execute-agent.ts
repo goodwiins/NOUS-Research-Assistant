@@ -9,6 +9,7 @@ import {
 
 const MAX_POLL_ATTEMPTS = 120;
 const POLL_INTERVAL_SECONDS = 3;
+const APPROVAL_ID_RE = /^[a-f0-9]{64}$/;
 
 function userAuth(accessToken: string): Record<string, string> {
   return { Authorization: `Bearer ${accessToken}` };
@@ -47,6 +48,17 @@ async function pollUntilDone(
     }
 
     if (job.status === "awaiting_confirmation" && job.confirmation) {
+      // #1842: /confirm requires the approval receipt the backend issued
+      // with this interrupt; a bare {confirmed} body is rejected with 422.
+      const approvalId = job.confirmation.approval_id;
+      if (typeof approvalId !== "string" || !APPROVAL_ID_RE.test(approvalId)) {
+        logger.error("Confirmation carried no valid approval_id", { jobId });
+        return {
+          status: "failed",
+          result: { error: "Confirmation is missing its approval receipt" },
+        };
+      }
+
       metadata.set("status", "awaiting_confirmation");
       metadata.set(
         "confirmation",
@@ -70,7 +82,7 @@ async function pollUntilDone(
 
       await backendClient.post(
         `/api/v1/agent/confirm/${jobId}`,
-        { confirmed: decision.confirmed },
+        { confirmed: decision.confirmed, approval_id: approvalId },
         undefined,
         userAuth(accessToken),
       );

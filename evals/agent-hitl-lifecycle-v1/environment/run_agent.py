@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -263,13 +264,36 @@ async def poll_job(
     )
 
 
+def approval_id_of(job_body: dict[str, Any]) -> str:
+    """The approval receipt the backend issued with the parked interrupt.
+
+    ``POST /confirm/{job_id}`` requires it (#1842); a parked job without a
+    well-formed one is an infrastructure failure, not a scored outcome.
+    """
+    confirmation = job_body.get("confirmation")
+    approval_id = (
+        confirmation.get("approval_id") if isinstance(confirmation, dict) else None
+    )
+    if not isinstance(approval_id, str) or not re.fullmatch(
+        r"[a-f0-9]{64}", approval_id
+    ):
+        raise InfrastructureFailure(
+            "parked job carried no valid confirmation.approval_id"
+        )
+    return approval_id
+
+
 async def confirm_job(
-    client: httpx.AsyncClient, headers: dict[str, str], job_id: str, confirmed: bool
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    job_id: str,
+    confirmed: bool,
+    approval_id: str,
 ) -> httpx.Response:
     return await client.post(
         f"{APP_URL}/api/v1/agent/confirm/{job_id}",
         headers=headers,
-        json={"confirmed": confirmed},
+        json={"confirmed": confirmed, "approval_id": approval_id},
     )
 
 
@@ -289,8 +313,11 @@ async def run_approve_once(
     parked = await poll_job(client, headers, job_id, until="awaiting_confirmation")
     interrupt = json_safe(parked.get("confirmation") or {})
     rows_before = await project_row_count(APPROVE_PROJECT_NAME)
+    approval_id = approval_id_of(parked)
 
-    response = await confirm_job(client, headers, job_id, confirmed=True)
+    response = await confirm_job(
+        client, headers, job_id, confirmed=True, approval_id=approval_id
+    )
     if response.status_code != 200:
         raise InfrastructureFailure(
             f"first /confirm on a fresh interrupt returned HTTP "
@@ -310,6 +337,7 @@ async def run_approve_once(
         "args": {"name": APPROVE_PROJECT_NAME},
         "interrupt": interrupt,
         "job_id": job_id,
+        "approval_id": approval_id,
         "rows_before_approval": rows_before,
         "rows_after_approval": rows_after,
         "tool_execution_count_after_approval": execution_count,
@@ -325,7 +353,13 @@ async def run_reject(
     interrupt = json_safe(parked.get("confirmation") or {})
     rows_before = await project_row_count(REJECT_PROJECT_NAME)
 
-    response = await confirm_job(client, headers, job_id, confirmed=False)
+    response = await confirm_job(
+        client,
+        headers,
+        job_id,
+        confirmed=False,
+        approval_id=approval_id_of(parked),
+    )
     if response.status_code != 200:
         raise InfrastructureFailure(
             f"/confirm(confirmed=false) returned HTTP {response.status_code}: "
@@ -351,7 +385,15 @@ async def run_reconfirm_resolved(
     job_id = approve_once["job_id"]
     attempts: list[dict[str, Any]] = []
     for _ in range(2):
-        response = await confirm_job(client, headers, job_id, confirmed=True)
+        # Replay phase 1's own (now consumed) receipt: the request must be
+        # well-formed so the 409 reflects the resolved job, not a 422.
+        response = await confirm_job(
+            client,
+            headers,
+            job_id,
+            confirmed=True,
+            approval_id=approve_once["approval_id"],
+        )
         rows_after = await project_row_count(APPROVE_PROJECT_NAME)
         attempts.append({"http_status": response.status_code, "rows_after": rows_after})
     return {"job_id": job_id, "attempts": attempts}
@@ -372,7 +414,9 @@ async def run_cancel_while_parked(
         again = await poll_job(client, headers, job_id, until="awaiting_confirmation")
         polls.append(json_safe(again.get("confirmation") or {}))
 
-    response = await confirm_job(client, headers, job_id, confirmed=True)
+    response = await confirm_job(
+        client, headers, job_id, confirmed=True, approval_id=approval_id_of(again)
+    )
     if response.status_code != 200:
         raise InfrastructureFailure(
             f"cleanup /confirm on the parked job returned HTTP "

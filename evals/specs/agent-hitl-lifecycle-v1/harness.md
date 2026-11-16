@@ -19,7 +19,10 @@ lifecycle, `interrupt_node`'s destructive-tool gate, the production
 resume semantics.
 
 Adapter: four phases against the booted application, sharing one seeded
-org/user/workspace:
+org/user/workspace. Every `POST /confirm/{job_id}` body below also carries
+`approval_id`, the 64-hex receipt from the parked job's
+`confirmation.approval_id` (required since #1842; phase 3 replays phase 1's
+receipt):
 
 1. **Approve-once** — `POST /execute` with the phase-1 instruction; poll
    `GET /jobs/{job_id}` until `status == "awaiting_confirmation"`; record the
