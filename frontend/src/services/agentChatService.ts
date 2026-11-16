@@ -147,8 +147,8 @@ export interface AgentStreamCallbacks {
   /** ID-only announcement that an artifact version was committed for this run. */
   onArtifactVersion?: (ref: { artifactId: string; versionId: string }) => void;
   onUsage?: (inputTokens: number, outputTokens: number) => void;
-  /** Fires for every frame carrying an `id: <seq>` line — the resumable-SSE
-   * cursor. Persist the latest value to resume after a disconnect. */
+  /** Fires after a frame carrying `id: <seq>` has been dispatched and closed
+   * by a blank line. Persist the latest value to resume after a disconnect. */
   onSeq?: (seq: number) => void;
   /** Resume only: the first replayed frame's seq was higher than the cursor
    * asked for, so the buffer had already trimmed the frames in between and the
@@ -332,6 +332,8 @@ async function consumeSse(
   const decoder = new TextDecoder();
   let buffer = '';
   let eventType = '';
+  let pendingSeq: number | null = null;
+  let frameHasData = false;
   let terminalSeen = false;
 
   const dispatchData = (ev: string, dataLine: string): void => {
@@ -526,16 +528,22 @@ async function consumeSse(
         options.signal?.throwIfAborted();
         const line = rawLine.trim();
         if (!line) {
+          if (frameHasData && pendingSeq !== null) {
+            callbacks.onSeq?.(pendingSeq);
+          }
           eventType = '';
+          pendingSeq = null;
+          frameHasData = false;
           continue;
         }
         if (line.startsWith('id: ')) {
           const seq = parseInt(line.slice(4), 10);
-          if (!Number.isNaN(seq)) callbacks.onSeq?.(seq);
+          if (!Number.isNaN(seq)) pendingSeq = seq;
         } else if (line.startsWith('event: ')) {
           eventType = line.slice(7).trim();
         } else if (line.startsWith('data: ') && eventType) {
           dispatchData(eventType, line);
+          frameHasData = true;
         }
       }
 

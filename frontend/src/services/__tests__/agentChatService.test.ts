@@ -136,7 +136,9 @@ describe('agentChatService.streamMessage SSE parsing', () => {
     ]);
     const onRagContext = vi.fn();
     await agentChatService.streamMessage(request, { onRagContext });
-    expect(onRagContext.mock.calls[0][1]).toMatchObject({ fallback: 'timeout' });
+    expect(onRagContext.mock.calls[0][1]).toMatchObject({
+      fallback: 'timeout',
+    });
     expect(onRagContext.mock.calls[1][1]).toMatchObject({ fallback: null });
   });
 
@@ -401,6 +403,65 @@ describe('agentChatService.resumeStream', () => {
     const [url, options] = vi.mocked(global.fetch).mock.calls[0];
     expect(url).toContain('/agent/stream/resume/thread-1?after=2');
     expect(new Headers(options?.headers).get('Last-Event-ID')).toBe('2');
+  });
+
+  // Mutation guard: agentChatService.ts:541 must not call onSeq on the id line.
+  // Verify with: pnpm --dir frontend exec vitest run src/services/__tests__/agentChatService.test.ts -t 'replays an id-only frame|commits a frame cursor'
+  it('replays an id-only frame after a disconnect from the last completed cursor', async () => {
+    global.fetch = fetchWith(['id: 3\n']);
+    const seqs: number[] = [];
+    const tokens: string[] = [];
+    const calls: string[] = [];
+    let cursor = 2;
+    const callbacks = {
+      onToken: (content: string) => {
+        tokens.push(content);
+        calls.push(`token:${content}`);
+      },
+      onSeq: (seq: number) => {
+        seqs.push(seq);
+        calls.push(`seq:${seq}`);
+        cursor = seq;
+      },
+    };
+
+    expect(
+      await agentChatService.resumeStream('thread-1', cursor, callbacks)
+    ).toMatchObject({
+      status: 'failed',
+    });
+    expect(cursor).toBe(2);
+    expect(seqs).toEqual([]);
+
+    global.fetch = fetchWith([
+      'id: 3\nevent: token\ndata: {"content":"replayed"}\n\n',
+      'id: 4\nevent: done\ndata: {"status":"complete"}\n\n',
+    ]);
+    expect(
+      await agentChatService.resumeStream('thread-1', cursor, callbacks)
+    ).toEqual({
+      status: 'resumed',
+    });
+    expect(tokens).toEqual(['replayed']);
+    expect(seqs).toEqual([3, 4]);
+    expect(calls).toEqual(['token:replayed', 'seq:3', 'seq:4']);
+    const [url, options] = vi.mocked(global.fetch).mock.calls[0];
+    expect(url).toContain('?after=2');
+    expect(new Headers(options?.headers).get('Last-Event-ID')).toBe('2');
+  });
+
+  it('commits a frame cursor only after its blank line and data callback', async () => {
+    global.fetch = fetchWith([
+      'id: 3\nevent: token\ndata: {"content":"partial"}\n',
+    ]);
+    const calls: string[] = [];
+    const result = await agentChatService.resumeStream('thread-1', 2, {
+      onToken: (content) => calls.push(`token:${content}`),
+      onSeq: (seq) => calls.push(`seq:${seq}`),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(calls).toEqual(['token:partial']);
   });
 
   it('fails resume when replay ends without a terminal frame', async () => {
