@@ -36,6 +36,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Mapping
 
+from sqlalchemy import update
+
 from src.core.database import SessionLocal
 from src.models.processing import JobStatus, JobType, ProcessingJob
 from src.tasks.celery_app import celery_app
@@ -160,18 +162,40 @@ def reconcile_lost_processing_jobs() -> Mapping[str, object]:
             # waits behind a backlog past the stale window is not re-published
             # on the next tick. If that message is itself lost, the stuck-job
             # sweep fails the row (it only ever re-drives NULL-id rows here).
+            # The row was selected without a lock, so write only while it is
+            # still the never-dispatched PENDING row: a worker that claimed it
+            # meanwhile (start_job stamps its own id) must keep its claim.
+            values: dict[str, object] = {"retry_count": attempts + 1}
             sent_task_id = getattr(sent, "id", None)
             if isinstance(sent_task_id, str) and sent_task_id:
-                job.celery_task_id = sent_task_id
-            job.retry_count = attempts + 1
+                values["celery_task_id"] = sent_task_id
+            recorded = db.execute(
+                update(ProcessingJob)
+                .where(
+                    ProcessingJob.id == job_id,
+                    ProcessingJob.status == JobStatus.PENDING,
+                    ProcessingJob.celery_task_id.is_(None),
+                )
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            ).rowcount
+            if not recorded:
+                db.rollback()
+                logger.info(
+                    "reconcile_lost_processing_jobs: job %s was claimed while "
+                    "re-enqueuing; attempt not recorded",
+                    job_id,
+                )
+                summary["skipped"] += 1
+                continue
             summary["reenqueued"] += 1
             logger.info(
                 "reconcile_lost_processing_jobs: re-enqueued lost job %s "
                 "(type=%s, task=%s, attempt=%s/%s)",
-                job.id,
+                job_id,
                 job_type,
                 task_name,
-                job.retry_count,
+                attempts + 1,
                 max_attempts,
             )
             # Commit per job: bumps updated_at (idempotency — the row drops out
