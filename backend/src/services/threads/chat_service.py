@@ -19,6 +19,7 @@ Out of scope for that consolidation, unchanged: ``create_message``,
 ``bulk_summarize_threads``, ``search_conversations``, ``get_workspace_stats``.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import List, Literal, Optional, Tuple
@@ -511,7 +512,10 @@ class ChatService:
                                 summarize_thread_on_resolve_task,
                             )
 
-                            summarize_thread_on_resolve_task.delay(str(thread_id))
+                            # GOO-466: blocking broker publish, off the loop.
+                            await asyncio.to_thread(
+                                summarize_thread_on_resolve_task.delay, str(thread_id)
+                            )
                         except Exception as e:
                             logger.warning(
                                 f"Failed to queue resolution summary for thread {thread_id}: {e}"
@@ -666,7 +670,10 @@ class ChatService:
                 try:
                     from src.tasks.summarize_thread_task import summarize_thread_task
 
-                    summarize_thread_task.delay(str(thread_id), force=True)
+                    # GOO-466: blocking broker publish, off the loop.
+                    await asyncio.to_thread(
+                        summarize_thread_task.delay, str(thread_id), force=True
+                    )
                     results.append((thread_id, True, None, thread))
                 except Exception:
                     # Stable message: broker errors can carry connection URLs.

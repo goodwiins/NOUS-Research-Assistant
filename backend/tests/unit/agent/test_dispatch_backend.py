@@ -421,3 +421,28 @@ class TestExecuteEndpointRouting:
         assert exc_info.value.detail == "Unable to persist this run. Please retry."
         db.rollback.assert_awaited_once()
         background_tasks.add_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_publishes_off_the_event_loop_thread(session_factory):
+    """GOO-466: ``.delay()`` is a blocking broker round-trip; running it on the
+    event-loop thread stalls every other request while Redis is slow."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    publish_threads: list[int] = []
+    delay = MagicMock(
+        side_effect=lambda **_: publish_threads.append(threading.get_ident())
+    )
+    p_db, p_set_job, p_task, _task = _patched(session_factory, delay=delay)
+    with p_db, p_set_job, p_task:
+        outcome, _ = await _celery_dispatch(
+            str(uuid.uuid4()),
+            {"status": JobStatus.RUNNING},
+            _request(uuid.uuid4()),
+            _user(),
+        )
+
+    assert outcome == "dispatched"
+    assert len(publish_threads) == 1
+    assert publish_threads[0] != loop_thread
