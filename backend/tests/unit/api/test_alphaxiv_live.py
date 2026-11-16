@@ -34,10 +34,10 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import jwt
 import pytest
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.testclient import TestClient
-from jose import jwt
 from starlette.datastructures import Headers
 
 from src.api.compat import alphaxiv_live as route

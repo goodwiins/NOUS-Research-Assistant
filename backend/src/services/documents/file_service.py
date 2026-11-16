@@ -38,6 +38,7 @@ from src.models.document import Document, DocumentType, ProcessingStatus
 from src.models.organization import Organization
 from src.models.processing import JobPriority, JobStatus, JobType, ProcessingJob
 from src.models.user import User, UserRole
+from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
 from src.shared.enums import SatelliteSyncStatus
 
 logger = logging.getLogger(__name__)
@@ -708,9 +709,14 @@ class FileService:
             await self.db.refresh(processing_job)
 
             # Queue the job for processing
+            from src.tasks.enqueue import record_dispatched_task_id
             from src.tasks.processing_tasks import process_document_ingestion
 
-            process_document_ingestion.delay(str(processing_job.id))
+            dispatched = process_document_ingestion.delay(str(processing_job.id))
+            # GOO-463: a stamped id tells the reconciler the message landed.
+            await record_dispatched_task_id(
+                self.db, processing_job.id, getattr(dispatched, "id", None)
+            )
 
             return document
 
@@ -1311,6 +1317,10 @@ class FileService:
                 }
                 if cascade:
                     document.neo4j_index_status = SatelliteSyncStatus.PENDING.value
+                # Bedrock KB: queue vector removal in this same transaction (no
+                # remote call, so a KB outage cannot block the delete); the
+                # queue tick deletes the S3 objects, then runs an ingestion job.
+                mark_bedrock_deleted(document)
                 document.soft_delete()
             await self.db.execute(
                 Organization.storage_usage_update(

@@ -242,13 +242,27 @@ async def search_documents(
                 knowledge_graph_service,
             )
 
-            result = await run_in_threadpool(
-                knowledge_graph_service.search,
-                search_request=search_request,
-                user_id=str(current_user.id),
-                organization_id=organization_id,
-                db=db,
-            )
+            try:
+                result = await run_in_threadpool(
+                    knowledge_graph_service.search,
+                    search_request=search_request,
+                    user_id=str(current_user.id),
+                    organization_id=organization_id,
+                    db=db,
+                )
+            except Exception as e:
+                # GOO-589: a Neo4j outage is a dependency failure, not a bug —
+                # answer 503 like the KG routes do (#2130).
+                from src.api.search.knowledge_graph import _is_neo4j_unavailable_error
+
+                if not _is_neo4j_unavailable_error(e):
+                    raise
+                logger.error("Knowledge graph search unavailable", exc_info=True)
+                raise HTTPException(
+                    status_code=503,
+                    detail="Knowledge graph temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                )
         else:
             # Default to hybrid search
             search_request.search_type = SearchType.HYBRID

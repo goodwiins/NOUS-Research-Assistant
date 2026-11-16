@@ -77,7 +77,7 @@ Config: `backend/alembic.ini`, env: `backend/alembic/env.py`
 3. Add ORM models to `src/models/<domain>.py` (until domain split is complete).
 4. Add Pydantic schemas to `src/schemas/<domain>.py`.
 5. Register router in `src/main.py`: `app.include_router(<domain>_router, prefix="/api/v1")`.
-6. Add Alembic migration: `alembic revision --autogenerate -m "add_<domain>"`.
+6. Add a hand-written Alembic migration: `alembic revision --rev-id xx01_add_<domain> -m "add_<domain>"`, then write `upgrade()`/`downgrade()` by hand (no `--autogenerate`; see `backend/alembic/README.md`).
 7. Add tests under `tests/unit/api/<domain>/` and `tests/integration/<domain>/`.
 
 ## Key gotchas

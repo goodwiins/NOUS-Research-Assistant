@@ -164,9 +164,7 @@ def test_neo4j_exception_marks_failed_but_document_completes(
     assert doc.processing_status == ProcessingStatus.COMPLETED
 
 
-def test_neo4j_full_fanout_marks_completed_with_timestamp(
-    session_factory, monkeypatch
-):
+def test_neo4j_full_fanout_marks_completed_with_timestamp(session_factory, monkeypatch):
     org_id, doc_id, job_id = _seed(session_factory)
     _stub(monkeypatch, session_factory)
     monkeypatch.setattr(
@@ -274,3 +272,39 @@ def test_generate_embeddings_records_outcome(session_factory, monkeypatch):
 
     doc = _fetch_doc(session_factory, doc_id)
     assert doc.do_kb_sync_status == SatelliteSyncStatus.FAILED.value
+
+
+def test_bedrock_sync_stages_pending_instead_of_completing(
+    session_factory, monkeypatch
+):
+    """Bedrock on: stage the text and stay pending; never the DO path, never a
+    COMPLETED that no ingestion job has confirmed."""
+    from unittest.mock import MagicMock
+
+    from src.services import bedrock_sync
+
+    org_id, doc_id, job_id = _seed(session_factory)
+    # DO also "enabled" with a uuid that would map to COMPLETED if it ran.
+    _stub(monkeypatch, session_factory, kb_uuid="ds-123", do_kb_enabled=True)
+    monkeypatch.setattr(
+        pt, "_sync_document_to_kb_blocking", MagicMock(return_value="ds-123")
+    )
+    monkeypatch.setattr(
+        pt.knowledge_graph_service, "create_entity_node", lambda **kw: "n"
+    )
+    monkeypatch.setattr(bedrock_sync.settings, "BEDROCK_KB_ID", "KBID")
+    monkeypatch.setattr(bedrock_sync.settings, "BEDROCK_KB_DATA_SOURCE_ID", "DSID")
+    helper = MagicMock()
+    helper.delete_file.return_value = True
+    monkeypatch.setattr("src.core.s3_client.S3StorageHelper", lambda: helper)
+
+    result = pt.process_document_ingestion.apply(args=(str(job_id),)).get()
+    assert result["status"] == "completed"
+
+    doc = _fetch_doc(session_factory, doc_id)
+    assert doc.do_kb_sync_status == SatelliteSyncStatus.PENDING.value
+    assert doc.document_metadata["bedrock_sync"]["stage_token"]
+    assert doc.is_embedded is False
+    pt._sync_document_to_kb_blocking.assert_not_called()
+    uploaded = [c.args[0] for c in helper.upload_file.call_args_list]
+    assert uploaded[0].endswith(f"{org_id}/{doc_id}.txt")

@@ -263,8 +263,8 @@ export function ConnectedDevices(): ReactElement {
                       )}
                     </div>
                     <ConfirmDialog
-                      title="Revoke access?"
-                      description={`${device.device_label} will lose access to ${consentName(consent)}. To use it again you will need to approve a new request.`}
+                      title={`Revoke ${device.device_label} access?`}
+                      description={`${device.device_label} stops being able to use ${consentName(consent)}. To restore access, approve the device again.`}
                       confirmLabel="Revoke access"
                       variant="destructive"
                       onConfirm={() => revokeConsent.mutate(consent.request_id)}

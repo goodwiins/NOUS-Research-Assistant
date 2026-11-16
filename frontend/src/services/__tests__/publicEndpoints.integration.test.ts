@@ -89,6 +89,16 @@ describe('default API callers use public endpoint policy', () => {
     expect(getServiceStatus().websocket.connecting).toBe(false);
   });
 
+  it('reports service status without reading a localStorage auth token', async () => {
+    // GOO-569: nothing writes `authToken` (auth is the Supabase cookie
+    // session), so the old `authenticated` flag was always false.
+    const { getServiceStatus } = await import('../analytics');
+    const getItem = vi.spyOn(Storage.prototype, 'getItem');
+    const status = getServiceStatus();
+    expect(status.api).not.toHaveProperty('authenticated');
+    expect(getItem).not.toHaveBeenCalledWith('authToken');
+  });
+
   it('initializes every analytics service without persisting the supplied token', async () => {
     const services = await import('../analytics');
     localStorage.removeItem('authToken');

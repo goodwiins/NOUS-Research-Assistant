@@ -55,7 +55,9 @@ def _no_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.tasks import enqueue
 
     monkeypatch.setattr(
-        enqueue, "enqueue_after_commit_apply_async", lambda *args, **kwargs: None
+        enqueue,
+        "enqueue_after_commit_apply_async",
+        lambda *args, **kwargs: enqueue.EnqueueHandle(),
     )
 
 

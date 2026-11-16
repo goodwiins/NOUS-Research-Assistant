@@ -1,6 +1,16 @@
 from unittest.mock import MagicMock, patch
 
 
+def _doc_member(alias: str) -> str:
+    """Document-list membership for an Entity alias (GOO-495): the creator
+    stamp OR any id in the shared ``document_ids`` reference list."""
+    return (
+        f"({alias}.source_document_id IN $source_document_ids"
+        f" OR any(doc_id IN coalesce({alias}.document_ids, [])"
+        " WHERE doc_id IN $source_document_ids))"
+    )
+
+
 def test_get_neighborhood_preserves_relationship_type_and_direction() -> None:
     from src.models.graph import RelationshipType
     from src.services.knowledge_graph.knowledge_graph_service import (
@@ -115,14 +125,11 @@ def test_get_neighborhood_scopes_source_document_intermediates() -> None:
         )
 
     traversal_query, traversal_params = session.run.call_args_list[0].args
-    assert (
-        "all(n IN nodes(path) "
-        "WHERE n.source_document_id IN $source_document_ids)" in traversal_query
-    )
+    assert f"all(n IN nodes(path) WHERE {_doc_member('n')})" in traversal_query
     assert traversal_params["source_document_ids"] == ["doc-1"]
 
     refetch_query, refetch_params = session.run.call_args_list[1].args
-    assert "n.source_document_id IN $source_document_ids" in refetch_query
+    assert _doc_member("n") in refetch_query
     assert refetch_params == {
         "ids": ["intermediate"],
         "source_document_ids": ["doc-1"],
@@ -157,10 +164,7 @@ def test_get_neighborhood_combines_scopes_for_intermediate_refetch() -> None:
 
     # Both scopes supplied → OR them (matching _two_endpoint_scope) so legacy
     # NULL-org nodes reachable via source_document_ids stay traversable.
-    combined = (
-        "(n.organization_id = $organization_id"
-        " OR n.source_document_id IN $source_document_ids)"
-    )
+    combined = f"(n.organization_id = $organization_id OR {_doc_member('n')})"
     traversal_query, traversal_params = session.run.call_args_list[0].args
     assert f"all(n IN nodes(path) WHERE {combined})" in traversal_query
     assert traversal_params["organization_id"] == "org-1"

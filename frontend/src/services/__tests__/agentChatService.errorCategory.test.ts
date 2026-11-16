@@ -203,17 +203,26 @@ describe('HTTP-level failures synthesize a client-derived category', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it('only reports lost observation for incomplete Codex streams', async () => {
+  // GOO-600: a clean EOF without a terminal frame is a transport outcome for
+  // every provider, not only Codex — the NOUS run may still be alive too.
+  it('reports lost observation for an incomplete stream on every provider', async () => {
+    for (const provider of [undefined, 'nous', 'codex'] as const) {
+      const onConnectionLost = vi.fn();
+      const onError = vi.fn();
+      global.fetch = fetchWith([]);
+      await agentChatService.streamMessage(
+        provider ? { ...request, execution_provider: provider } : request,
+        { onConnectionLost, onError }
+      );
+      expect(onConnectionLost).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('does not report lost observation when the terminal frame arrived', async () => {
     const onConnectionLost = vi.fn();
-    global.fetch = fetchWith([]);
+    global.fetch = fetchWith(['event: done\ndata: {}\n\n']);
     await agentChatService.streamMessage(request, { onConnectionLost });
     expect(onConnectionLost).not.toHaveBeenCalled();
-
-    global.fetch = fetchWith([]);
-    await agentChatService.streamMessage(
-      { ...request, execution_provider: 'codex' },
-      { onConnectionLost }
-    );
-    expect(onConnectionLost).toHaveBeenCalledOnce();
   });
 });

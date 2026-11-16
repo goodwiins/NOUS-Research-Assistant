@@ -38,14 +38,14 @@ def main() -> None:
         print(f"  role: {result.role}")
     else:
         print("  Token verification FAILED")
-        from jose import jwt, JWTError
+        import jwt
 
         try:
             payload = jwt.decode(
                 token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
             )
             print(f"  Manual decode worked: {payload}")
-        except JWTError as e:
+        except jwt.PyJWTError as e:
             print(f"  Manual decode error: {e}")
 
 

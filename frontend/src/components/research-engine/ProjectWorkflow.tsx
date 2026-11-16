@@ -383,8 +383,8 @@ function ProjectRoles({
               </span>
               {canManage && (
                 <ConfirmDialog
-                  title={`Remove ${assignment.role} role?`}
-                  description={`${assignment.user_id} will lose the ${assignment.role} role on this project.`}
+                  title={`Remove the ${assignment.role} role?`}
+                  description={`${assignment.user_id} loses this workflow role on the project. You can assign it again later.`}
                   confirmLabel="Remove role"
                   variant="destructive"
                   onConfirm={() => remove.mutate(assignment)}

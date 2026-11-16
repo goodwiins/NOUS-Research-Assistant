@@ -241,6 +241,8 @@ def _build_record(state: dict, turn: int) -> dict:
             "user_query": user_msg,
             "intent": state.get("intent"),
             "intent_confidence": state.get("intent_confidence"),
+            "intent_source": state.get("intent_source"),
+            "intent_fallback_reason": state.get("intent_fallback_reason"),
             "tool_loop_count": state.get("tool_loop_count"),
             "error_count": state.get("error_count"),
             "tools_used": [te.get("tool_name") for te in tool_executions[-5:]],

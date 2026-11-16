@@ -858,12 +858,16 @@ async def reprocess_file(
         db.add(processing_job)
         await db.flush()
 
-        from src.tasks.enqueue import enqueue_after_commit
+        from src.tasks.enqueue import enqueue_after_commit, record_dispatched_task_id
         from src.tasks.processing_tasks import process_document_ingestion
 
-        enqueue_after_commit(db, process_document_ingestion, str(processing_job.id))
+        dispatch = enqueue_after_commit(
+            db, process_document_ingestion, str(processing_job.id)
+        )
 
         await db.commit()
+        # GOO-463: a stamped id tells the reconciler the message landed.
+        await record_dispatched_task_id(db, processing_job.id, dispatch.task_id)
 
         return {
             "message": "File queued for reprocessing",

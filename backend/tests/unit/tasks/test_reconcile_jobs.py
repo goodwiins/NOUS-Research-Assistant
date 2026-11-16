@@ -101,7 +101,11 @@ def _run(
         patch("src.tasks.reconcile_jobs.datetime", _FrozenDatetime),
         patch("src.tasks.reconcile_jobs.SessionLocal", factory),
         patch("src.core.config.get_settings", return_value=settings),
-        patch.object(reconcile_jobs.celery_app, "send_task") as send_task,
+        patch.object(
+            reconcile_jobs.celery_app,
+            "send_task",
+            return_value=SimpleNamespace(id="resent-task-id"),
+        ) as send_task,
     ):
         result = reconcile_jobs.reconcile_lost_processing_jobs()
     return result, send_task
@@ -269,3 +273,75 @@ def test_gated_by_flag(session_factory: sessionmaker) -> None:
     send_task.assert_not_called()
     with session_factory() as db:
         assert db.get(ProcessingJob, job_id).retry_count == 0
+
+
+def test_reenqueue_records_task_id_so_a_backlogged_job_is_not_resent(
+    session_factory: sessionmaker,
+) -> None:
+    """GOO-463: a re-enqueued message that sits behind a backlog past the stale
+    window must not be published again. The reconciler persists the id of the
+    message it published, so the row stops reading as never-dispatched."""
+    from src.models.processing import JobStatus, ProcessingJob
+
+    job_id = _seed(session_factory, status=JobStatus.PENDING, updated_at=OLD)
+
+    result1, send1 = _run(session_factory, _settings())
+    with session_factory() as db:
+        job = db.get(ProcessingJob, job_id)
+        assert job.celery_task_id == "resent-task-id"
+        # The worker still has not picked it up (backlog): it goes stale again.
+        job.updated_at = OLD
+        db.commit()
+
+    result2, send2 = _run(session_factory, _settings())
+
+    assert result1["reenqueued"] == 1
+    send1.assert_called_once()
+    assert result2["reenqueued"] == 0
+    send2.assert_not_called()
+
+
+def test_reenqueue_never_overwrites_a_concurrent_worker_claim(tmp_path) -> None:
+    """A worker that claims the job between the reconciler's (unlocked)
+    selection and its commit keeps its own task id: the reconciler's write is
+    conditional on the row still being PENDING with no task id. No row matched
+    means no attempt was recorded, so retry_count stays put and the job counts
+    as skipped.
+
+    File-backed SQLite so the claiming session is a separate connection."""
+    from src.models.processing import JobStatus, ProcessingJob
+    from src.tasks import reconcile_jobs
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'reconcile.db'}")
+    ProcessingJob.__table__.create(engine)
+    factory = sessionmaker(bind=engine)
+    try:
+        job_id = _seed(factory, status=JobStatus.PENDING, updated_at=OLD)
+
+        def claim_then_ack(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            # The original (backlogged) message reaches a worker meanwhile.
+            with factory() as worker_db:
+                job = worker_db.get(ProcessingJob, job_id)
+                job.start_job(worker_id="worker-tid", celery_task_id="worker-tid")
+                worker_db.commit()
+            return SimpleNamespace(id="resent-task-id")
+
+        with (
+            patch("src.tasks.reconcile_jobs.datetime", _FrozenDatetime),
+            patch("src.tasks.reconcile_jobs.SessionLocal", factory),
+            patch("src.core.config.get_settings", return_value=_settings()),
+            patch.object(
+                reconcile_jobs.celery_app, "send_task", side_effect=claim_then_ack
+            ),
+        ):
+            result = reconcile_jobs.reconcile_lost_processing_jobs()
+
+        assert result["reenqueued"] == 0
+        assert result["skipped"] == 1
+        with factory() as db:
+            job = db.get(ProcessingJob, job_id)
+            assert job.status is JobStatus.RUNNING
+            assert job.celery_task_id == "worker-tid"
+            assert job.retry_count == 0
+    finally:
+        engine.dispose()

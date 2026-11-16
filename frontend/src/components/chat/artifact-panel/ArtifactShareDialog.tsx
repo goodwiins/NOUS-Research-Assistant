@@ -345,8 +345,8 @@ function ScopedShareDialog({
                   Copy share link
                 </button>
                 <ConfirmDialog
-                  title="Revoke share link?"
-                  description="Anyone with this link will lose access. You cannot restore a revoked link; create a new one instead."
+                  title="Revoke this share link?"
+                  description="Anyone using this link loses access to the shared version. To share again, create a new link."
                   confirmLabel="Revoke link"
                   variant="destructive"
                   onConfirm={() => void revoke(share.id)}
@@ -357,7 +357,9 @@ function ScopedShareDialog({
                       disabled={pending !== null}
                       className="rounded-md border px-2 py-1"
                     >
-                      {pending === share.id ? 'Revoking…' : 'Revoke share link'}
+                      {pending === share.id
+                        ? 'Revoking…'
+                        : 'Revoke share link'}
                     </button>
                   }
                 />

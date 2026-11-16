@@ -362,6 +362,16 @@ class TestRelationshipDatetimeCoercion:
 # ---------------------------------------------------------------------------
 
 
+def _doc_member(alias: str) -> str:
+    """Document-list membership for an Entity alias (GOO-495): the creator
+    stamp OR any id in the shared ``document_ids`` reference list."""
+    return (
+        f"({alias}.source_document_id IN $source_document_ids"
+        f" OR any(doc_id IN coalesce({alias}.document_ids, [])"
+        " WHERE doc_id IN $source_document_ids))"
+    )
+
+
 @pytest.mark.unit
 class TestEntityScopePredicate:
     """`_entity_scope_predicate` prefers the indexed organization_id but OR's the
@@ -390,15 +400,14 @@ class TestEntityScopePredicate:
     def test_doc_only_preserves_legacy_in_list(self):
         params = {}
         pred = self._fn()("e", ["d1", "d2"], None, params)
-        assert pred == "(e.source_document_id IN $source_document_ids)"
+        assert pred == "(" + _doc_member("e") + ")"
         assert params == {"source_document_ids": ["d1", "d2"]}
 
     def test_both_ors_org_and_docs_for_cross_env_safety(self):
         params = {}
         pred = self._fn()("e", ["d1"], "org-1", params)
         assert pred == (
-            "(e.organization_id = $organization_id "
-            "OR e.source_document_id IN $source_document_ids)"
+            "(e.organization_id = $organization_id OR " + _doc_member("e") + ")"
         )
         assert params == {"organization_id": "org-1", "source_document_ids": ["d1"]}
 
@@ -437,8 +446,8 @@ class TestTwoEndpointScope:
     def test_project_only_uses_doc_list_on_both_endpoints(self):
         frag, params = self._fn()("source", "target", ["d1", "d2"], None)
         assert frag == (
-            "\n  AND (source.source_document_id IN $source_document_ids)"
-            "\n  AND (target.source_document_id IN $source_document_ids)"
+            "\n  AND (" + _doc_member("source") + ")"
+            "\n  AND (" + _doc_member("target") + ")"
         )
         assert params == {"source_document_ids": ["d1", "d2"]}
 
@@ -448,9 +457,9 @@ class TestTwoEndpointScope:
         frag, params = self._fn()("start", "end", ["d1"], "org-1")
         assert frag == (
             "\n  AND (start.organization_id = $organization_id"
-            " OR start.source_document_id IN $source_document_ids)"
+            " OR " + _doc_member("start") + ")"
             "\n  AND (end.organization_id = $organization_id"
-            " OR end.source_document_id IN $source_document_ids)"
+            " OR " + _doc_member("end") + ")"
         )
         assert params == {"organization_id": "org-1", "source_document_ids": ["d1"]}
 

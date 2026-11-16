@@ -12,8 +12,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from neo4j import Driver, GraphDatabase, Session
-from neo4j.exceptions import ServiceUnavailable, SessionExpired
+from neo4j import Driver, GraphDatabase, Query, Session
+from neo4j.exceptions import (
+    ConnectionAcquisitionTimeoutError,
+    Neo4jError,
+    ServiceUnavailable,
+    SessionExpired,
+)
 
 from src.core.circuit_breaker import ServiceUnavailableError as CircuitBreakerError
 from src.core.circuit_breaker import get_circuit_breaker
@@ -157,10 +162,12 @@ def _entity_scope_predicate(
     """Build the org-scoping WHERE predicate for an Entity alias (#50 read-flip).
 
     Prefers the indexed `organization_id` (stamped on writes + the one-time
-    backfill) — but OR's it with the legacy `source_document_id IN $ids` list so
-    the SAME query stays correct on environments whose backfill has not run yet
-    (organization_id NULL there). Once every environment is backfilled the IN-list
-    arg can be dropped, leaving a pure indexed equality.
+    backfill) — but OR's it with document-list membership
+    (``_entity_in_documents_predicate``: the creator stamp or any id in
+    ``document_ids``) so the SAME query stays correct on environments whose
+    backfill has not run yet (organization_id NULL there), and a project /
+    document scope also sees entities first extracted from another document
+    (GOO-495).
 
     Mutates `params` with whichever bind vars it uses. Returns the predicate (no
     leading WHERE/AND). With neither scope it returns ``"false"`` so the query
@@ -173,7 +180,7 @@ def _entity_scope_predicate(
         preds.append(f"{alias}.organization_id = $organization_id")
         params["organization_id"] = organization_id
     if source_document_ids is not None:
-        preds.append(f"{alias}.source_document_id IN $source_document_ids")
+        preds.append(_entity_in_documents_predicate(alias))
         params["source_document_ids"] = source_document_ids
     if not preds:
         # Both scopes None → a dropped tenant scope. Fail closed: match nothing
@@ -181,6 +188,30 @@ def _entity_scope_predicate(
         _log_unscoped_fail_closed(f"_entity_scope_predicate({alias})")
         return UNSCOPED_MATCHES_NOTHING
     return "(" + " OR ".join(preds) + ")"
+
+
+def _entity_search_filters(
+    source_document_ids: Optional[List[str]],
+    organization_id: Optional[str],
+    entity_types: Optional[List[EntityType]],
+    require_source_document: bool,
+    params: Dict[str, Any],
+) -> List[str]:
+    """Scope/type filters (alias ``e``) shared by ``search_entities`` and
+    ``count_search_entities``, so a page and its total always agree.
+    Mutates ``params`` with the bind vars it uses."""
+    filters: List[str] = []
+    scope = _entity_scope_predicate("e", source_document_ids, organization_id, params)
+    if scope:
+        filters.append(scope)
+    if entity_types:
+        filters.append("e.type IN $entity_types")
+        params["entity_types"] = [t.value for t in entity_types]
+    if require_source_document:
+        filters.append(
+            "e.source_document_id IS NOT NULL AND e.source_document_id <> ''"
+        )
+    return filters
 
 
 def _two_endpoint_scope(
@@ -192,7 +223,7 @@ def _two_endpoint_scope(
     """Scope a relationship/traversal query by BOTH endpoint Entity aliases (#50).
 
     Same OR semantics as ``_entity_scope_predicate``: when both scopes are
-    supplied each endpoint matches `org = $org OR source_document_id IN $ids`.
+    supplied each endpoint matches `org = $org OR <document membership>`.
     Org-exclusive precedence here used to make legacy NULL-org relationships
     listable (via the OR'ing sibling) but undeletable and untraversable.
 
@@ -205,7 +236,7 @@ def _two_endpoint_scope(
         preds.append("{alias}.organization_id = $organization_id")
         params["organization_id"] = organization_id
     if source_document_ids is not None:
-        preds.append("{alias}.source_document_id IN $source_document_ids")
+        preds.append(_entity_in_documents_predicate("{alias}"))
         params["source_document_ids"] = source_document_ids
     if preds:
         joined = "(" + " OR ".join(preds) + ")"
@@ -239,6 +270,26 @@ def _entity_document_ids_expr(alias: str) -> str:
         f"coalesce({alias}.document_ids, "
         f"CASE WHEN {alias}.source_document_id IS NULL THEN [] "
         f"ELSE [{alias}.source_document_id] END)"
+    )
+
+
+def _entity_in_documents_predicate(alias: str) -> str:
+    """Cypher: the Entity ``alias`` belongs to any document in
+    ``$source_document_ids`` (GOO-495).
+
+    Membership is the per-document ``document_ids`` list (KN2), not only the
+    ``source_document_id`` creator stamp: an entity first extracted from
+    document A is shared by document B, and a scope on B (a project that holds
+    B but not A) must still see it. The creator-stamp disjunct keeps legacy
+    nodes with no ``document_ids`` matching exactly as before (the same
+    fallback as ``_entity_document_ids_expr``). Ids are bound parameters;
+    ``alias`` may be the ``"{alias}"`` template placeholder that callers
+    ``.format`` later. List containment is not index-backed.
+    """
+    return (
+        f"({alias}.source_document_id IN $source_document_ids"
+        f" OR any(doc_id IN coalesce({alias}.document_ids, [])"
+        " WHERE doc_id IN $source_document_ids))"
     )
 
 
@@ -481,6 +532,56 @@ def _safe_extraction_method(value: Optional[str]) -> ExtractionMethod:
         return ExtractionMethod.UNKNOWN
 
 
+def _counts_toward_breaker(error: BaseException) -> bool:
+    """True for errors that mean Neo4j is down or hung (GOO-459).
+
+    Connection loss and every kind of timeout count; query bugs (syntax,
+    constraint, type errors) do not, so a bad query cannot open the breaker.
+    """
+    if isinstance(
+        error,
+        (
+            ServiceUnavailable,
+            SessionExpired,
+            ConnectionAcquisitionTimeoutError,
+            TimeoutError,
+        ),
+    ):
+        return True
+    return isinstance(error, Neo4jError) and "TransactionTimedOut" in (error.code or "")
+
+
+class _TimeoutSession:
+    """Session wrapper that puts a server-enforced timeout on every query.
+
+    The driver has no default transaction timeout, so without this a hung
+    query held its threadpool worker indefinitely (GOO-459). Plain-string
+    queries become ``Query(text, timeout=...)``; explicit transactions get the
+    same default. A caller-built ``Query`` or explicit ``timeout`` wins.
+    Everything else is delegated to the wrapped session unchanged.
+    """
+
+    def __init__(self, session: Session, timeout: float):
+        self._session = session
+        self._timeout = timeout
+
+    def run(self, query: Any, parameters: Any = None, **kwargs: Any) -> Any:
+        if isinstance(query, str):
+            query = Query(query, timeout=self._timeout)
+        return self._session.run(query, parameters, **kwargs)
+
+    def begin_transaction(
+        self, metadata: Any = None, timeout: Optional[float] = None
+    ) -> Any:
+        return self._session.begin_transaction(
+            metadata=metadata,
+            timeout=self._timeout if timeout is None else timeout,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+
 class KnowledgeGraphService:
     """Service for managing knowledge graph operations using Neo4j"""
 
@@ -544,6 +645,10 @@ class KnowledgeGraphService:
                     auth=(self.user, self.password),
                     max_connection_lifetime=3600,
                     max_connection_pool_size=50,
+                    connection_timeout=settings.NEO4J_CONNECTION_TIMEOUT_SECONDS,
+                    connection_acquisition_timeout=(
+                        settings.NEO4J_CONNECTION_ACQUISITION_TIMEOUT_SECONDS
+                    ),
                 )
                 self.driver = KnowledgeGraphService._driver_instance
 
@@ -592,13 +697,14 @@ class KnowledgeGraphService:
 
         session = self.driver.session(database=database)
         try:
-            yield session
+            yield _TimeoutSession(session, settings.NEO4J_QUERY_TIMEOUT_SECONDS)
             # Record success on clean exit
             if breaker:
                 breaker.record_success()
-        except (ServiceUnavailable, SessionExpired) as e:
-            # Record failure for connection-related errors
-            if breaker:
+        except Exception as e:
+            # Record failure for connection-related errors and timeouts (a
+            # hung Neo4j must open the breaker); query bugs do not count.
+            if breaker and _counts_toward_breaker(e):
                 breaker.record_failure(e)
             raise
         finally:
@@ -1185,32 +1291,27 @@ class KnowledgeGraphService:
         source_document_ids: Optional[List[str]] = None,
         organization_id: Optional[str] = None,
         require_source_document: bool = False,
+        offset: int = 0,
     ) -> List[EntityResponse]:
         """Search for entities by name or properties, optionally scoped to organization documents
 
         ``require_source_document`` keeps only entities that carry a
         ``source_document_id``, applied in the query so ``limit`` counts only
-        those (callers that map entities to documents need it).
+        those (callers that map entities to documents need it). ``offset``
+        skips that many matches (GOO-497); ``e.id`` breaks ordering ties so
+        pages are stable.
         """
         try:
             with self.get_session() as session:
                 query_str = (query or "").strip()
-                # Shared scope/type filters (reference `e`).
-                filters: List[str] = []
-                params: Dict[str, Any] = {"limit": limit}
-                scope = _entity_scope_predicate(
-                    "e", source_document_ids, organization_id, params
+                params: Dict[str, Any] = {"limit": limit, "offset": offset}
+                filters = _entity_search_filters(
+                    source_document_ids,
+                    organization_id,
+                    entity_types,
+                    require_source_document,
+                    params,
                 )
-                if scope:
-                    filters.append(scope)
-                if entity_types:
-                    filters.append("e.type IN $entity_types")
-                    params["entity_types"] = [t.value for t in entity_types]
-                if require_source_document:
-                    filters.append(
-                        "e.source_document_id IS NOT NULL"
-                        " AND e.source_document_id <> ''"
-                    )
 
                 result = None
                 if query_str:
@@ -1224,7 +1325,8 @@ class KnowledgeGraphService:
                     YIELD node AS e, score
                     {ft_where}
                     RETURN e
-                    ORDER BY score DESC
+                    ORDER BY score DESC, e.id
+                    SKIP $offset
                     LIMIT $limit
                     """
                     try:
@@ -1251,7 +1353,8 @@ class KnowledgeGraphService:
                     MATCH (e:Entity)
                     {where_clause}
                     RETURN e
-                    ORDER BY e.confidence_score DESC
+                    ORDER BY e.confidence_score DESC, e.id
+                    SKIP $offset
                     LIMIT $limit
                     """
                     result = session.run(search_query, params)
@@ -1286,6 +1389,70 @@ class KnowledgeGraphService:
         except Exception as e:
             # Re-raise like get_all_entities: an outage is not an empty graph.
             logger.error(f"Error searching entities: {e}")
+            raise
+
+    def count_search_entities(
+        self,
+        query: str,
+        entity_types: Optional[List[EntityType]] = None,
+        source_document_ids: Optional[List[str]] = None,
+        organization_id: Optional[str] = None,
+        require_source_document: bool = False,
+    ) -> int:
+        """Count every match ``search_entities`` would page over (GOO-497).
+
+        Same scope, filters and fulltext-then-CONTAINS fallback, without
+        SKIP/LIMIT. Raises on driver / breaker failure.
+        """
+        try:
+            with self.get_session() as session:
+                query_str = (query or "").strip()
+                params: Dict[str, Any] = {}
+                filters = _entity_search_filters(
+                    source_document_ids,
+                    organization_id,
+                    entity_types,
+                    require_source_document,
+                    params,
+                )
+                if query_str:
+                    ft_where = (" WHERE " + " AND ".join(filters)) if filters else ""
+                    ft_query = f"""
+                    CALL db.index.fulltext.queryNodes('entity_fulltext_idx', $lucene)
+                    YIELD node AS e, score
+                    {ft_where}
+                    RETURN count(e) AS total
+                    """
+                    try:
+                        rows = list(
+                            session.run(
+                                ft_query,
+                                {**params, "lucene": _to_lucene_prefix(query_str)},
+                            )
+                        )
+                        return int(rows[0]["total"]) if rows else 0
+                    except Exception as ft_err:
+                        logger.warning(
+                            "Fulltext count failed, falling back to CONTAINS: %s",
+                            ft_err,
+                        )
+
+                conditions = list(filters)
+                if query_str:
+                    conditions.insert(0, "e.name CONTAINS $query")
+                    params["query"] = query_str
+                where_clause = (
+                    (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                )
+                rows = list(
+                    session.run(
+                        f"MATCH (e:Entity){where_clause} RETURN count(e) AS total",
+                        params,
+                    )
+                )
+                return int(rows[0]["total"]) if rows else 0
+        except Exception as e:
+            logger.error(f"Error counting entity search matches: {e}")
             raise
 
     def get_all_entities(
@@ -1717,12 +1884,8 @@ class KnowledgeGraphService:
                     conditions.append("target.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 elif source_document_ids is not None:
-                    conditions.append(
-                        "source.source_document_id IN $source_document_ids"
-                    )
-                    conditions.append(
-                        "target.source_document_id IN $source_document_ids"
-                    )
+                    conditions.append(_entity_in_documents_predicate("source"))
+                    conditions.append(_entity_in_documents_predicate("target"))
                     params["source_document_ids"] = source_document_ids
 
                 if relationship_types:
@@ -1844,12 +2007,8 @@ class KnowledgeGraphService:
                     conditions.append("target.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 elif source_document_ids is not None:
-                    conditions.append(
-                        "source.source_document_id IN $source_document_ids"
-                    )
-                    conditions.append(
-                        "target.source_document_id IN $source_document_ids"
-                    )
+                    conditions.append(_entity_in_documents_predicate("source"))
+                    conditions.append(_entity_in_documents_predicate("target"))
                     params["source_document_ids"] = source_document_ids
                 where_clause = " AND ".join(conditions)
                 query = f"""
@@ -1891,12 +2050,8 @@ class KnowledgeGraphService:
                     conditions.append("target.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 elif source_document_ids is not None:
-                    conditions.append(
-                        "source.source_document_id IN $source_document_ids"
-                    )
-                    conditions.append(
-                        "target.source_document_id IN $source_document_ids"
-                    )
+                    conditions.append(_entity_in_documents_predicate("source"))
+                    conditions.append(_entity_in_documents_predicate("target"))
                     params["source_document_ids"] = source_document_ids
                 where_clause = " AND ".join(conditions)
                 query = f"""
@@ -2111,7 +2266,7 @@ class KnowledgeGraphService:
                 if organization_id is not None:
                     node_preds.append("n.organization_id = $organization_id")
                 if source_document_ids is not None:
-                    node_preds.append("n.source_document_id IN $source_document_ids")
+                    node_preds.append(_entity_in_documents_predicate("n"))
                 if len(node_preds) > 1:
                     path_node_predicate = "(" + " OR ".join(node_preds) + ")"
                 else:
@@ -2781,9 +2936,7 @@ class KnowledgeGraphService:
                     scope_preds.append("{alias}.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 if source_document_ids is not None:
-                    scope_preds.append(
-                        "{alias}.source_document_id IN $source_document_ids"
-                    )
+                    scope_preds.append(_entity_in_documents_predicate("{alias}"))
                     params["source_document_ids"] = source_document_ids
                 # The guard above ensures scope_preds is non-empty.
                 joined = " AND ".join(scope_preds)
@@ -3100,16 +3253,16 @@ class KnowledgeGraphService:
                     "scoping by organization_id only: %s",
                     e,
                 )
-        entities = self.search_entities(
-            query_text,
-            limit=limit,
-            source_document_ids=source_document_ids,
-            organization_id=organization_id,
+        scope_kwargs: Dict[str, Any] = {
+            "source_document_ids": source_document_ids,
+            "organization_id": organization_id,
             # Filter source-less entities in the query, before LIMIT, so they
             # cannot crowd document-backed matches out of the page.
-            require_source_document=True,
+            "require_source_document": True,
+        }
+        entities = self.search_entities(
+            query_text, limit=limit, offset=offset, **scope_kwargs
         )
-
         results = []
         now = datetime.utcnow()
         for entity in entities:
@@ -3141,18 +3294,31 @@ class KnowledgeGraphService:
                 )
             )
 
+        # GOO-497: a real total. A non-empty short page ends the result set,
+        # so offset + page size is exact; only a full page, or an empty page
+        # past the start, needs the count query.
+        if entities and len(entities) < limit:
+            total_results = offset + len(results)
+            has_more = False
+        elif not entities and offset == 0:
+            total_results = 0
+            has_more = False
+        else:
+            total_results = self.count_search_entities(query_text, **scope_kwargs)
+            has_more = offset + len(entities) < total_results
+
         search_time_ms = (time.time() - start_time) * 1000
         return SearchResponse(
             query=query_text,
             search_id=str(uuid.uuid4()),
             search_type=search_type,
             results=results,
-            total_results=len(results),
+            total_results=total_results,
             returned_results=len(results),
             search_time_ms=search_time_ms,
             limit=limit,
             offset=offset,
-            has_more=False,
+            has_more=has_more,
         )
 
     def create_entity_node(

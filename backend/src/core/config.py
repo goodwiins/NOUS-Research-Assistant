@@ -65,6 +65,18 @@ def _env_is_strict(info: ValidationInfo) -> bool:
     return _is_strict_environment(str(info.data.get("ENVIRONMENT", "development")))
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    """Whether a CORS origin points at the local machine (GOO-507)."""
+    try:
+        host = urlsplit(origin).hostname
+    except ValueError:
+        return False
+    return (host or "").lower() in _LOOPBACK_HOSTS
+
+
 def _longest_literal_hostname_run(pattern: str) -> int:
     """Longest contiguous literal hostname segment (project slug specificity)."""
     pattern = re.sub(r"\[[^\]]+\](?:[+*?]|\{[^}]+\})?", "", pattern)
@@ -258,12 +270,22 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        """Parse CORS_ORIGINS string into a list."""
+        """Parse CORS_ORIGINS string into a list.
+
+        GOO-507: CORS is registered with ``allow_credentials=True``, so in a
+        strict (non-throwaway) environment loopback origins are dropped — a
+        page on a developer's localhost must not make credentialed requests
+        to a shared deployment. Local/CI environments keep them.
+        """
+        strict = _is_strict_environment(self.ENVIRONMENT)
         if not self.CORS_ORIGINS:
-            return ["http://localhost:3000"]
-        return [
+            return [] if strict else ["http://localhost:3000"]
+        origins = [
             origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
         ]
+        if strict:
+            origins = [o for o in origins if not _is_loopback_origin(o)]
+        return origins
 
     @property
     def cors_headers_list(self) -> List[str]:
@@ -346,6 +368,13 @@ class Settings(BaseSettings):
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = ""
+    # GOO-459: bound every wait on Neo4j so a hung server fails fast (and
+    # trips the neo4j circuit breaker) instead of pinning threadpool workers.
+    # Connect = TCP/Bolt handshake; acquisition = waiting for a pooled
+    # connection; query = server-enforced transaction timeout on every query.
+    NEO4J_CONNECTION_TIMEOUT_SECONDS: float = 10.0
+    NEO4J_CONNECTION_ACQUISITION_TIMEOUT_SECONDS: float = 30.0
+    NEO4J_QUERY_TIMEOUT_SECONDS: float = 60.0
 
     # Figure extraction (PyMuPDF, Phase 1) — embedded raster figures + caption
     # heuristics during PDF ingestion. Off by default; flip per-env in Infisical.
@@ -356,6 +385,9 @@ class Settings(BaseSettings):
     DO_KB_ENABLED: bool = False
     DO_KB_PRIMARY_READ: bool = False  # Phase 4b: DO KB serves reads
     BEDROCK_KB_ID: str = ""  # Shared AWS KB; every read filters by organization_id
+    # Write path (services/bedrock_sync.py) runs only when both ids are set.
+    BEDROCK_KB_DATA_SOURCE_ID: str = ""
+    BEDROCK_KB_S3_PREFIX: str = "bedrock/nous-dev-knowledge-base/"
     DO_API_TOKEN: Optional[str] = None
     DO_KB_REGION: Optional[str] = None  # e.g. "tor1", "nyc3"
     DO_KB_PROJECT_ID: Optional[str] = None

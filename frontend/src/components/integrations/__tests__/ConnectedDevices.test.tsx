@@ -27,6 +27,18 @@ import type {
 
 import { ConnectedDevices } from '../ConnectedDevices';
 
+type TestUser = ReturnType<typeof render>['user'];
+
+// Revoking consent asks first (GOO-614): nothing is revoked until the
+// confirmation dialog's action is pressed.
+async function confirmRevoke(user: TestUser): Promise<void> {
+  const dialog = await screen.findByRole('alertdialog');
+  expect(integrationConnectionsService.revokeConsent).not.toHaveBeenCalled();
+  await user.click(
+    within(dialog).getByRole('button', { name: 'Revoke access' })
+  );
+}
+
 const laptop: ApiConnectedDevice = {
   device_id: 'd1',
   device_label: 'Laptop',
@@ -121,7 +133,7 @@ describe('ConnectedDevices', () => {
         name: 'Revoke Laptop (d1) access to your whole account',
       })
     );
-    await user.click(screen.getByRole('button', { name: 'Revoke access' }));
+    await confirmRevoke(user);
     expect(integrationConnectionsService.revokeConsent).toHaveBeenCalledTimes(
       1
     );
@@ -145,7 +157,7 @@ describe('ConnectedDevices', () => {
         name: 'Revoke Laptop (d1) access to Thesis',
       })
     );
-    await user.click(screen.getByRole('button', { name: 'Revoke access' }));
+    await confirmRevoke(user);
     expect(integrationConnectionsService.revokeConsent).toHaveBeenCalledWith(
       'r1'
     );
@@ -256,7 +268,7 @@ describe('ConnectedDevices', () => {
         name: 'Revoke Laptop (d1) access to workspace Lab',
       })
     );
-    await user.click(screen.getByRole('button', { name: 'Revoke access' }));
+    await confirmRevoke(user);
     expect(integrationConnectionsService.revokeConsent).toHaveBeenCalledTimes(
       1
     );
@@ -504,7 +516,7 @@ describe('ConnectedDevices', () => {
           name: 'Revoke Laptop (d1) access to Thesis',
         })
       );
-      await user.click(screen.getByRole('button', { name: 'Revoke access' }));
+      await confirmRevoke(user);
       await waitFor(() =>
         expect(invalidated(client, ['harness', 'devices', 'u1'])).toBe(true)
       );
