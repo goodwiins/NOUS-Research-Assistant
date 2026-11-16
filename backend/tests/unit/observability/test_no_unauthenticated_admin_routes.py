@@ -37,7 +37,7 @@ def _route_paths(tree: ast.AST) -> list[str]:
 
 
 @pytest.mark.unit
-def test_setup_observability_registers_no_admin_routes():
+def test_setup_observability_registers_no_admin_routes() -> None:
     tree = ast.parse(INTEGRATION.read_text(encoding="utf-8"))
     paths = _route_paths(tree)
 

@@ -24,7 +24,9 @@ LOOPBACK = [
 
 @pytest.mark.unit
 @pytest.mark.parametrize("env", ["dev", "production", "staging"])
-def test_strict_env_drops_loopback_origins(monkeypatch, env):
+def test_strict_env_drops_loopback_origins(
+    monkeypatch: pytest.MonkeyPatch, env: str
+) -> None:
     monkeypatch.setattr(settings, "ENVIRONMENT", env)
     monkeypatch.setattr(settings, "CORS_ORIGINS", ",".join([*LOOPBACK, LIVE]))
 
@@ -32,7 +34,9 @@ def test_strict_env_drops_loopback_origins(monkeypatch, env):
 
 
 @pytest.mark.unit
-def test_strict_env_empty_origins_does_not_fall_back_to_localhost(monkeypatch):
+def test_strict_env_empty_origins_does_not_fall_back_to_localhost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "ENVIRONMENT", "dev")
     monkeypatch.setattr(settings, "CORS_ORIGINS", "")
 
@@ -40,7 +44,9 @@ def test_strict_env_empty_origins_does_not_fall_back_to_localhost(monkeypatch):
 
 
 @pytest.mark.unit
-def test_strict_env_keeps_lookalike_public_hosts(monkeypatch):
+def test_strict_env_keeps_lookalike_public_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     lookalike = "https://localhost.example.com"
     monkeypatch.setattr(settings, "ENVIRONMENT", "dev")
     monkeypatch.setattr(settings, "CORS_ORIGINS", f"{lookalike},{LIVE}")
@@ -50,7 +56,9 @@ def test_strict_env_keeps_lookalike_public_hosts(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("env", ["development", "testing", "local", "test", "ci"])
-def test_throwaway_env_keeps_loopback_origins(monkeypatch, env):
+def test_throwaway_env_keeps_loopback_origins(
+    monkeypatch: pytest.MonkeyPatch, env: str
+) -> None:
     monkeypatch.setattr(settings, "ENVIRONMENT", env)
     monkeypatch.setattr(settings, "CORS_ORIGINS", ",".join([*LOOPBACK, LIVE]))
 

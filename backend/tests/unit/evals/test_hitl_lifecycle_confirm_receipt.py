@@ -10,7 +10,10 @@ import asyncio
 import importlib.util
 import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import httpx
 import pytest
@@ -21,10 +24,11 @@ APPROVAL_ID = "a" * 64
 
 
 @pytest.fixture(scope="module")
-def run_agent():
+def run_agent() -> Iterator[ModuleType]:
     sys.path.insert(0, str(ROOT))
     try:
         spec = importlib.util.spec_from_file_location("hitl_run_agent", SCRIPT)
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         yield module
@@ -34,7 +38,7 @@ def run_agent():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("confirmed", [True, False])
-def test_confirm_job_sends_approval_id(run_agent, confirmed):
+def test_confirm_job_sends_approval_id(run_agent: Any, confirmed: bool) -> None:
     seen: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -58,7 +62,7 @@ def test_confirm_job_sends_approval_id(run_agent, confirmed):
 
 
 @pytest.mark.unit
-def test_approval_id_read_from_parked_confirmation(run_agent):
+def test_approval_id_read_from_parked_confirmation(run_agent: Any) -> None:
     parked = {
         "status": "awaiting_confirmation",
         "confirmation": {"approval_id": APPROVAL_ID},
@@ -72,6 +76,8 @@ def test_approval_id_read_from_parked_confirmation(run_agent):
     "parked",
     [{}, {"confirmation": None}, {"confirmation": {"approval_id": "not-hex"}}],
 )
-def test_missing_approval_id_is_an_infrastructure_failure(run_agent, parked):
+def test_missing_approval_id_is_an_infrastructure_failure(
+    run_agent: Any, parked: dict[str, Any]
+) -> None:
     with pytest.raises(run_agent.InfrastructureFailure):
         run_agent.approval_id_of(parked)
