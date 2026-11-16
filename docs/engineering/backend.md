@@ -14,26 +14,35 @@ characterization/regression tests still import from this path directly
 not dead re-exports; the module's `__all__` is the definitive list. The
 real layout:
 
-- **Routers** (transport only): `backend/src/api/threads/workspace_routes/
-  {workspaces,members,conversations,threads,messages,collections}.py`, plus
+- **Routers** (transport plus the handler-end commit):
+  `backend/src/api/threads/workspace_routes/{workspaces,members,conversations,threads,messages,collections}.py`, plus
   two shared modules — `dependencies.py` (scope/access, raises
   `HTTPException`) and `presenters.py` (response shaping). Composed, in the
   original route-registration order, by `workspace_routes/__init__.py` into
   the two exported routers.
-- **Services** (persistence + one transaction boundary per method):
-  `backend/src/services/threads/{workspace,conversation,thread,message,
-  collection}_service.py`, `workspace_access.py` (the one scope/access
-  funnel), and `chat_service.py` (`ChatService` — a compatibility facade;
-  see below).
+- **Services** (persistence, flush-only): `backend/src/services/threads/
+  {workspace,conversation,thread,message,collection}_service.py`,
+  `workspace_access.py` (the one scope/access funnel), and `chat_service.py`
+  (`ChatService` — a compatibility facade; see below). The five leaf
+  services never call `.commit()`; `ChatService` commits only in the
+  functions listed in the test's `CHAT_SERVICE_COMMIT_ALLOWLIST`.
 
 Enforced by `backend/tests/unit/architecture/test_workspace_boundaries.py`:
 
-1. No route module calls `.commit()` / `.rollback()` / `.flush()` /
-   `.refresh()` — that's a service's job.
+1. Each resource route module (`workspaces`, `members`, `conversations`,
+   `threads`, `messages`, `collections`) owns the request commit: it calls
+   `.commit()` at least once, each handler calls it at most once, and it
+   never calls `.rollback()` / `.flush()` / `.refresh()` (rollback stays
+   with the request-scoped session). The shared modules (`dependencies.py`,
+   `presenters.py`, `__init__.py`) call none of the four. The test scans
+   only `workspace_routes/`; other `src/api/` modules commit directly and no
+   test constrains them.
 2. No resource module imports a sibling resource module directly — cross-
    handler helpers go through `dependencies.py` or `presenters.py` only.
 3. `workspace_routes/__init__.py` and the `workspaces.py` shim resolve
    `router`/`standalone_router` to the same objects.
+4. The five leaf services above call no `.commit()`, and `chat_service.py`
+   commits only in `CHAT_SERVICE_COMMIT_ALLOWLIST` (with no stale entries).
 
 **Named exception, not a loophole**: `workspace_routes/messages.py`'s
 `create_message`/`create_message_standalone` re-issue a read-only
