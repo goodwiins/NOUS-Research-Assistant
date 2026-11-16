@@ -346,6 +346,13 @@ class Settings(BaseSettings):
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = ""
+    # GOO-459: bound every wait on Neo4j so a hung server fails fast (and
+    # trips the neo4j circuit breaker) instead of pinning threadpool workers.
+    # Connect = TCP/Bolt handshake; acquisition = waiting for a pooled
+    # connection; query = server-enforced transaction timeout on every query.
+    NEO4J_CONNECTION_TIMEOUT_SECONDS: float = 10.0
+    NEO4J_CONNECTION_ACQUISITION_TIMEOUT_SECONDS: float = 30.0
+    NEO4J_QUERY_TIMEOUT_SECONDS: float = 60.0
 
     # Figure extraction (PyMuPDF, Phase 1) — embedded raster figures + caption
     # heuristics during PDF ingestion. Off by default; flip per-env in Infisical.

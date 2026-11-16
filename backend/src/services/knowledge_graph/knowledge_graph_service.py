@@ -12,8 +12,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from neo4j import Driver, GraphDatabase, Session
-from neo4j.exceptions import ServiceUnavailable, SessionExpired
+from neo4j import Driver, GraphDatabase, Query, Session
+from neo4j.exceptions import (
+    ConnectionAcquisitionTimeoutError,
+    Neo4jError,
+    ServiceUnavailable,
+    SessionExpired,
+)
 
 from src.core.circuit_breaker import ServiceUnavailableError as CircuitBreakerError
 from src.core.circuit_breaker import get_circuit_breaker
@@ -481,6 +486,56 @@ def _safe_extraction_method(value: Optional[str]) -> ExtractionMethod:
         return ExtractionMethod.UNKNOWN
 
 
+def _counts_toward_breaker(error: BaseException) -> bool:
+    """True for errors that mean Neo4j is down or hung (GOO-459).
+
+    Connection loss and every kind of timeout count; query bugs (syntax,
+    constraint, type errors) do not, so a bad query cannot open the breaker.
+    """
+    if isinstance(
+        error,
+        (
+            ServiceUnavailable,
+            SessionExpired,
+            ConnectionAcquisitionTimeoutError,
+            TimeoutError,
+        ),
+    ):
+        return True
+    return isinstance(error, Neo4jError) and "TransactionTimedOut" in (error.code or "")
+
+
+class _TimeoutSession:
+    """Session wrapper that puts a server-enforced timeout on every query.
+
+    The driver has no default transaction timeout, so without this a hung
+    query held its threadpool worker indefinitely (GOO-459). Plain-string
+    queries become ``Query(text, timeout=...)``; explicit transactions get the
+    same default. A caller-built ``Query`` or explicit ``timeout`` wins.
+    Everything else is delegated to the wrapped session unchanged.
+    """
+
+    def __init__(self, session: Session, timeout: float):
+        self._session = session
+        self._timeout = timeout
+
+    def run(self, query: Any, parameters: Any = None, **kwargs: Any) -> Any:
+        if isinstance(query, str):
+            query = Query(query, timeout=self._timeout)
+        return self._session.run(query, parameters, **kwargs)
+
+    def begin_transaction(
+        self, metadata: Any = None, timeout: Optional[float] = None
+    ) -> Any:
+        return self._session.begin_transaction(
+            metadata=metadata,
+            timeout=self._timeout if timeout is None else timeout,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+
 class KnowledgeGraphService:
     """Service for managing knowledge graph operations using Neo4j"""
 
@@ -544,6 +599,10 @@ class KnowledgeGraphService:
                     auth=(self.user, self.password),
                     max_connection_lifetime=3600,
                     max_connection_pool_size=50,
+                    connection_timeout=settings.NEO4J_CONNECTION_TIMEOUT_SECONDS,
+                    connection_acquisition_timeout=(
+                        settings.NEO4J_CONNECTION_ACQUISITION_TIMEOUT_SECONDS
+                    ),
                 )
                 self.driver = KnowledgeGraphService._driver_instance
 
@@ -592,13 +651,14 @@ class KnowledgeGraphService:
 
         session = self.driver.session(database=database)
         try:
-            yield session
+            yield _TimeoutSession(session, settings.NEO4J_QUERY_TIMEOUT_SECONDS)
             # Record success on clean exit
             if breaker:
                 breaker.record_success()
-        except (ServiceUnavailable, SessionExpired) as e:
-            # Record failure for connection-related errors
-            if breaker:
+        except Exception as e:
+            # Record failure for connection-related errors and timeouts (a
+            # hung Neo4j must open the breaker); query bugs do not count.
+            if breaker and _counts_toward_breaker(e):
                 breaker.record_failure(e)
             raise
         finally:
