@@ -16,6 +16,7 @@ from src.core.dependencies import get_current_user
 from src.models.analytics.analytics_models import AnalyticsReport
 from src.models.user import User
 from src.services.analytics.report_service import report_service
+from src.utils.outbound_url_guard import UnsafeDestinationError
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,12 @@ async def create_report(
         )
         return report
 
+    except UnsafeDestinationError as e:
+        logger.warning(f"Rejected report delivery_config: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid delivery_config: webhook URL must be a public HTTPS URL",
+        )
     except Exception as e:
         logger.error(f"Error creating report: {e}")
         raise HTTPException(

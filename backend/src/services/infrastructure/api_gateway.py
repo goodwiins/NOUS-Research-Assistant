@@ -51,7 +51,6 @@ from src.shared.utils import (
     MetricsCollector,
     RateLimiter,
     get_correlation_id,
-    make_http_request,
 )
 
 # Configuration
