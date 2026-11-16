@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectWorkflow } from '../ProjectWorkflow';
 import { projectService } from '@/services/projectService';
@@ -7,6 +13,7 @@ import { useProjectStore } from '@/store/projectStore';
 import {
   createProject,
   listProjectRoles,
+  removeProjectRole,
 } from '@/services/researchEngineService';
 
 vi.mock('../JourneyRail', () => ({
@@ -206,6 +213,75 @@ describe('ProjectWorkflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open matrix' }));
     fireEvent.click(screen.getByRole('button', { name: 'Open drafts' }));
     expect(onOpenTab.mock.calls).toEqual([['matrix'], ['drafts']]);
+  });
+
+  it('asks before removing a workflow role (GOO-614)', async () => {
+    vi.mocked(listProjectRoles).mockResolvedValue([
+      {
+        id: 'a-2',
+        collection_id: 'collection-1',
+        user_id: 'someone-else',
+        role: 'reviewer',
+        assigned_by_id: 'owner-1',
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    ] as Awaited<ReturnType<typeof listProjectRoles>>);
+    vi.mocked(removeProjectRole).mockResolvedValue(
+      undefined as Awaited<ReturnType<typeof removeProjectRole>>
+    );
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectWorkflow
+          project={{
+            id: 'collection-1',
+            workspace_id: 'workspace-1',
+            name: 'Roles',
+            research_engine_project_id: 'engine-1',
+            can_edit: true,
+            can_manage: true,
+            workspace_archived: false,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          }}
+        />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Remove reviewer role from someone-else',
+      })
+    );
+    const dialog = await screen.findByRole('alertdialog', {
+      name: 'Remove the reviewer role?',
+    });
+    expect(removeProjectRole).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    );
+    expect(removeProjectRole).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Remove reviewer role from someone-else',
+      })
+    );
+    fireEvent.click(
+      within(
+        await screen.findByRole('alertdialog', {
+          name: 'Remove the reviewer role?',
+        })
+      ).getByRole('button', { name: 'Remove role' })
+    );
+    await waitFor(() =>
+      expect(removeProjectRole).toHaveBeenCalledWith(
+        'collection-1',
+        'someone-else',
+        'reviewer'
+      )
+    );
   });
 
   it('keeps blueprint and role reads on the canonical collection id', async () => {
