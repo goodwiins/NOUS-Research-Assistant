@@ -232,7 +232,7 @@ def test_stage_uploads_text_and_sidecar_then_marks_pending(
 
     def upload(key: str, data: bytes, content_type: str = "") -> str:
         seen_status.append(_load(session_factory, doc_id).do_kb_sync_status)
-        return original(key, data, content_type)
+        return str(original(key, data, content_type))
 
     s3.upload_file = upload  # type: ignore[method-assign]
     assert _stage(session_factory, doc_id) is bs.StageOutcome.STAGED
@@ -283,6 +283,33 @@ def test_stage_upload_failure_is_recorded_not_raised(
     s3.fail_upload = True
     assert _stage(session_factory, doc_id) is bs.StageOutcome.FAILED
     assert _load(session_factory, doc_id).do_kb_sync_status == FAILED
+
+
+def test_stage_failure_keeps_a_concurrent_delete_queued(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    """A soft delete that commits mid-upload must stay pending for removal."""
+    doc_id = _add(session_factory)
+
+    def upload(key: str, data: bytes, content_type: str = "") -> str:
+        other = session_factory()
+        try:
+            document = other.get(Document, doc_id)
+            document.is_deleted = True
+            bs.mark_deleted(document)
+            other.commit()
+        finally:
+            other.close()
+        raise RuntimeError("s3 down")
+
+    s3.upload_file = upload  # type: ignore[method-assign]
+
+    assert _stage(session_factory, doc_id) is bs.StageOutcome.FAILED
+
+    doc = _load(session_factory, doc_id)
+    assert doc.is_deleted is True
+    assert doc.do_kb_sync_status == PENDING
+    assert _state(doc).get("stage_token")
 
 
 def test_restage_clears_an_existing_claim(
@@ -398,6 +425,54 @@ def test_complete_job_marks_completed_except_reported_failures(
     assert _state(retry)["job_id"] == "job-2"
 
 
+def test_complete_job_with_unnamed_failures_completes_nothing(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    """A failed-document count the reasons do not explain proves nothing."""
+    first = _add(session_factory)
+    second = _add(session_factory)
+    _stage(session_factory, first)
+    _stage(session_factory, second)
+    client = FakeBedrock()
+    _tick(session_factory, client, s3)
+    client.jobs["job-1"].update(
+        status="COMPLETE",
+        failureReasons=[],
+        statistics={"numberOfDocumentsFailed": 1},
+    )
+
+    summary = _tick(session_factory, client, s3)
+
+    assert summary["completed"] == 0 and summary["retried"] == 2
+    assert summary["unattributed_failures"] == 1
+    for doc_id in (first, second):
+        doc = _load(session_factory, doc_id)
+        assert doc.do_kb_sync_status == PENDING
+        assert _state(doc)["attempts"] == 1
+
+
+def test_complete_job_with_every_failure_named_completes_the_rest(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    org_id = uuid4()
+    good = _add(session_factory, org_id)
+    bad = _add(session_factory, org_id)
+    _stage(session_factory, good)
+    _stage(session_factory, bad)
+    client = FakeBedrock()
+    _tick(session_factory, client, s3)
+    client.jobs["job-1"].update(
+        status="COMPLETE",
+        failureReasons=[f"s3://bucket/{PREFIX}{org_id}/{bad}.txt is malformed"],
+        statistics={"numberOfDocumentsFailed": 1},
+    )
+
+    summary = _tick(session_factory, client, s3)
+
+    assert summary["completed"] == 1 and summary["retried"] == 1
+    assert _load(session_factory, good).do_kb_sync_status == COMPLETED
+
+
 def test_restage_during_settlement_is_not_marked_completed(
     session_factory: Any, s3: Any, enabled: Any
 ) -> None:
@@ -510,7 +585,7 @@ def test_deleted_document_objects_removed_before_job(
 
     def delete(key: str) -> bool:
         order.append("delete")
-        return original_delete(key)
+        return bool(original_delete(key))
 
     s3.delete_file = delete  # type: ignore[method-assign]
     _tick(session_factory, client, s3)

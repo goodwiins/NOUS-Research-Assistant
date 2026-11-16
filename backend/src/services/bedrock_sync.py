@@ -212,13 +212,21 @@ def _log_skip(document: DocumentRow, reason: str) -> None:
     )
 
 
+_FAILURE_RECHECK = ["is_deleted", "document_metadata", "do_kb_sync_status"]
+
+
 def _record_stage_failure(document: DocumentRow) -> StageOutcome:
+    """Mark a failed upload. ``document`` must be freshly locked and reloaded.
+
+    A soft delete can commit while the upload runs. Its pending removal must
+    survive: nothing else would ever take the document's vectors out.
+    """
     logger.warning(
         "bedrock_kb stage upload failed",
         extra={"document_id": str(document.id)},
-        exc_info=True,
     )
-    document.do_kb_sync_status = _FAILED
+    if not document.is_deleted:
+        document.do_kb_sync_status = _FAILED
     return StageOutcome.FAILED
 
 
@@ -241,6 +249,8 @@ def stage_document_sync(db: Session, document: DocumentRow) -> StageOutcome:
             document.content_text,
         )
     except Exception:  # noqa: BLE001 - a KB outage must never fail ingestion
+        logger.warning("bedrock_kb stage upload error", exc_info=True)
+        db.refresh(document, attribute_names=_FAILURE_RECHECK, with_for_update=True)
         return _record_stage_failure(document)
     _mark_pending(document)
     return StageOutcome.STAGED
@@ -266,6 +276,10 @@ async def stage_document(session: AsyncSession, document: DocumentRow) -> StageO
             document.content_text,
         )
     except Exception:  # noqa: BLE001 - a KB outage must never fail ingestion
+        logger.warning("bedrock_kb stage upload error", exc_info=True)
+        await session.refresh(
+            document, attribute_names=_FAILURE_RECHECK, with_for_update=True
+        )
         return _record_stage_failure(document)
     _mark_pending(document)
     return StageOutcome.STAGED
@@ -339,8 +353,9 @@ async def _settle_job(
     job: dict[str, Any],
     summary: dict[str, Any],
 ) -> None:
-    status = job.get("status")
+    complete = job.get("status") == "COMPLETE"
     reasons = [str(r) for r in (job.get("failureReasons") or [])]
+    claimed: list[tuple[DocumentRow, bool]] = []
     for document_id in document_ids:
         document = await _lock_row(db, document_id)
         # A restage or delete since the claim cleared it: not this job's row.
@@ -351,7 +366,22 @@ async def _settle_job(
         ):
             continue
         key = content_key(document.organization_id, document.id)
-        if status == "COMPLETE" and not any(key in reason for reason in reasons):
+        claimed.append((document, any(key in reason for reason in reasons)))
+
+    # COMPLETE does not mean every document was ingested: the job also reports
+    # a failed-document count, and ``failureReasons`` need not name each one.
+    # When more documents failed than we can name, none of the live claimed
+    # documents is provably indexed, so they keep their retry budget.
+    failed_count = int(
+        (job.get("statistics") or {}).get("numberOfDocumentsFailed") or 0
+    )
+    unattributed = failed_count > sum(1 for _, named in claimed if named)
+    if unattributed:
+        summary["unattributed_failures"] = failed_count
+    for document, named in claimed:
+        # A deleted document has no object left to fail ingestion.
+        suspect = named or (unattributed and not document.is_deleted)
+        if complete and not suspect:
             _record_completed(document, summary)
         else:
             _record_failure(document, summary)
