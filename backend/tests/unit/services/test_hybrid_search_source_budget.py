@@ -366,6 +366,34 @@ def test_graph_success_does_not_mask_a_timed_out_fulltext_arm(
         svc.search(_request(), "user-1", ORG_ID)
 
 
+def test_failed_fulltext_fallback_raises_instead_of_empty_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GOO-584: when the full-text fallback also fails, search() must raise.
+
+    An empty page here is indistinguishable from a genuine NO_MATCH, so the
+    agent's retrieval status read "empty" instead of "error".
+    """
+    from src.services.search import hybrid_search_service as hybrid_mod
+
+    svc = HybridSearchService()
+    monkeypatch.setattr(
+        svc,
+        "_execute_parallel_searches",
+        lambda *_a, **_k: {
+            SearchSourceType.FULLTEXT: _failed(SearchSourceType.FULLTEXT, "db error"),
+        },
+    )
+
+    def _fulltext_down(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("fulltext db down")
+
+    monkeypatch.setattr(hybrid_mod.fulltext_search_service, "search", _fulltext_down)
+
+    with pytest.raises(RuntimeError, match="fulltext db down"):
+        svc.search(_request(), "user-1", ORG_ID)
+
+
 def test_successful_fulltext_with_failed_graph_still_returns_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

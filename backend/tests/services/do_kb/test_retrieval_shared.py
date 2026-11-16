@@ -359,7 +359,8 @@ async def test_rag_node_delegates_to_shared_retrieve():
     fake_retrieve.assert_awaited_once()
     kwargs = fake_retrieve.await_args.kwargs
     assert kwargs["kb_uuid"] == "kb-1"
-    assert kwargs["timeout"] == 4.0
+    # GOO-494: the remaining part of the one 4 s deadline, never a fresh one.
+    assert 0 < kwargs["timeout"] <= 4.0
     assert kwargs["org_id"] == org_uuid
     assert out is not None and len(out) == 1
 
@@ -554,3 +555,110 @@ async def test_rag_node_empty_after_sanitization_triggers_fallback():
 
     assert contexts is None
     rerank.assert_not_awaited()
+
+
+def _deadline_case(retrieve, rerank):
+    """Patch set for the GOO-494 single-deadline tests (0.3 s budget)."""
+    from contextlib import asynccontextmanager
+
+    cfg = SimpleNamespace(
+        DO_KB_PRIMARY_READ=True,
+        DO_KB_RETRIEVE_TIMEOUT_SECONDS=0.3,
+        AGENT_DOKB_COHERE_RERANK=True,
+    )
+    session = MagicMock()
+
+    @asynccontextmanager
+    async def _session_ctx():
+        yield session
+
+    async def _resolve(**kwargs):
+        return ({}, kwargs["chunks"])
+
+    return (
+        patch("src.core.config.settings", cfg),
+        patch("src.core.database.AsyncSessionLocal", _session_ctx),
+        patch(
+            "src.services.do_kb.retrieval.resolve_org_kb_uuid",
+            AsyncMock(return_value="kb-1"),
+        ),
+        patch("src.services.do_kb.retrieval.retrieve_kb_chunks", retrieve),
+        patch("src.services.do_kb.resolve.resolve_and_filter_chunks", _resolve),
+        patch("src.services.do_kb.rerank.cohere_rescore_chunks", rerank),
+    )
+
+
+async def test_rag_node_slow_rerank_keeps_good_retrieve_unreranked():
+    """GOO-494: a retrieve that fits the budget survives a rerank that does not.
+
+    The outer 3 s wait_for used to cover rerank too, so a good retrieve was
+    thrown away (and the hybrid fallback ran) whenever rerank ran long.
+    """
+    from contextlib import ExitStack
+
+    from src.services.agent import _nodes_rag
+
+    chunks = [
+        Chunk(text="first result", score=0.9, document_id="a"),
+        Chunk(text="second result", score=0.8, document_id="b"),
+    ]
+    outcome = DOKBRetrieveOutcome(
+        status=DOKBRetrieveStatus.SUCCESS,
+        result=RetrieveResult(chunks=chunks, total=2),
+    )
+
+    async def _slow_rerank(_query, given):
+        await asyncio.sleep(5)
+        return list(reversed(given))
+
+    loop = asyncio.get_running_loop()
+    with ExitStack() as stack:
+        for p in _deadline_case(
+            AsyncMock(return_value=outcome), AsyncMock(side_effect=_slow_rerank)
+        ):
+            stack.enter_context(p)
+        started = loop.time()
+        contexts = await _nodes_rag._try_primary_do_kb_read(
+            "q", str(uuid.uuid4()), str(uuid.uuid4())
+        )
+        elapsed = loop.time() - started
+
+    assert contexts is not None
+    assert [c["content"] for c in contexts] == ["first result", "second result"]
+    assert elapsed < 1.0, f"primary read took {elapsed:.2f}s for a 0.3s budget"
+
+
+async def test_rag_node_retrieve_gets_remaining_budget_not_a_fresh_one():
+    """GOO-494: time spent before the retrieve comes out of its budget."""
+    from contextlib import ExitStack
+
+    from src.services.agent import _nodes_rag
+
+    outcome = DOKBRetrieveOutcome(
+        status=DOKBRetrieveStatus.SUCCESS,
+        result=RetrieveResult(
+            chunks=[Chunk(text="only", score=0.9, document_id="a")], total=1
+        ),
+    )
+    retrieve = AsyncMock(return_value=outcome)
+
+    async def _slow_kb_lookup(*_a, **_k):
+        await asyncio.sleep(0.1)
+        return "kb-1"
+
+    with ExitStack() as stack:
+        for p in _deadline_case(retrieve, AsyncMock(side_effect=lambda _q, c: c)):
+            stack.enter_context(p)
+        stack.enter_context(
+            patch(
+                "src.services.do_kb.retrieval.resolve_org_kb_uuid",
+                AsyncMock(side_effect=_slow_kb_lookup),
+            )
+        )
+        contexts = await _nodes_rag._try_primary_do_kb_read(
+            "q", str(uuid.uuid4()), str(uuid.uuid4())
+        )
+
+    assert contexts is not None
+    timeout = retrieve.await_args.kwargs["timeout"]
+    assert 0 < timeout <= 0.21, f"retrieve got {timeout!r}s after 0.1s spent"
