@@ -487,6 +487,21 @@ async function consumeSse(
     }
   };
 
+  // The `id:` line arrives before the frame's `data:` line, possibly in an
+  // earlier network chunk. Reporting the seq there advanced the resume cursor
+  // past a frame that was never dispatched, so a drop between the two lines
+  // skipped that frame on resume (GOO-612). Hold the seq and report it in the
+  // same synchronous step that dispatches the frame — immediately before the
+  // data, because callers use onSeq to classify the frame being dispatched
+  // (replayed prefix vs new) — or at the frame's blank line if it has no data.
+  let pendingSeq: number | null = null;
+  const commitPendingSeq = (): void => {
+    if (pendingSeq === null) return;
+    const seq = pendingSeq;
+    pendingSeq = null;
+    callbacks.onSeq?.(seq);
+  };
+
   const silenceTimeoutMs =
     options.silenceTimeoutMs ?? STREAM_SILENCE_TIMEOUT_MS;
   let silenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -528,15 +543,19 @@ async function consumeSse(
         options.signal?.throwIfAborted();
         const line = rawLine.trim();
         if (!line) {
+          // End of frame: a frame that carried an id but no dispatchable
+          // data is still complete, so its cursor can be committed now.
+          commitPendingSeq();
           eventType = '';
           continue;
         }
         if (line.startsWith('id: ')) {
           const seq = parseInt(line.slice(4), 10);
-          if (!Number.isNaN(seq)) callbacks.onSeq?.(seq);
+          if (!Number.isNaN(seq)) pendingSeq = seq;
         } else if (line.startsWith('event: ')) {
           eventType = line.slice(7).trim();
         } else if (line.startsWith('data: ') && eventType) {
+          commitPendingSeq();
           dispatchData(eventType, line);
         }
       }
@@ -556,6 +575,7 @@ async function consumeSse(
     if (buffer.trim() && eventType) {
       const tail = buffer.trim();
       if (tail.startsWith('data: ')) {
+        commitPendingSeq();
         dispatchData(eventType, tail);
       }
     }
