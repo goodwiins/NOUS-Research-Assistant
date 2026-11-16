@@ -742,7 +742,10 @@ export const useDocuments = (
       return;
     }
 
-    const startedAt = Date.now();
+    // Only visible time counts toward the cap. If hidden ticks counted, a tab
+    // left in the background past the cap would stop polling without ever
+    // fetching, and finished documents would stay "processing" on return.
+    let startedAt = Date.now();
     const intervalId = setInterval(() => {
       if (!mountedRef.current) {
         return;
@@ -751,8 +754,11 @@ export const useDocuments = (
         clearInterval(intervalId);
         return;
       }
-      // Background tabs skip the request; the cap above still counts.
-      if (isTabHidden()) return;
+      // Background tabs skip the request and push the cap back by one tick.
+      if (isTabHidden()) {
+        startedAt += DOCUMENT_POLL_INTERVAL_MS;
+        return;
+      }
       fetchDocuments();
     }, DOCUMENT_POLL_INTERVAL_MS);
 

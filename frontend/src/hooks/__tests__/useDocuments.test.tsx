@@ -836,8 +836,9 @@ describe('useDocuments', () => {
         });
         expect(mockGet).toHaveBeenCalledTimes(1);
 
+        // Hidden for longer than the 10-minute cap.
         await act(async () => {
-          vi.advanceTimersByTime(15000);
+          vi.advanceTimersByTime(11 * 60 * 1000);
           await Promise.resolve();
         });
         expect(mockGet).toHaveBeenCalledTimes(1);
