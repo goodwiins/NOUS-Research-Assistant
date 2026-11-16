@@ -427,6 +427,51 @@ describe('agentChatService.resumeStream', () => {
     });
     expect(seqs).toEqual([1, 2]);
   });
+
+  // GOO-612: a chunk boundary between `id:` and `data:` followed by a drop
+  // must not advance the cursor past the undelivered frame.
+  it('does not report a seq whose frame data never arrived', async () => {
+    global.fetch = fetchWith([
+      'id: 3\nevent: token\ndata: {"content":"he"}\n\n',
+      'id: 4\nevent: token\n',
+    ]);
+    const seqs: number[] = [];
+    const tokens: string[] = [];
+    const res = await agentChatService.resumeStream('thread-1', 2, {
+      onSeq: (s) => seqs.push(s),
+      onToken: (c) => tokens.push(c),
+    });
+    expect(res.status).toBe('failed');
+    expect(tokens).toEqual(['he']);
+    expect(seqs).toEqual([3]);
+  });
+
+  it('reports the seq immediately before the frame it numbers', async () => {
+    global.fetch = fetchWith([
+      'id: 1\nevent: token\n',
+      'data: {"content":"x"}\n\n',
+      'id: 2\nevent: done\ndata: {"status":"complete"}\n\n',
+    ]);
+    const order: string[] = [];
+    await agentChatService.streamMessage(request, {
+      onSeq: (s) => order.push(`seq:${s}`),
+      onToken: (c) => order.push(`token:${c}`),
+      onDone: () => order.push('done'),
+    });
+    expect(order).toEqual(['seq:1', 'token:x', 'seq:2', 'done']);
+  });
+
+  it('commits the seq of a frame that carries no data at its blank line', async () => {
+    global.fetch = fetchWith([
+      'id: 1\n\n',
+      'id: 2\nevent: done\ndata: {"status":"complete"}\n\n',
+    ]);
+    const seqs: number[] = [];
+    await agentChatService.streamMessage(request, {
+      onSeq: (s) => seqs.push(s),
+    });
+    expect(seqs).toEqual([1, 2]);
+  });
 });
 
 describe('agentChatService.cancelPendingConfirmation', () => {

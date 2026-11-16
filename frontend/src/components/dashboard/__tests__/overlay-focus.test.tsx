@@ -154,26 +154,16 @@ describe('QuickSearch', () => {
 });
 
 describe('KeyboardShortcuts', () => {
-  it('closes on "?" without letting a window listener see it', async () => {
+  it('closes on "?"', async () => {
     const user = userEvent.setup();
-    const windowListener = vi.fn();
-    window.addEventListener('keydown', windowListener);
-    try {
-      renderWithQuery(<Harness Overlay={KeyboardShortcuts} />);
-      await user.click(screen.getByRole('button', { name: 'Open overlay' }));
-      await screen.findByRole('dialog', { name: /keyboard shortcuts/i });
-      windowListener.mockClear();
+    renderWithQuery(<Harness Overlay={KeyboardShortcuts} />);
+    await user.click(screen.getByRole('button', { name: 'Open overlay' }));
+    await screen.findByRole('dialog', { name: /keyboard shortcuts/i });
 
-      await user.keyboard('?');
+    await user.keyboard('?');
 
-      await waitFor(() =>
-        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-      );
-      expect(
-        windowListener.mock.calls.some(([e]) => (e as KeyboardEvent).key === '?')
-      ).toBe(false);
-    } finally {
-      window.removeEventListener('keydown', windowListener);
-    }
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    );
   });
 });

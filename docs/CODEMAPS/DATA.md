@@ -34,7 +34,7 @@ Managed by **Alembic** (`backend/alembic/`). The canonical migration chain is in
 | `i4k8l9m0...` | Project-thread integration |
 
 Run migrations: `cd backend && alembic upgrade head`  
-Create new: `alembic revision --autogenerate -m "describe_change"`  
+Create new: `alembic revision --rev-id xx01_short_slug -m "describe_change"`, then write `upgrade()`/`downgrade()` by hand (no `--autogenerate`; see `backend/alembic/README.md`)  
 Roll back one: `alembic downgrade -1`
 
 ### Raw SQL migrations (`database/migrations/`)
@@ -115,8 +115,8 @@ There is no `backend/scripts/seed_dev_data.py`; `backend/src/core/init_db.py` pr
 
 ## Adding a new table
 
-1. Create Alembic migration: `cd backend && alembic revision --autogenerate -m "add_<table>"`.
-2. Add SQLAlchemy model in `backend/src/models/<domain>.py`.
+1. Add SQLAlchemy model in `backend/src/models/<domain>.py`.
+2. Create a hand-written Alembic migration: `cd backend && alembic revision --rev-id xx01_add_<table> -m "add_<table>"`, then write `upgrade()`/`downgrade()` to match the model (no `--autogenerate`; CI's `alembic check` fails on drift).
 3. Add Pydantic schema in `backend/src/schemas/<domain>.py`.
 4. If the table needs indexing strategy docs, add to `database/indexing/`.
 5. If the table has a TTL/retention policy, add to `database/data_retention_policies.sql`.

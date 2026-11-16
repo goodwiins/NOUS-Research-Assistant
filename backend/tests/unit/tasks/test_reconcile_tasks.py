@@ -379,6 +379,34 @@ def test_apply_skips_do_kb_when_feature_disabled(session_factory):
     assert _get(session_factory, doc_id).do_kb_sync_status == FAILED
 
 
+def test_apply_leaves_do_kb_status_to_bedrock_queue(session_factory):
+    """With the Bedrock write path on, do_kb_sync_status belongs to its queue
+    tick; re-driving a failed row through DO KB would fight it."""
+    doc_id = _seed_doc(session_factory, do_kb=FAILED)
+    kb_sync = MagicMock(return_value="ds-1")
+
+    with patch.object(rt, "bedrock_sync_enabled", return_value=True):
+        result, _ = _run(session_factory, _settings(apply=True), kb_sync=kb_sync)
+
+    assert result["do_kb_skipped_disabled"] == 1
+    kb_sync.assert_not_called()
+    assert _get(session_factory, doc_id).do_kb_sync_status == FAILED
+
+
+def test_bedrock_sync_does_not_stop_deleted_document_do_kb_cleanup(session_factory):
+    """A deleted document's DigitalOcean data source is still removed."""
+    doc_id = _seed_doc(session_factory, is_deleted=True, do_kb_uuid="ds-pending-delete")
+    cleanup = MagicMock(return_value=True)
+
+    with patch.object(rt, "bedrock_sync_enabled", return_value=True):
+        result, mocks = _run(session_factory, _settings(apply=True), kb_cleanup=cleanup)
+
+    assert result["do_kb_cleanup_succeeded"] == 1
+    cleanup.assert_called_once()
+    assert cleanup.call_args.args[0].id == doc_id
+    mocks.kb_sync.assert_not_called()
+
+
 def test_apply_retries_deleted_document_do_kb_cleanup(session_factory):
     doc_id = _seed_doc(
         session_factory,

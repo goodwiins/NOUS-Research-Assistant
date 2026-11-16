@@ -3,15 +3,16 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
-import { createProject } from '@/services/researchEngineService';
-import { listWorkflowLinkOptions } from '@/services/projectService';
 import {
   Dialog,
   DialogContent,
-  DialogFooter,
+  DialogDescription,
+  DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { useReturnFocusOnClose } from '@/hooks/useReturnFocusOnClose';
+import { useDialogReturnFocus } from '@/hooks/useDialogReturnFocus';
+import { createProject } from '@/services/researchEngineService';
+import { listWorkflowLinkOptions } from '@/services/projectService';
 
 export interface CreateProjectModalProps {
   isOpen: boolean;
@@ -19,8 +20,6 @@ export interface CreateProjectModalProps {
   onCreated: () => void;
 }
 
-// Radix Dialog supplies role="dialog", aria-modal, Escape, the focus trap and
-// focus restore to the element that opened it.
 export function CreateProjectModal({
   isOpen,
   onClose,
@@ -29,14 +28,15 @@ export function CreateProjectModal({
   const [collectionId, setCollectionId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const returnFocus = useReturnFocusOnClose(isOpen);
 
   const { data: collections = [] } = useQuery({
     queryKey: ['projects', 'research-engine-link-options'],
     queryFn: listWorkflowLinkOptions,
     enabled: isOpen,
   });
+  const restoreFocus = useDialogReturnFocus(isOpen);
 
+  if (!isOpen) return null;
   const selectedCollection = collections.find(
     (collection) => collection.id === collectionId
   );
@@ -46,8 +46,6 @@ export function CreateProjectModal({
     setError(null);
   };
 
-  // Escape, overlay click and the close button all land here. While a
-  // request is in flight the dialog stays open, as before.
   const handleClose = () => {
     if (submitting) return;
     reset();
@@ -74,6 +72,8 @@ export function CreateProjectModal({
     }
   };
 
+  // Radix Dialog owns role="dialog", aria-modal, Escape, the focus trap and
+  // focus restore to the opener (GOO-599).
   return (
     <Dialog
       open={isOpen}
@@ -82,46 +82,49 @@ export function CreateProjectModal({
       }}
     >
       <DialogContent
-        aria-describedby={undefined}
-        onCloseAutoFocus={returnFocus}
-        className="max-w-xl bg-card border-border"
+        onCloseAutoFocus={restoreFocus}
+        className="bg-card border-border max-w-xl"
       >
-        <DialogTitle className="font-mono font-bold text-sol">
-          Enable Research Workflow
-        </DialogTitle>
+        <DialogHeader className="mb-2 pr-6">
+          <DialogTitle className="text-lg font-mono font-bold text-sol">
+            Enable Research Workflow
+          </DialogTitle>
+          <DialogDescription>
+            Pick an existing project to run the research workflow on.
+          </DialogDescription>
+        </DialogHeader>
 
         {error && (
-          <div
-            role="alert"
-            className="p-3 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-400 font-mono"
-          >
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-400 font-mono">
             {error}
           </div>
         )}
 
-        <div>
-          <label
-            htmlFor="engine-project-collection"
-            className="block text-xs text-muted-foreground font-mono uppercase tracking-wide mb-1"
-          >
-            Existing project
-          </label>
-          <select
-            id="engine-project-collection"
-            value={collectionId}
-            onChange={(event) => setCollectionId(event.target.value)}
-            className="w-full px-3 py-2 bg-muted border border-border rounded text-sm text-foreground"
-          >
-            <option value="">Select a project</option>
-            {collections.map((collection) => (
-              <option key={collection.id} value={collection.id}>
-                {collection.name}
-              </option>
-            ))}
-          </select>
+        <div className="space-y-4">
+          <div>
+            <label
+              htmlFor="engine-project-collection"
+              className="block text-xs text-muted-foreground font-mono uppercase tracking-wide mb-1"
+            >
+              Existing project
+            </label>
+            <select
+              id="engine-project-collection"
+              value={collectionId}
+              onChange={(event) => setCollectionId(event.target.value)}
+              className="w-full px-3 py-2 bg-muted border border-border rounded text-sm text-foreground"
+            >
+              <option value="">Select a project</option>
+              {collections.map((collection) => (
+                <option key={collection.id} value={collection.id}>
+                  {collection.name}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
-        <DialogFooter className="gap-3 mt-2">
+        <div className="flex justify-end gap-3 mt-4">
           <button
             type="button"
             onClick={handleClose}
@@ -133,12 +136,12 @@ export function CreateProjectModal({
             type="button"
             onClick={handleSubmit}
             disabled={!selectedCollection || submitting}
-            className="flex items-center justify-center gap-2 px-4 py-2 bg-sol/10 text-sol border border-sol/30 rounded font-mono text-sm hover:bg-sol/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-2 px-4 py-2 bg-sol/10 text-sol border border-sol/30 rounded font-mono text-sm hover:bg-sol/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
             Enable Workflow
           </button>
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );

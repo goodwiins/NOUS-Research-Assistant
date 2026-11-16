@@ -7,10 +7,11 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from celery import Task, current_app
+from celery.exceptions import MaxRetriesExceededError, Retry
 from sqlalchemy import and_, or_, select, tuple_
 
 from src.core.config import settings
@@ -26,6 +27,14 @@ from src.models.graph import EntityType as GraphEntityType
 from src.models.graph import ExtractionMethod as GraphExtractionMethod
 from src.models.graph import RelationshipType as GraphRelationshipType
 from src.models.processing import JobStatus, JobType, ProcessingJob
+from src.services.bedrock_sync import WRITE_SATELLITE as BEDROCK_WRITE_SATELLITE
+from src.services.bedrock_sync import (
+    bedrock_sync_enabled,
+    begin_stage_write,
+    finish_stage_write,
+)
+from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
+from src.services.bedrock_sync import stage_document_sync
 from src.services.documents.satellite_state import begin_write, finish_write
 from src.services.knowledge_graph.knowledge_graph_service import (
     GraphExtractor,
@@ -45,7 +54,10 @@ from src.tasks.processing_lifecycle import (
     fail_document_unless_owned,
     require_active_ingestion,
 )
-from src.tasks.replay_guard import claim_job_for_processing
+from src.tasks.replay_guard import (
+    claim_job_for_processing,
+    redelivery_countdown_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +282,12 @@ def _record_do_kb_sync_outcome(document, ds_uuid) -> None:
 
 
 def _compensate_late_remote_writes(
-    db, document_id, organization_id, writes: set[str]
+    db,
+    document_id,
+    organization_id,
+    writes: set[str],
+    *,
+    bedrock_token: Optional[str] = None,
 ) -> None:
     """Undo DO KB / Neo4j writes that finished after their document was deleted.
 
@@ -287,6 +304,27 @@ def _compensate_late_remote_writes(
     )
 
     try:
+        if "bedrock_kb" in writes:
+            # The upload may have landed after the queue tick removed this
+            # document's objects. Queue the removal again; the tick deletes
+            # the objects and runs a job so nothing stale is indexed. That
+            # removal follows this attempt's upload, so only this attempt's
+            # token is settled: another writer's token must outlive it.
+            locked = (
+                db.query(Document)
+                .filter(
+                    Document.id == document_id,
+                    Document.organization_id == organization_id,
+                )
+                .populate_existing()
+                .with_for_update()
+                .first()
+            )
+            if locked is not None and locked.is_deleted:
+                if bedrock_token:
+                    finish_write(locked, BEDROCK_WRITE_SATELLITE, bedrock_token)
+                mark_bedrock_deleted(locked)
+            db.commit()  # releases the row lock before the cleanups below
         current = (
             db.query(Document)
             .filter(
@@ -401,6 +439,7 @@ def process_document_ingestion(self, job_id: str):
     # Remote satellites this attempt wrote to; cleaned up if the document turns
     # out to have been deleted while the write was in flight (GOO-358).
     remote_writes: set[str] = set()
+    bedrock_token: Optional[str] = None
     document_ids: tuple[Any, Any] | None = None
     try:
         # Get job and document
@@ -436,16 +475,43 @@ def process_document_ingestion(self, job_id: str):
             celery_task_id=self.request.id,
         )
         if not claim.proceed:
+            skip_result = {
+                "status": job.status.value,
+                "document_id": str(document.id),
+                "skipped": claim.reason,
+            }
+            if claim.reason == "running":
+                # A young RUNNING row is either live on another worker or left
+                # by one that just died: this delivery cannot tell. Returning
+                # would ack and drop the message, so a dead worker's job sits
+                # RUNNING until the sweeper fails it (GOO-462). Retry instead,
+                # timed to land once the row can be reclaimed. The next
+                # delivery then sees terminal (live worker finished), or
+                # reclaimed_stale and re-runs the idempotent pipeline. Celery's
+                # retry budget (task_max_retries) is spent only by this path,
+                # never by real failures, which re-raise below without retry.
+                countdown = redelivery_countdown_seconds(claim)
+                logger.info(
+                    "Job %s RUNNING on another attempt; retrying redelivered "
+                    "ingestion in %ss",
+                    job_id,
+                    countdown,
+                )
+                try:
+                    raise self.retry(countdown=countdown)
+                except MaxRetriesExceededError:
+                    logger.warning(
+                        "Job %s still RUNNING after retry budget; skipping "
+                        "redelivered ingestion run (sweeper will reconcile)",
+                        job_id,
+                    )
+                    return skip_result
             logger.info(
                 "Job %s not claimable (%s); skipping redelivered ingestion run",
                 job_id,
                 claim.reason,
             )
-            return {
-                "status": job.status.value,
-                "document_id": str(document.id),
-                "skipped": claim.reason,
-            }
+            return skip_result
 
         # Every stage commit re-checks, under Document -> ProcessingJob row
         # locks, that this attempt is still the live one: the document can be
@@ -608,7 +674,18 @@ def process_document_ingestion(self, job_id: str):
         job.update_progress("Generating embeddings", 75)
         commit_if_active()
 
-        if document.content_text:
+        if document.content_text and bedrock_sync_enabled():
+            # Bedrock: stage only. The queue tick marks completed once an
+            # ingestion job covering the file finishes (never here).
+            # Recorded durably first: if the document is deleted while the
+            # upload is in flight, the stopped handler re-queues its removal,
+            # and if this worker dies instead the queue tick does.
+            bedrock_token = begin_stage_write(document)
+            commit_if_active()
+            remote_writes.add("bedrock_kb")
+            stage_document_sync(db, document)
+            finish_stage_write(document, bedrock_token)
+        elif document.content_text:
             if settings.DO_KB_ENABLED:
                 # Visible in-flight marker; overwritten by the outcome below.
                 document.do_kb_sync_status = SatelliteSyncStatus.PENDING.value
@@ -691,8 +768,16 @@ def process_document_ingestion(self, job_id: str):
             stop.reason,
         )
         if stop.reason == "deleted" and remote_writes and document_ids:
-            _compensate_late_remote_writes(db, *document_ids, remote_writes)
+            _compensate_late_remote_writes(
+                db, *document_ids, remote_writes, bedrock_token=bedrock_token
+            )
         return {"status": "stopped", "job_id": job_id, "skipped": stop.reason}
+
+    except Retry:
+        # self.retry() signals Celery to redeliver later; it is not a failure.
+        # Letting the broad handler below see it would mark a job that another
+        # worker may still own as FAILED.
+        raise
 
     except Exception as e:
         logger.error(f"Document ingestion failed for job {job_id}: {str(e)}")
@@ -716,7 +801,9 @@ def process_document_ingestion(self, job_id: str):
                 # A remote write may have landed before the document was
                 # deleted and the stage then failed for an unrelated reason.
                 if stop.reason == "deleted" and remote_writes and document_ids:
-                    _compensate_late_remote_writes(db, *document_ids, remote_writes)
+                    _compensate_late_remote_writes(
+                        db, *document_ids, remote_writes, bedrock_token=bedrock_token
+                    )
             else:
                 document.update_processing_status(ProcessingStatus.FAILED, str(e))
                 job.fail_job(str(e))
@@ -948,6 +1035,18 @@ def generate_embeddings(self, job_id: str):
         job.start_job(worker_id=self.request.id)
         db.commit()
 
+        if bedrock_sync_enabled():
+            # Staged, not indexed: the Bedrock queue tick owns completion.
+            write_token = begin_stage_write(document)
+            db.commit()  # durable before the upload starts
+            outcome = stage_document_sync(db, document)
+            finish_stage_write(document, write_token)
+            db.commit()
+            result = {"status": outcome.value, "backend": "bedrock_kb"}
+            job.complete_job(result=result)
+            db.commit()
+            return result
+
         # Push the document to DO KB (retrieval backend; replaces dead Qdrant).
         if settings.DO_KB_ENABLED:
             # Visible in-flight marker; overwritten by the outcome below.
@@ -1060,6 +1159,27 @@ def index_in_graph(self, job_id: str):
         db.close()
 
 
+def _skip_if_terminal_under_lock(db: Any, job: Any, job_id: str) -> dict | None:
+    """Re-read ``job`` under a row lock; return a skip result if it is terminal.
+
+    GOO-464: the KG job endpoints reserve a job (QUEUED, committed) and then
+    publish; a publish that raises fails the reservation. A broker can accept
+    the message and still raise, so this worker's unlocked read can see QUEUED
+    while the producer commits FAILED. ``start_job()`` on that stale object
+    would write RUNNING over FAILED. Call immediately before ``start_job()``;
+    the lock is held until the caller's commit.
+    """
+    db.refresh(job, with_for_update=True)
+    if job.status not in _TERMINAL_PROCESSING_STATUSES:
+        return None
+    logger.info("Job %s is %s under lock; skipping start", job_id, job.status.value)
+    return {
+        "status": job.status.value,
+        "job_id": job_id,
+        "skipped": "duplicate_delivery",
+    }
+
+
 @current_app.task(base=ProcessingTask, bind=True, name="kg_extract_entities_job")
 def kg_extract_entities_job(self, job_id: str):
     """Extract entities from a document and index them into knowledge graph."""
@@ -1083,6 +1203,11 @@ def kg_extract_entities_job(self, job_id: str):
                 "skipped": "duplicate_delivery",
             }
 
+        # FAILED/CANCELLED are terminal too (a failed publish, a cancel), and
+        # the producer may write them after the unlocked read above.
+        skipped = _skip_if_terminal_under_lock(db, job, job_id)
+        if skipped is not None:
+            return skipped
         job.start_job(worker_id=self.request.id, celery_task_id=self.request.id)
         db.commit()
 
@@ -1349,6 +1474,9 @@ def kg_merge_entities_job(self, job_id: str):
         # is passed through.
         job_org_id = str(job.organization_id) if job.organization_id else None
 
+        skipped = _skip_if_terminal_under_lock(db, job, job_id)
+        if skipped is not None:
+            return skipped
         job.start_job(worker_id=self.request.id, celery_task_id=self.request.id)
         db.commit()
 

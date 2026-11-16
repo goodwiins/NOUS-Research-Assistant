@@ -9,19 +9,23 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
+import jwt
 
 # from passlib.context import CryptContext  # Removed
 import redis.asyncio as redis
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import jwt
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.database import get_db
-from src.core.security import get_password_hash, verify_password  # Imported
+from src.core.security import (  # Imported
+    check_iat_is_numeric,
+    get_password_hash,
+    verify_password,
+)
 from src.models.organization import Organization, StorageTier
 from src.models.user import User
 from src.models.user import UserRole as UserRoleEnum
@@ -198,7 +202,15 @@ class AuthService:
     ) -> Dict[str, Any]:
         """Verify and decode JWT token"""
         try:
-            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            # `verify_iat: False` keeps python-jose's tolerance of a future
+            # `iat` (clock skew between replicas); exp is still verified.
+            payload = jwt.decode(
+                token,
+                self.secret_key,
+                algorithms=[self.algorithm],
+                options={"verify_iat": False},
+            )
+            check_iat_is_numeric(payload)
 
             # Check token type
             if payload.get("type") != token_type:
@@ -214,7 +226,7 @@ class AuthService:
 
         except jwt.ExpiredSignatureError:
             raise AuthenticationError("Token has expired")
-        except jwt.JWTError as e:
+        except jwt.PyJWTError as e:
             raise AuthenticationError(f"Invalid token: {str(e)}")
 
     async def revoke_refresh_token(self, jti: str) -> bool:

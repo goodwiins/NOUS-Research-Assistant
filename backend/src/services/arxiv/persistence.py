@@ -225,9 +225,25 @@ def _managed_storage_fields(document: Document) -> Optional[dict[str, Any]]:
     return None
 
 
-def _needs_kb_sync(document: Document) -> bool:
+def _needs_kb_sync(document: Document, *, content_changed: bool = False) -> bool:
+    from src.services.bedrock_sync import (
+        bedrock_sync_enabled,
+        is_indexed,
+        staged_text_matches,
+    )
     from src.shared.enums import SatelliteSyncStatus
 
+    if bedrock_sync_enabled():
+        # Bedrock records no data-source uuid; anything not settled by a
+        # Bedrock job (pending, failed, or a DigitalOcean-era status) restages.
+        # So does an indexed document whose text changed since its upload
+        # (a full-text upgrade or a storage repair): the KB would otherwise
+        # keep serving the old text.
+        return (
+            content_changed
+            or not is_indexed(document.do_kb_sync_status, document.document_metadata)
+            or not staged_text_matches(document)
+        )
     return (
         not document.do_kb_data_source_uuid
         or document.do_kb_sync_status != SatelliteSyncStatus.COMPLETED.value
@@ -432,7 +448,7 @@ async def persist_arxiv_documents(
                         enriched = _upgrade_full_text(document, sources[index])
                         if document.search_vector is None or enriched:
                             vector_documents[str(document.id)] = document
-                        if _needs_kb_sync(document):
+                        if _needs_kb_sync(document, content_changed=enriched):
                             kb_document_ids.add(str(document.id))
 
                     for (
@@ -534,7 +550,9 @@ async def persist_arxiv_documents(
                                 document_id = str(checksum_winner.id)
                                 document_ids_by_index[index] = document_id
                                 reused_document_ids.add(document_id)
-                                if _needs_kb_sync(checksum_winner):
+                                if _needs_kb_sync(
+                                    checksum_winner, content_changed=enriched
+                                ):
                                     kb_document_ids.add(document_id)
                                 continue
 
@@ -623,7 +641,7 @@ async def persist_arxiv_documents(
                             document_id = str(winner.id)
                             document_ids_by_index[index] = document_id
                             reused_document_ids.add(document_id)
-                            if _needs_kb_sync(winner):
+                            if _needs_kb_sync(winner, content_changed=enriched):
                                 kb_document_ids.add(document_id)
                             continue
 
@@ -639,7 +657,7 @@ async def persist_arxiv_documents(
                             discarded_storage.append(storage_fields)
                             if document.search_vector is None or enriched:
                                 vector_documents[str(document.id)] = document
-                        if _needs_kb_sync(document):
+                        if _needs_kb_sync(document, content_changed=enriched):
                             kb_document_ids.add(str(document.id))
 
                     if vector_documents:
@@ -665,8 +683,35 @@ async def persist_arxiv_documents(
 
     kb_sync_failed = False
     from src.core.config import settings
+    from src.services.bedrock_sync import (
+        StageOutcome,
+        bedrock_sync_enabled,
+        begin_stage_write,
+        finish_stage_write,
+        stage_document,
+    )
 
-    if settings.DO_KB_ENABLED and kb_document_ids:
+    if bedrock_sync_enabled() and kb_document_ids:
+        # Stage only: rows stay pending until the Bedrock queue tick sees an
+        # ingestion job that covered their files finish.
+        try:
+            async with AsyncSessionLocal() as kb_db:
+                stmt = select(Document).where(
+                    Document.id.in_(kb_document_ids),
+                    Document.organization_id == organization_id,
+                    Document.is_deleted.is_(False),
+                )
+                for document in (await kb_db.execute(stmt)).scalars().all():
+                    write_token = begin_stage_write(document)
+                    await kb_db.commit()  # durable before the upload starts
+                    outcome = await stage_document(kb_db, document)
+                    kb_sync_failed |= outcome is StageOutcome.FAILED
+                    finish_stage_write(document, write_token)
+                    await kb_db.commit()
+        except Exception as exc:  # noqa: BLE001 - PostgreSQL remains authoritative
+            kb_sync_failed = True
+            logger.warning("bedrock_kb staging skipped for arxiv ingest: %s", exc)
+    elif settings.DO_KB_ENABLED and kb_document_ids:
         from src.services.do_kb import sync_documents_to_kb
         from src.shared.enums import SatelliteSyncStatus
 

@@ -41,7 +41,7 @@ Schema constraints and indexes applied at startup:
 
 ## Authorization and scoping
 
-All query methods accept `organization_id` and/or `source_document_ids`. The `_entity_scope_predicate` and `_two_endpoint_scope` helpers inject a WHERE clause that prefers the indexed `organization_id` equality, falling back to `source_document_id IN [...]` for environments where the backfill has not yet run. **Path traversal queries scope both endpoints** — a path node that satisfies the start-entity filter but whose far endpoint belongs to a different organization is not returned.
+All query methods accept `organization_id` and/or `source_document_ids`. The `_entity_scope_predicate` and `_two_endpoint_scope` helpers inject a WHERE clause that prefers the indexed `organization_id` equality, falling back to document-list membership (`source_document_id IN [...]` or any id in the shared `document_ids` list, so a project/document scope also sees entities first extracted from another document) for environments where the backfill has not yet run. **Path traversal queries scope both endpoints** — a path node that satisfies the start-entity filter but whose far endpoint belongs to a different organization is not returned.
 
 ## Gotchas
 

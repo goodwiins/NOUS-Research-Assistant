@@ -37,6 +37,20 @@ from src.utils.outbound_url_guard import PublicOnlyResolver, assert_public_https
 logger = logging.getLogger(__name__)
 
 
+async def _validate_delivery_config(delivery_config: Optional[Dict[str, Any]]) -> None:
+    """Reject a webhook destination on save, not only at delivery (GOO-588).
+
+    Same check as ``_deliver_webhook``; delivery still re-checks, since DNS
+    answers can change between save and run.
+    """
+    if not delivery_config:
+        return
+    webhook_config = delivery_config.get("webhook") or {}
+    url = webhook_config.get("url")
+    if "webhook" in (delivery_config.get("methods") or []) or url:
+        await asyncio.to_thread(assert_public_https_url, url)
+
+
 def _public_only_session() -> aiohttp.ClientSession:
     """Session whose connector re-checks every resolved address (DNS rebinding)."""
     return aiohttp.ClientSession(
@@ -67,6 +81,7 @@ class ReportGenerationService:
         delivery_config: Optional[Dict[str, Any]] = None,
     ) -> AnalyticsReport:
         """Create a new analytics report"""
+        await _validate_delivery_config(delivery_config)
         try:
             async with get_async_session() as db:
                 report = AnalyticsReport(
@@ -137,8 +152,28 @@ class ReportGenerationService:
                     output_path = await self._create_report_file(report, report_data)
 
                     # Deliver report if configured
+                    delivery_errors: List[str] = []
                     if report.delivery_config:
-                        await self._deliver_report(report, output_path)
+                        delivery_errors = await self._deliver_report(
+                            report, output_path
+                        )
+
+                    if delivery_errors:
+                        # GOO-586: generated but not delivered is not "completed".
+                        await db.execute(
+                            update(AnalyticsReport)
+                            .where(AnalyticsReport.id == report_id)
+                            .values(
+                                last_run_status="delivery_failed",
+                                last_run_error="; ".join(delivery_errors),
+                                last_run_at=datetime.utcnow(),
+                            )
+                        )
+                        await db.commit()
+                        logger.warning(
+                            f"Report {report_id} generated but delivery failed"
+                        )
+                        return False
 
                     # Update status
                     await db.execute(
@@ -594,13 +629,20 @@ class ReportGenerationService:
 
         return "\n".join(lines)
 
-    async def _deliver_report(self, report: AnalyticsReport, file_path: Path) -> None:
-        """Deliver report based on configuration"""
+    async def _deliver_report(
+        self, report: AnalyticsReport, file_path: Path
+    ) -> List[str]:
+        """Deliver report based on configuration.
+
+        Every configured method is attempted; returns one "<method>: <error>"
+        entry per method that raised (empty when all succeeded).
+        """
         delivery_config = report.delivery_config
         if not delivery_config:
-            return
+            return []
 
         delivery_methods = delivery_config.get("methods", [])
+        errors: List[str] = []
 
         for method in delivery_methods:
             try:
@@ -614,6 +656,8 @@ class ReportGenerationService:
                     logger.warning(f"Unknown delivery method: {method}")
             except Exception as e:
                 logger.error(f"Error delivering report via {method}: {e}")
+                errors.append(f"{method}: {e}")
+        return errors
 
     async def _deliver_email(
         self, report: AnalyticsReport, file_path: Path, config: Dict[str, Any]

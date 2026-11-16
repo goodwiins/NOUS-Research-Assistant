@@ -61,9 +61,9 @@ backend:
     # 267685730035 = terraform output account_id; repos pushed to ECR in Task 2.
     # Immutable source tag and ECR digest for the AWS image build.
     repository: "267685730035.dkr.ecr.us-east-1.amazonaws.com/nous/backend"
-    tag: "791f8acfc6c23fae385e8d2674641a46f683bfa8"
-    digest: "sha256:bf1fbf78534ea8f146c71053057b29046dee10683c399c7c2ae4448ee1f9a63d"
-    sourceSha: "791f8acfc6c23fae385e8d2674641a46f683bfa8"
+    tag: "3c548349dc7cb2240e207d275b792f83272fab1a"
+    digest: "sha256:e9ab336e9ba3868211d95da7d4bca39ff74eeb79397a99fce958c2edb5a05f9f"
+    sourceSha: "3c548349dc7cb2240e207d275b792f83272fab1a"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -222,7 +222,9 @@ backend:
       value: "2"
     - name: CORS_ORIGINS
       # dev-app.goodwiinz.tech was retired (NXDOMAIN); the frontend is goodwiinz.tech.
-      value: "http://localhost:3000,http://127.0.0.1:3000,https://goodwiinz.tech,https://www.goodwiinz.tech"
+      # No loopback origins (GOO-507): CORS is credentialed, and the backend
+      # drops them in strict environments anyway.
+      value: "https://goodwiinz.tech,https://www.goodwiinz.tech"
     - name: FRONTEND_BASE_URL
       value: "https://goodwiinz.tech"
     - name: DB_ASYNC_POOL_SIZE
@@ -243,8 +245,10 @@ backend:
       value: "true"
     - name: AGENT_SERVER_SIDE_HISTORY
       value: "true"
+    # 1.0 exhausted the Sentry quota on 2026-11-08. Probe paths are never
+    # traced (observability/sentry.py), so this applies to real requests.
     - name: SENTRY_TRACES_SAMPLE_RATE
-      value: "1.0"
+      value: "0.1"
     - name: SENTRY_PROFILES_SAMPLE_RATE
       value: "0.0"
     - name: NEO4J_URI

@@ -164,3 +164,180 @@ async def test_second_commit_does_not_refire(db: AsyncSession) -> None:
     await db.commit()
     second.delay.assert_called_once()
     first.delay.assert_called_once()
+
+
+# --- GOO-463: the dispatched task id must be recordable after commit ---------
+#
+# The lost-job reconciler treats PENDING/celery_task_id=NULL as "never
+# dispatched". Producers therefore need the id of the message the post-commit
+# dispatch actually published, so they can persist it once it landed.
+
+
+async def test_handle_exposes_task_id_only_after_commit(db: AsyncSession) -> None:
+    task = SimpleNamespace(
+        name="my.task", delay=MagicMock(return_value=SimpleNamespace(id="tid-1"))
+    )
+    handle = enqueue_after_commit(db, task, "doc-1")
+
+    assert handle.task_id is None  # nothing published yet
+
+    await _work(db)
+    await db.commit()
+
+    assert handle.task_id == "tid-1"
+
+
+async def test_apply_async_handle_exposes_task_id(db: AsyncSession) -> None:
+    task = SimpleNamespace(
+        name="kg.task",
+        apply_async=MagicMock(return_value=SimpleNamespace(id="tid-kg")),
+    )
+    handle = enqueue_after_commit_apply_async(db, task, args=["kg-1"], queue="q")
+
+    await _work(db)
+    await db.commit()
+
+    assert handle.task_id == "tid-kg"
+
+
+async def test_handle_task_id_none_when_dispatch_raises_or_rolls_back(
+    db: AsyncSession,
+) -> None:
+    boom = SimpleNamespace(
+        name="boom.task", delay=MagicMock(side_effect=RuntimeError("broker down"))
+    )
+    raised = enqueue_after_commit(db, boom)
+    await _work(db)
+    await db.commit()
+    assert raised.task_id is None
+
+    dropped = enqueue_after_commit(db, _task("dropped.task"))
+    await _work(db)
+    await db.rollback()
+    assert dropped.task_id is None
+
+
+@pytest_asyncio.fixture
+async def job_db() -> AsyncIterator[AsyncSession]:
+    from src.models.processing import ProcessingJob
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(ProcessingJob.__table__.create)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
+
+
+async def _seed_job(db: AsyncSession, *, status, celery_task_id=None):
+    import uuid
+
+    from src.models.processing import JobType, ProcessingJob
+
+    job = ProcessingJob(
+        id=uuid.uuid4(),
+        job_type=JobType.DOCUMENT_INGESTION,
+        status=status,
+        organization_id=uuid.uuid4(),
+        celery_task_id=celery_task_id,
+        queue_name="document_processing",
+    )
+    db.add(job)
+    await db.commit()
+    return job.id
+
+
+async def test_record_dispatched_task_id_stamps_never_started_pending_job(
+    job_db: AsyncSession,
+) -> None:
+    from src.models.processing import JobStatus, ProcessingJob
+    from src.tasks.enqueue import record_dispatched_task_id
+
+    job_id = await _seed_job(job_db, status=JobStatus.PENDING)
+
+    await record_dispatched_task_id(job_db, job_id, "tid-1")
+
+    job_db.expire_all()
+    job = await job_db.get(ProcessingJob, job_id)
+    assert job.celery_task_id == "tid-1"
+    assert job.status is JobStatus.PENDING
+
+
+async def test_record_dispatched_task_id_never_overwrites_a_worker_claim(
+    job_db: AsyncSession,
+) -> None:
+    from src.models.processing import JobStatus, ProcessingJob
+    from src.tasks.enqueue import record_dispatched_task_id
+
+    running = await _seed_job(
+        job_db, status=JobStatus.RUNNING, celery_task_id="worker-tid"
+    )
+    stamped = await _seed_job(
+        job_db, status=JobStatus.PENDING, celery_task_id="earlier-tid"
+    )
+
+    await record_dispatched_task_id(job_db, running, "late-tid")
+    await record_dispatched_task_id(job_db, stamped, "late-tid")
+
+    job_db.expire_all()
+    assert (await job_db.get(ProcessingJob, running)).celery_task_id == "worker-tid"
+    assert (await job_db.get(ProcessingJob, stamped)).celery_task_id == "earlier-tid"
+
+
+async def test_record_dispatched_task_id_without_id_is_a_noop(
+    job_db: AsyncSession,
+) -> None:
+    from src.models.processing import JobStatus, ProcessingJob
+    from src.tasks.enqueue import record_dispatched_task_id
+
+    job_id = await _seed_job(job_db, status=JobStatus.PENDING)
+
+    await record_dispatched_task_id(job_db, job_id, None)
+
+    job_db.expire_all()
+    assert (await job_db.get(ProcessingJob, job_id)).celery_task_id is None
+
+
+async def test_record_dispatched_task_id_swallows_db_errors(
+    job_db: AsyncSession,
+) -> None:
+    from src.tasks.enqueue import record_dispatched_task_id
+
+    with patch.object(AsyncSession, "execute", side_effect=RuntimeError("db gone")):
+        # Must not raise: the message is already published, so a failed stamp
+        # degrades to the pre-GOO-463 behavior instead of failing the request.
+        await record_dispatched_task_id(job_db, "job-1", "tid-1")
+
+
+async def test_failed_stamp_leaves_the_producer_session_objects_loaded(
+    job_db: AsyncSession,
+) -> None:
+    """The stamp runs after the producer committed and published, and the
+    producer still builds its response from objects it loaded. A stamp that
+    fails mid-transaction must not roll back (and so expire) the producer's
+    session: in async code the next attribute read would be an implicit lazy
+    load (MissingGreenlet), turning a published job into a 500/400."""
+    from sqlalchemy import inspect
+
+    from src.models.processing import JobStatus, ProcessingJob
+    from src.tasks.enqueue import record_dispatched_task_id
+
+    job_id = await _seed_job(job_db, status=JobStatus.PENDING)
+    job = await job_db.get(ProcessingJob, job_id)
+    assert job is not None
+    # Fail the stamp's UPDATE inside the database, after its transaction began.
+    await job_db.execute(
+        text(
+            "CREATE TRIGGER fail_stamp BEFORE UPDATE ON processing_jobs "
+            "BEGIN SELECT RAISE(ABORT, 'stamp failed'); END"
+        )
+    )
+    await job_db.commit()
+
+    await record_dispatched_task_id(job_db, job_id, "tid-1")
+
+    assert not inspect(job).expired_attributes
+    # What reprocess_document / reprocess_file read to build their response.
+    assert job.id == job_id
+    assert job.status is JobStatus.PENDING

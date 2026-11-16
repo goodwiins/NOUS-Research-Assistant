@@ -73,6 +73,37 @@ async def test_failed_fallback_search_is_reported_as_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_fulltext_fallback_inside_hybrid_is_reported_as_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GOO-584: hybrid search fails, then its full-text fallback fails too.
+
+    ``_fallback_to_fulltext`` used to swallow the second failure and return an
+    empty page, which this helper then recorded as ``"empty"``.
+    """
+    from src.services.search import hybrid_search_service as hybrid_mod
+
+    svc = hybrid_mod.hybrid_search_service
+    monkeypatch.setattr(
+        svc,
+        "_route_search_query",
+        MagicMock(side_effect=RuntimeError("hybrid pipeline down")),
+    )
+    monkeypatch.setattr(
+        hybrid_mod.fulltext_search_service,
+        "search",
+        MagicMock(side_effect=RuntimeError("fulltext db down")),
+    )
+
+    contexts, status = await _nodes_rag._hybrid_search_fallback_with_status(
+        "attention", "11111111-1111-4111-8111-111111111111", "org-1"
+    )
+
+    assert contexts == []
+    assert status == "error"
+
+
+@pytest.mark.asyncio
 async def test_rag_node_carries_fallback_error_into_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

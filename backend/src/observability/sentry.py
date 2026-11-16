@@ -1,8 +1,9 @@
 """Sentry SDK initialization for the FastAPI backend.
 
 Mirrors the frontend pattern: gated on `SENTRY_DSN`, no-op when unset, sample
-rates and environment driven by env vars. Must be called before the FastAPI
-app is constructed so the SDK can patch frameworks early.
+rates and environment driven by env vars. The API calls it before the FastAPI
+app is constructed; the Celery worker and beat call it from their startup
+signals (``src/tasks/celery_app.py``).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Any
 
 import sentry_sdk
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
+from sentry_sdk.integrations.celery import CeleryIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.httpx import HttpxIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
@@ -23,6 +25,37 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 logger = logging.getLogger(__name__)
 
 _initialized = False
+
+# Environments where a missing DSN is expected; anywhere else it is a
+# misconfiguration that leaves the service without error tracking.
+_LOCAL_ENVIRONMENTS = frozenset({"development", "local", "test", "testing", "ci"})
+
+# Kubelet probes and liveness checks hit these every few seconds. Tracing
+# them at any rate spends the transaction quota on requests nobody debugs
+# (dev ran at 1.0 and exhausted it on 2026-11-08).
+_UNTRACED_PATH_PREFIXES = ("/health", "/metrics", "/favicon.ico")
+
+
+def _make_traces_sampler(rate: float) -> Any:
+    """Sample ``rate`` of transactions, never probe traffic.
+
+    A continued trace keeps its parent's decision so distributed traces
+    (API -> Celery) stay whole. The probe exclusion is checked first: a
+    probe that arrives with a ``sentry-trace`` header must not be traced
+    just because the caller sampled its own trace.
+    """
+
+    def _sampler(sampling_context: dict[str, Any]) -> float:
+        scope = sampling_context.get("asgi_scope") or {}
+        path = str(scope.get("path") or "")
+        if path.startswith(_UNTRACED_PATH_PREFIXES):
+            return 0.0
+        parent_sampled = sampling_context.get("parent_sampled")
+        if parent_sampled is not None:
+            return 1.0 if parent_sampled else 0.0
+        return rate
+
+    return _sampler
 
 
 def _float_env(name: str, default: float) -> float:
@@ -57,8 +90,11 @@ def _scrub_sensitive(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, 
     return event
 
 
-def init_sentry() -> bool:
+def init_sentry(service: str = "nous-backend") -> bool:
     """Initialize the Sentry SDK. Returns True if active, False if disabled.
+
+    ``service`` tags every event (``nous-backend``, ``nous-celery-worker``,
+    ``nous-celery-beat``) so the three processes can be told apart.
 
     Reads:
       - SENTRY_DSN              (required; absent => no-op)
@@ -71,14 +107,22 @@ def init_sentry() -> bool:
     if _initialized:
         return True
 
-    dsn = os.getenv("SENTRY_DSN")
-    if not dsn:
-        logger.info("Sentry DSN not set — error tracking disabled")
-        return False
-
     environment = (
         os.getenv("SENTRY_ENVIRONMENT") or os.getenv("ENVIRONMENT") or "development"
     )
+    dsn = os.getenv("SENTRY_DSN")
+    if not dsn:
+        if environment.lower() in _LOCAL_ENVIRONMENTS:
+            logger.info("Sentry DSN not set — error tracking disabled")
+        else:
+            logger.warning(
+                "SENTRY_DSN is not set in environment %r: %s errors are not "
+                "being reported",
+                environment,
+                service,
+            )
+        return False
+
     is_prod = environment.lower() in {"prod", "production"}
     traces_sample_rate = _float_env(
         "SENTRY_TRACES_SAMPLE_RATE", 0.1 if is_prod else 1.0
@@ -90,7 +134,7 @@ def init_sentry() -> bool:
         dsn=dsn,
         environment=environment,
         release=release,
-        traces_sample_rate=traces_sample_rate,
+        traces_sampler=_make_traces_sampler(traces_sample_rate),
         profiles_sample_rate=profiles_sample_rate,
         send_default_pii=False,
         attach_stacktrace=True,
@@ -102,14 +146,16 @@ def init_sentry() -> bool:
             RedisIntegration(),
             AsyncioIntegration(),
             HttpxIntegration(),
+            CeleryIntegration(),
             LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
         ],
     )
-    sentry_sdk.set_tag("service", "nous-backend")
+    sentry_sdk.set_tag("service", service)
 
     _initialized = True
     logger.info(
-        "Sentry initialized (env=%s, traces=%s, profiles=%s, release=%s)",
+        "Sentry initialized (service=%s, env=%s, traces=%s, profiles=%s, release=%s)",
+        service,
         environment,
         traces_sample_rate,
         profiles_sample_rate,

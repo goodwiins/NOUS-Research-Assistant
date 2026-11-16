@@ -17,6 +17,16 @@ BACKEND_ROOT = Path(__file__).resolve().parents[3]
 # ---------------------------------------------------------------------------
 
 
+def _doc_member(alias: str) -> str:
+    """Document-list membership for an Entity alias (GOO-495): the creator
+    stamp OR any id in the shared ``document_ids`` reference list."""
+    return (
+        f"({alias}.source_document_id IN $source_document_ids"
+        f" OR any(doc_id IN coalesce({alias}.document_ids, [])"
+        " WHERE doc_id IN $source_document_ids))"
+    )
+
+
 def test_config_prod_gates_fire_without_process_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -219,14 +229,8 @@ def test_two_endpoint_scope_ors_org_and_doc_ids() -> None:
 
     frag, params = _two_endpoint_scope("a", "b", ["d1", "d2"], "org-1")
 
-    assert (
-        "AND (a.organization_id = $organization_id "
-        "OR a.source_document_id IN $source_document_ids)" in frag
-    )
-    assert (
-        "AND (b.organization_id = $organization_id "
-        "OR b.source_document_id IN $source_document_ids)" in frag
-    )
+    assert f"AND (a.organization_id = $organization_id OR {_doc_member('a')})" in frag
+    assert f"AND (b.organization_id = $organization_id OR {_doc_member('b')})" in frag
     assert params == {
         "organization_id": "org-1",
         "source_document_ids": ["d1", "d2"],
@@ -252,7 +256,7 @@ def test_graph_analytics_ands_org_with_project_doc_ids() -> None:
     assert "elif source_document_ids is not None:" not in block
     assert '" AND ".join(scope_preds)' in block
     assert "{alias}.organization_id = $organization_id" in block
-    assert "{alias}.source_document_id IN $source_document_ids" in block
+    assert 'scope_preds.append(_entity_in_documents_predicate("{alias}"))' in block
 
 
 # ---------------------------------------------------------------------------
