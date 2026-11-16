@@ -65,7 +65,7 @@ def _supabase_claims(**overrides: Any) -> Dict[str, Any]:
 def _hs(
     claims: Dict[str, Any], secret: str = _SUPABASE_SECRET, alg: str = "HS256"
 ) -> str:
-    return jwt.encode(claims, secret, algorithm=alg)
+    return str(jwt.encode(claims, secret, algorithm=alg))
 
 
 def _cli_claims(**overrides: Any) -> Dict[str, Any]:
@@ -98,7 +98,7 @@ def _settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def es256(monkeypatch: pytest.MonkeyPatch):
+def es256(monkeypatch: pytest.MonkeyPatch) -> ec.EllipticCurvePrivateKey:
     """Install a one-key JWKS and return its private key."""
     priv = ec.generate_private_key(ec.SECP256R1())
     pub_jwk = jwt.algorithms.ECAlgorithm.to_jwk(priv.public_key(), as_dict=True)
@@ -109,7 +109,7 @@ def es256(monkeypatch: pytest.MonkeyPatch):
 
 def _es(priv: Any, claims: Dict[str, Any], kid: str | None = _KID) -> str:
     headers = {"kid": kid} if kid is not None else None
-    return jwt.encode(claims, priv, algorithm="ES256", headers=headers)
+    return str(jwt.encode(claims, priv, algorithm="ES256", headers=headers))
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ def test_es256_header_with_non_ec_jwk_rejected(monkeypatch: pytest.MonkeyPatch) 
 
 
 def _cli(claims: Dict[str, Any], alg: str = "HS256") -> str:
-    return jwt.encode(claims, settings.JWT_SECRET_KEY, algorithm=alg)
+    return str(jwt.encode(claims, settings.JWT_SECRET_KEY, algorithm=alg))
 
 
 def test_cli_valid_token_accepted() -> None:
@@ -348,7 +348,7 @@ class _WS:
 async def _ws_code(token: str) -> int:
     with pytest.raises(WebSocketAuthError) as exc:
         await WebSocketAuthenticator.authenticate(_WS(token))  # type: ignore[arg-type]
-    return exc.value.code
+    return int(exc.value.code)
 
 
 async def test_ws_valid_token_authenticates() -> None:
