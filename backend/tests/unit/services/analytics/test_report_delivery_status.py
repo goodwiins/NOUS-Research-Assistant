@@ -51,7 +51,9 @@ def _report(delivery_config: dict) -> Any:
     )
 
 
-async def _run(service: ReportGenerationService, report: Any, tmp_path: Path):
+async def _run(
+    service: ReportGenerationService, report: Any, tmp_path: Path
+) -> tuple[bool, dict[str, Any]]:
     db = _FakeSession(report)
 
     @asynccontextmanager
