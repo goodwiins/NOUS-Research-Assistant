@@ -13,6 +13,19 @@ import styles from './PdfDocumentPage.module.css';
 type PdfRuntime = typeof import('pdfjs-dist');
 type Viewport = ReturnType<PDFPageProxy['getViewport']>;
 
+/** A page failure is shown inline; log the cause so it isn't invisible. */
+function logPageFailure(
+  page: number,
+  stage: 'text' | 'render',
+  cause: unknown
+): void {
+  console.warn('[PdfDocumentPage] page preview failed', {
+    page,
+    stage,
+    error: cause instanceof Error ? cause.message : cause,
+  });
+}
+
 /** Keep visited text layers for continuous selection; release offscreen pixels. */
 export function PdfDocumentPage({
   document: pdfDocument,
@@ -113,9 +126,11 @@ export function PdfDocumentPage({
       setLoaded({ width, source, viewport });
       clearTimeout(timeout);
     };
-    void read().catch(() => {
-      if (active) setError(true);
+    void read().catch((cause: unknown) => {
       clearTimeout(timeout);
+      if (!active) return;
+      logPageFailure(page, 'text', cause);
+      setError(true);
     });
     return () => {
       active = false;
@@ -147,8 +162,10 @@ export function PdfDocumentPage({
       await rendering.promise;
     };
     void draw()
-      .catch(() => {
-        if (active) setError(true);
+      .catch((cause: unknown) => {
+        if (!active) return;
+        logPageFailure(page, 'render', cause);
+        setError(true);
       })
       .finally(() => clearTimeout(timeout));
     return () => {
@@ -157,7 +174,7 @@ export function PdfDocumentPage({
       rendering?.cancel();
       target.width = target.height = 0;
     };
-  }, [current, runtime, visible]);
+  }, [current, runtime, visible, page]);
 
   return (
     <section aria-label={`Page ${page}`} data-pdf-page={page} className="mb-4">

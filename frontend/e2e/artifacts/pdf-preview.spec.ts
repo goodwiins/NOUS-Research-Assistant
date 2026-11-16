@@ -41,7 +41,8 @@ test.beforeAll(async () => {
   });
   bundle = output.outputFiles[0].text;
   worker = await readFile(
-    path.join(root, 'node_modules/pdfjs-dist/build/pdf.worker.min.mjs')
+    // Hoisted pnpm installs keep pdfjs-dist at the workspace root.
+    require.resolve('pdfjs-dist/build/pdf.worker.min.mjs', { paths: [root] })
   );
 });
 

@@ -58,6 +58,13 @@ export class BoundedPdfCanvasFactory {
     entry.canvas.height = height;
   }
 
+  /** pdf.js >= 6.5 asks the factory for the page canvas's context at render. */
+  getNoAlphaContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error('Canvas is unavailable');
+    return context;
+  }
+
   destroy(entry: CanvasEntry): void {
     this.entries.delete(entry.canvas);
     entry.canvas.width = entry.canvas.height = 0;
