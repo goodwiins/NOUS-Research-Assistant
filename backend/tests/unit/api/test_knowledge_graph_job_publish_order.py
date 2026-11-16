@@ -31,11 +31,25 @@ def added() -> list[Any]:
 
 
 @pytest.fixture
-def mock_sync_db(events: list[Any], added: list[Any]) -> MagicMock:
+def committed() -> list[tuple[Any, Any]]:
+    """(status, celery_task_id) of the added job at each commit."""
+    return []
+
+
+@pytest.fixture
+def mock_sync_db(
+    events: list[Any], added: list[Any], committed: list[tuple[Any, Any]]
+) -> MagicMock:
     db = MagicMock()
     db.add.side_effect = added.append
     db.flush.side_effect = lambda *a, **k: events.append("flush")
-    db.commit.side_effect = lambda *a, **k: events.append("commit")
+
+    def on_commit(*_args: Any, **_kwargs: Any) -> None:
+        events.append("commit")
+        if added:
+            committed.append((added[0].status, added[0].celery_task_id))
+
+    db.commit.side_effect = on_commit
     db.refresh.side_effect = lambda *a, **k: events.append("refresh")
     return db
 
@@ -110,6 +124,7 @@ def test_job_row_is_committed_before_the_task_is_published(
     mock_sync_db: MagicMock,
     events: list[Any],
     added: list[Any],
+    committed: list[tuple[Any, Any]],
 ) -> None:
     publisher = _publisher(events)
     with patch(f"src.api.search.knowledge_graph.{task_attr}.apply_async", publisher):
@@ -129,6 +144,12 @@ def test_job_row_is_committed_before_the_task_is_published(
     assert publishes[0][1] == job.celery_task_id
     assert job.status is JobStatus.QUEUED
     assert response.json()["status"] == "queued"
+    # The row was already reserved when it became durable: the first commit
+    # persisted QUEUED with the very task id the message was published under.
+    # (Mutation check: moving the two reservation assignments in
+    # services/processing/job_reservation.py:reserve_job below its commit makes
+    # this fail.)
+    assert committed[0] == (JobStatus.QUEUED, publishes[0][1])
 
 
 @pytest.mark.parametrize("task_attr,post", CASES)
