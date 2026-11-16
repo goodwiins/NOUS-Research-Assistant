@@ -37,6 +37,20 @@ from src.utils.outbound_url_guard import PublicOnlyResolver, assert_public_https
 logger = logging.getLogger(__name__)
 
 
+async def _validate_delivery_config(delivery_config: Optional[Dict[str, Any]]) -> None:
+    """Reject a webhook destination on save, not only at delivery (GOO-588).
+
+    Same check as ``_deliver_webhook``; delivery still re-checks, since DNS
+    answers can change between save and run.
+    """
+    if not delivery_config:
+        return
+    webhook_config = delivery_config.get("webhook") or {}
+    url = webhook_config.get("url")
+    if "webhook" in (delivery_config.get("methods") or []) or url:
+        await asyncio.to_thread(assert_public_https_url, url)
+
+
 def _public_only_session() -> aiohttp.ClientSession:
     """Session whose connector re-checks every resolved address (DNS rebinding)."""
     return aiohttp.ClientSession(
@@ -67,6 +81,7 @@ class ReportGenerationService:
         delivery_config: Optional[Dict[str, Any]] = None,
     ) -> AnalyticsReport:
         """Create a new analytics report"""
+        await _validate_delivery_config(delivery_config)
         try:
             async with get_async_session() as db:
                 report = AnalyticsReport(
