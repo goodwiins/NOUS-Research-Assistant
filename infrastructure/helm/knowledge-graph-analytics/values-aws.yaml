@@ -7,11 +7,12 @@
 #     credentials are synced from Infisical (/redis).
 #   - Frontend is NOT in this chart (Vercel) — no frontend key.
 #   - Original DO credentials remain staged for rollback, but the backend
-#     reads/writes AWS RDS and S3. Retrieval uses the shared Bedrock KB, kept
-#     in sync by the queued write path (BEDROCK_KB_* below).
+#     reads/writes AWS RDS and S3. Retrieval uses the shared Bedrock KB, filled
+#     by the queued write path (BEDROCK_KB_* below) once the backfill has run.
 #   - backend.image.repository is used verbatim by templates/_helpers.tpl
 #     (includes the registry host); worker/beat share it.
-# rationale/rollback levers for per-var values: see values-dev.yaml (identical values)
+# rationale/rollback levers for per-var values: see values-dev.yaml (identical
+# values, except the AWS-only BEDROCK_KB_* entries)
 
 global:
   # 267685730035 = terraform output account_id (Task 2)
