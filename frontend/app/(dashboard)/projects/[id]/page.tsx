@@ -467,6 +467,7 @@ export default function ProjectDetailPage() {
       await removeDocument(projectId, documentId);
     } catch (err) {
       console.error('Failed to remove document:', err);
+      toast.error('Could not remove the document from this project');
     }
   };
 

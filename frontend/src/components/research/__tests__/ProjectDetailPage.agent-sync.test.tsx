@@ -54,7 +54,12 @@ vi.mock('@/components/research/ProjectHeader', () => ({
   ),
 }));
 vi.mock('@/components/research/DocumentList', () => ({
-  DocumentList: () => <div>Documents Content</div>,
+  DocumentList: ({ onRemove }: { onRemove: (id: string) => void }) => (
+    <div>
+      Documents Content
+      <button onClick={() => onRemove('doc-1')}>Remove test document</button>
+    </div>
+  ),
 }));
 vi.mock('@/components/research/DraftGenerator', () => ({
   DraftGenerator: ({
@@ -396,6 +401,21 @@ describe('ProjectDetailPage agent sync', () => {
       expect(mockFetchProject).toHaveBeenCalledTimes(2);
       expect(mockFetchProjectDocuments).toHaveBeenCalledTimes(2);
       expect(mockFetchProjectNotes).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('shows a toast when document removal fails', async () => {
+    mockRemoveDocument.mockRejectedValueOnce(new Error('Forbidden'));
+    const { user } = render(<ProjectDetailPage />);
+    await user.click(
+      await screen.findByRole('button', { name: 'Remove test document' })
+    );
+
+    await waitFor(() => {
+      expect(mockRemoveDocument).toHaveBeenCalledWith('proj-1', 'doc-1');
+      expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+        'Could not remove the document from this project'
+      );
     });
   });
 

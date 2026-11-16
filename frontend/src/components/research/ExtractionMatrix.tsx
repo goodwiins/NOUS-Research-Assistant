@@ -39,8 +39,12 @@ import { ColumnEditor } from './ColumnEditor';
 import { Badge } from '@/components/ui/badge';
 import { CellCitation } from './CellCitation';
 import { CellObservations, MISSINGNESS_LABELS } from './CellObservations';
+import { APIErrorClass } from '@/types/api';
 
 const CELL_BADGE = 'px-1.5 py-0 text-[10px]';
+const MAX_POLL_ERRORS = 3;
+const POLL_ERROR_MESSAGE =
+  'Unable to check extraction status. Please try extracting again.';
 
 interface ExtractionMatrixProps {
   projectId: string;
@@ -76,6 +80,7 @@ export function ExtractionMatrix({
   >(null);
   const [autoExtractionStatus, setAutoExtractionStatus] =
     useState<ExtractionTaskStatus | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchMatrix = useCallback(async (id: string) => {
@@ -118,30 +123,49 @@ export function ExtractionMatrix({
     // recorded (that would hide both the progress banner and the alert).
     let cancelled = false;
     let settled = false;
+    let consecutiveErrors = 0;
     const stale = (): boolean => cancelled || settled;
+    const stopPolling = (): void => {
+      settled = true;
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      setAutoExtractionTaskId(null);
+    };
 
     const poll = async () => {
       try {
         const status = await getExtractionTaskStatus(autoExtractionTaskId);
         if (stale()) return;
+        consecutiveErrors = 0;
         setAutoExtractionStatus(status);
 
         if (status.status === 'completed' || status.status === 'failed') {
-          settled = true;
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
+          stopPolling();
           // A 'failed' status stays in autoExtractionStatus so the banner
           // below can show its error instead of silently clearing.
-          setAutoExtractionTaskId(null);
 
           if (status.status === 'completed' && matrix) {
             await fetchMatrix(matrix.id);
           }
         }
-      } catch {
-        // Task may not be registered yet, keep polling
+      } catch (err) {
+        if (stale()) return;
+        consecutiveErrors += 1;
+        const statusCode =
+          err instanceof APIErrorClass ? err.error.status_code : null;
+        const permanentClientError =
+          statusCode !== null &&
+          statusCode >= 400 &&
+          statusCode < 500 &&
+          ![404, 408, 429].includes(statusCode);
+        // A task may briefly be absent before registration. Other transient
+        // failures also get a bounded retry window; authorization never does.
+        if (permanentClientError || consecutiveErrors >= MAX_POLL_ERRORS) {
+          stopPolling();
+          setPollError(POLL_ERROR_MESSAGE);
+        }
       }
     };
 
@@ -163,6 +187,7 @@ export function ExtractionMatrix({
 
     setCreating(true);
     setError(null);
+    setPollError(null);
     // A previous matrix's terminal (failed) status must not outlive it: the
     // new matrix may never poll (no extraction_task_id) to replace it.
     setAutoExtractionStatus(null);
@@ -190,6 +215,7 @@ export function ExtractionMatrix({
     // A new run replaces whatever the previous run ended with, and its task
     // id becomes the polled task so this run's progress or failure is shown.
     setAutoExtractionStatus(null);
+    setPollError(null);
     const result = await triggerExtraction(targetMatrixId, {
       document_ids: documents.map((d) => d.id),
     });
@@ -386,16 +412,19 @@ export function ExtractionMatrix({
 
   return (
     <div className="space-y-4">
-      {autoExtractionStatus?.status === 'failed' ? (
+      {pollError || autoExtractionStatus?.status === 'failed' ? (
         <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-2">
           <p role="alert" className="flex-1 text-xs text-destructive">
-            {autoExtractionStatus.error ?? 'Extraction failed'}
+            {pollError ?? autoExtractionStatus?.error ?? 'Extraction failed'}
           </p>
           <Button
             variant="ghost"
             size="icon"
             aria-label="Dismiss extraction error"
-            onClick={() => setAutoExtractionStatus(null)}
+            onClick={() => {
+              setAutoExtractionStatus(null);
+              setPollError(null);
+            }}
           >
             <X className="h-3.5 w-3.5" />
           </Button>

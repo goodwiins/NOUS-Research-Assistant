@@ -61,7 +61,7 @@ export async function* streamReply(
   let reasoning = "";
   let tokenCount = 0;
   const started = Date.now();
-  const contexts: Record<string, unknown>[] = [];
+  let contexts: Record<string, unknown>[] = [];
   const snapshot = (): RuntimeMessage => ({
     runtimeId,
     timestamp,
@@ -134,7 +134,7 @@ export async function* streamReply(
             : event.issues.join("; ");
           break;
         case "rag_context":
-          contexts.push(...event.contexts);
+          contexts = event.contexts;
           break;
         case "usage":
           tokenCount = event.outputTokens;

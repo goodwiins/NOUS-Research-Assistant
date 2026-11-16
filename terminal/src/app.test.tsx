@@ -180,6 +180,21 @@ test("real CLI transport preserves auth/context and renders revised text and too
   assert.equal(fetch.mock.callCount(), 1);
 });
 
+test("later citation snapshots replace earlier ones", async () => {
+  mock.method(globalThis, "fetch", async () =>
+    response([
+      ["rag_context", { contexts: [{ id: "old" }, { id: "shared" }] }],
+      ["rag_context", { contexts: [{ id: "shared" }, { id: "new" }] }],
+      ["done", {}],
+    ]),
+  );
+
+  const updates = await collect(
+    run(async () => assert.fail("Unexpected approval")),
+  );
+  assert.deepEqual(updates.at(-1)?.contexts, [{ id: "shared" }, { id: "new" }]);
+});
+
 for (const approved of [true, false]) {
   test(`Ink requires explicit ${approved ? "approval" : "denial"} and posts it once`, async () => {
     const calls: { url: string; body: Record<string, unknown> }[] = [];

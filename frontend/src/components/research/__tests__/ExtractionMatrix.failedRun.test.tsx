@@ -27,6 +27,7 @@ import type {
   ExtractionMatrix as ExtractionMatrixType,
   ExtractionTaskStatus,
 } from '@/types/scispace';
+import { APIErrorClass } from '@/types/api';
 
 vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ user: { id: 'me' } }) }));
 vi.mock('@/services/researchEngineService', () => ({
@@ -111,6 +112,80 @@ async function createAndPoll(
 }
 
 describe('ExtractionMatrix polled task outcome', () => {
+  it('stops polling and shows an error immediately when access is denied', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await createAndPoll(() =>
+        Promise.reject(
+          new APIErrorClass({
+            message: 'Forbidden',
+            status_code: 403,
+            type: 'auth_error',
+          })
+        )
+      );
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Unable to check extraction status'
+      );
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(getExtractionTaskStatus).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a briefly missing task and then shows its progress', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      await createAndPoll(() => {
+        calls += 1;
+        if (calls === 1) {
+          return Promise.reject(
+            new APIErrorClass({
+              message: 'Task not found',
+              status_code: 404,
+              type: 'http_error',
+            })
+          );
+        }
+        return Promise.resolve(taskStatus({ completed: 1 }));
+      });
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(await screen.findByText(/Extracting 1\/2/)).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(getExtractionTaskStatus).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops polling after three missing-task responses', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await createAndPoll(() =>
+        Promise.reject(
+          new APIErrorClass({
+            message: 'Task not found',
+            status_code: 404,
+            type: 'http_error',
+          })
+        )
+      );
+
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Unable to check extraction status'
+      );
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(getExtractionTaskStatus).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows the error when every document failed', async () => {
     await createAndPoll(
       taskStatus({
