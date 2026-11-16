@@ -12,11 +12,11 @@
 #   resilience   resilience-tests    coverage.xml                 backend/src/core
 #   frontend     frontend-tests      frontend/coverage/lcov.info  frontend/src
 #
-# Status checks are INFORMATIONAL (non-blocking) while coverage ramps — the
-# per-file ratchet (backend/scripts/check_coverage_ratchet.py) and the
-# unit-tests --cov-fail-under floor (35%) are the real gates. (integration and
-# resilience run --cov but have no floor yet.) Flip `informational: false` once
-# the floor is high enough to enforce on PRs.
+# New-code patch coverage is a failing status below 70%. Whole-project and
+# component statuses remain informational while coverage ramps. The per-file
+# ratchet (backend/scripts/check_coverage_ratchet.py) and the unit-tests
+# --cov-fail-under floor (35%) remain separate CI gates. Integration and
+# resilience run --cov but have no floor yet.
 
 codecov:
   require_ci_to_pass: true
@@ -33,8 +33,8 @@ coverage:
         threshold: 1%   # ignore sub-1% drops (parallel-upload jitter)
     patch:
       default:
-        informational: true
-        target: 70%     # aspirational diff-coverage target on new code
+        informational: false
+        target: 70%     # minimum diff coverage on new code
 
 # Upload-time grouping. carryforward keeps a flag's last-known coverage when its
 # job is skipped on a given PR, so a gated/flaky job doesn't drop the total.
