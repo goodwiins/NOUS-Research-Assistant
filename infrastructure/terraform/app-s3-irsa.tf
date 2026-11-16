@@ -38,6 +38,20 @@ data "aws_iam_policy_document" "app_s3" {
     resources = ["arn:aws:bedrock:us-east-1:${data.aws_caller_identity.current.account_id}:knowledge-base/GGYNMOGZAH"]
   }
 
+  # Queued write path (backend/src/tasks/bedrock_sync_tasks.py): one ingestion
+  # job at a time on the KB's S3 data source. These actions authorize against
+  # the knowledge-base resource, so they share the Retrieve ARN.
+  statement {
+    sid    = "AppBedrockIngestion"
+    effect = "Allow"
+    actions = [
+      "bedrock:StartIngestionJob",
+      "bedrock:GetIngestionJob",
+      "bedrock:ListIngestionJobs",
+    ]
+    resources = ["arn:aws:bedrock:us-east-1:${data.aws_caller_identity.current.account_id}:knowledge-base/GGYNMOGZAH"]
+  }
+
   statement {
     sid    = "AppS3Objects"
     effect = "Allow"
