@@ -98,8 +98,13 @@ async def record_dispatched_task_id(
     Only a still-PENDING, never-stamped row is updated, so a worker that already
     claimed the job (``start_job`` stamps its own id) is never overwritten.
     No-op without a task id. Best effort: the message is already in the broker,
-    so a failed stamp is logged and rolled back rather than failing the caller —
-    that row just keeps the pre-fix reconciler behaviour.
+    so a failed stamp is logged rather than failing the caller — that row just
+    keeps the pre-fix reconciler behaviour.
+
+    The stamp runs on its own short-lived session bound to ``db``'s engine, not
+    on ``db`` itself: the producer still builds its response from objects in
+    ``db``, and rolling ``db`` back after a failed stamp would expire them, so
+    the next attribute read would be an implicit async lazy load.
     """
     if not isinstance(task_id, str) or not task_id:
         return
@@ -108,28 +113,26 @@ async def record_dispatched_task_id(
     from src.models.processing import JobStatus, ProcessingJob
 
     try:
-        await db.execute(
-            update(ProcessingJob)
-            .where(
-                ProcessingJob.id == job_id,
-                ProcessingJob.status == JobStatus.PENDING,
-                ProcessingJob.celery_task_id.is_(None),
+        async with AsyncSession(db.bind) as stamp_db:
+            await stamp_db.execute(
+                update(ProcessingJob)
+                .where(
+                    ProcessingJob.id == job_id,
+                    ProcessingJob.status == JobStatus.PENDING,
+                    ProcessingJob.celery_task_id.is_(None),
+                )
+                .values(celery_task_id=task_id)
+                .execution_options(synchronize_session=False)
             )
-            .values(celery_task_id=task_id)
-            .execution_options(synchronize_session=False)
-        )
-        await db.commit()
+            await stamp_db.commit()
     except Exception:
+        # Leaving the ``async with`` closed (and so rolled back) stamp_db only.
         logger.warning(
             "record_dispatched_task_id_failed",
             job_id=str(job_id),
             task_id=task_id,
             exc_info=True,
         )
-        try:
-            await db.rollback()
-        except Exception:
-            logger.warning("record_dispatched_task_id_rollback_failed", exc_info=True)
 
 
 def _register(db: AsyncSession, task: Any, thunk: Callable[[], Any]) -> EnqueueHandle:

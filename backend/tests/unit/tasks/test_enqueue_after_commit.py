@@ -304,7 +304,40 @@ async def test_record_dispatched_task_id_swallows_db_errors(
 ) -> None:
     from src.tasks.enqueue import record_dispatched_task_id
 
-    with patch.object(job_db, "execute", side_effect=RuntimeError("db gone")):
+    with patch.object(AsyncSession, "execute", side_effect=RuntimeError("db gone")):
         # Must not raise: the message is already published, so a failed stamp
         # degrades to the pre-GOO-463 behavior instead of failing the request.
         await record_dispatched_task_id(job_db, "job-1", "tid-1")
+
+
+async def test_failed_stamp_leaves_the_producer_session_objects_loaded(
+    job_db: AsyncSession,
+) -> None:
+    """The stamp runs after the producer committed and published, and the
+    producer still builds its response from objects it loaded. A stamp that
+    fails mid-transaction must not roll back (and so expire) the producer's
+    session: in async code the next attribute read would be an implicit lazy
+    load (MissingGreenlet), turning a published job into a 500/400."""
+    from sqlalchemy import inspect
+
+    from src.models.processing import JobStatus, ProcessingJob
+    from src.tasks.enqueue import record_dispatched_task_id
+
+    job_id = await _seed_job(job_db, status=JobStatus.PENDING)
+    job = await job_db.get(ProcessingJob, job_id)
+    assert job is not None
+    # Fail the stamp's UPDATE inside the database, after its transaction began.
+    await job_db.execute(
+        text(
+            "CREATE TRIGGER fail_stamp BEFORE UPDATE ON processing_jobs "
+            "BEGIN SELECT RAISE(ABORT, 'stamp failed'); END"
+        )
+    )
+    await job_db.commit()
+
+    await record_dispatched_task_id(job_db, job_id, "tid-1")
+
+    assert not inspect(job).expired_attributes
+    # What reprocess_document / reprocess_file read to build their response.
+    assert job.id == job_id
+    assert job.status is JobStatus.PENDING
