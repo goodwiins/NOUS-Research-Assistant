@@ -80,5 +80,8 @@ async def test_create_report_route_returns_422_for_blocked_webhook() -> None:
                 current_user=user,  # type: ignore[arg-type]
             )
     assert exc_info.value.status_code == 422
-    assert "non-public" in str(exc_info.value.detail)
+    # A fixed message: the guard's own text (which names the host) stays in logs.
+    assert exc_info.value.detail == (
+        "Invalid delivery_config: webhook URL must be a public HTTPS URL"
+    )
     session.assert_not_called()

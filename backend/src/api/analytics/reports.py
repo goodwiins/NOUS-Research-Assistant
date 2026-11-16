@@ -52,9 +52,10 @@ async def create_report(
         return report
 
     except UnsafeDestinationError as e:
+        logger.warning(f"Rejected report delivery_config: {e}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid delivery_config: {e}",
+            detail="Invalid delivery_config: webhook URL must be a public HTTPS URL",
         )
     except Exception as e:
         logger.error(f"Error creating report: {e}")
