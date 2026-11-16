@@ -14,7 +14,7 @@ Client state management for NOUS, using [Zustand](https://github.com/pmndrs/zust
 State lives in two sibling directories, which is easy to mix up:
 
 - `src/store/` (this directory, singular) holds the chat, project, pipeline, research-engine, notification, citation and sidebar stores listed below, plus `artifactPanelStore.ts`.
-- `src/stores/` (plural) holds `authStore.ts`, `agentActivityStore.ts`, `analyticsStore.ts` (and a `analyticsStore.new.ts` rewrite), `enhancedGraphStore.ts`, `graphStore.ts`, `monitoringStore.ts`, and an `analytics/` subfolder (`analyticsStore`, `graphStore`, `realtimeStore` behind an `index.ts`). Its tests are in `src/stores/__tests__/` (only `agentActivityStore.test.ts`); the auth-store tests are in `src/store/__tests__/`.
+- `src/stores/` (plural) holds `authStore.ts`, `agentActivityStore.ts`, `analyticsStore.ts`, `graphStore.ts`, `monitoringStore.ts`, and an `analytics/` subfolder (`analyticsStore`, `graphStore`, `realtimeStore` behind an `index.ts`). Its tests are in `src/stores/__tests__/` (only `agentActivityStore.test.ts`); the auth-store tests are in `src/store/__tests__/`.
 
 ## chat store layout
 

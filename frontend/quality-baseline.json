@@ -18,7 +18,7 @@
   ],
   "eslint": {
     "errors": 85,
-    "warnings": 1808,
+    "warnings": 1775,
     "byFile": {
       "app/(auth)/layout.tsx": {
         "errors": 0,
@@ -1636,17 +1636,9 @@
         "errors": 0,
         "warnings": 4
       },
-      "src/stores/analyticsStore.new.ts": {
-        "errors": 0,
-        "warnings": 11
-      },
       "src/stores/analyticsStore.ts": {
         "errors": 0,
         "warnings": 8
-      },
-      "src/stores/enhancedGraphStore.ts": {
-        "errors": 0,
-        "warnings": 22
       },
       "src/stores/graphStore.ts": {
         "errors": 0,
