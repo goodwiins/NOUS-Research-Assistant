@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from celery import Task, current_app
@@ -34,11 +34,7 @@ from src.services.bedrock_sync import (
 )
 from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
 from src.services.bedrock_sync import stage_document_sync
-from src.services.documents.satellite_state import (
-    begin_write,
-    finish_write,
-    pending_writes,
-)
+from src.services.documents.satellite_state import begin_write, finish_write
 from src.services.knowledge_graph.knowledge_graph_service import (
     GraphExtractor,
     knowledge_graph_service,
@@ -282,7 +278,12 @@ def _record_do_kb_sync_outcome(document, ds_uuid) -> None:
 
 
 def _compensate_late_remote_writes(
-    db, document_id, organization_id, writes: set[str]
+    db,
+    document_id,
+    organization_id,
+    writes: set[str],
+    *,
+    bedrock_token: Optional[str] = None,
 ) -> None:
     """Undo DO KB / Neo4j writes that finished after their document was deleted.
 
@@ -299,6 +300,27 @@ def _compensate_late_remote_writes(
     )
 
     try:
+        if "bedrock_kb" in writes:
+            # The upload may have landed after the queue tick removed this
+            # document's objects. Queue the removal again; the tick deletes
+            # the objects and runs a job so nothing stale is indexed. That
+            # removal follows this attempt's upload, so only this attempt's
+            # token is settled: another writer's token must outlive it.
+            locked = (
+                db.query(Document)
+                .filter(
+                    Document.id == document_id,
+                    Document.organization_id == organization_id,
+                )
+                .populate_existing()
+                .with_for_update()
+                .first()
+            )
+            if locked is not None and locked.is_deleted:
+                if bedrock_token:
+                    finish_write(locked, BEDROCK_WRITE_SATELLITE, bedrock_token)
+                mark_bedrock_deleted(locked)
+            db.commit()  # releases the row lock before the cleanups below
         current = (
             db.query(Document)
             .filter(
@@ -310,15 +332,6 @@ def _compensate_late_remote_writes(
         )
         if current is None or not current.is_deleted:
             return
-        if "bedrock_kb" in writes:
-            # The upload may have landed after the queue tick removed this
-            # document's objects. Queue the removal again; the tick deletes
-            # the objects and runs a job so nothing stale is indexed. That
-            # removal follows this attempt's upload, so its token is settled.
-            for token in list(pending_writes(current, BEDROCK_WRITE_SATELLITE)):
-                finish_write(current, BEDROCK_WRITE_SATELLITE, token)
-            mark_bedrock_deleted(current)
-            db.commit()
         if "graph" in writes:
             _cleanup_deleted_document_graph(current)
             # The graph outcome holds a short Document lock. Release it before
@@ -422,6 +435,7 @@ def process_document_ingestion(self, job_id: str):
     # Remote satellites this attempt wrote to; cleaned up if the document turns
     # out to have been deleted while the write was in flight (GOO-358).
     remote_writes: set[str] = set()
+    bedrock_token: Optional[str] = None
     document_ids: tuple[Any, Any] | None = None
     try:
         # Get job and document
@@ -723,7 +737,9 @@ def process_document_ingestion(self, job_id: str):
             stop.reason,
         )
         if stop.reason == "deleted" and remote_writes and document_ids:
-            _compensate_late_remote_writes(db, *document_ids, remote_writes)
+            _compensate_late_remote_writes(
+                db, *document_ids, remote_writes, bedrock_token=bedrock_token
+            )
         return {"status": "stopped", "job_id": job_id, "skipped": stop.reason}
 
     except Exception as e:
@@ -748,7 +764,9 @@ def process_document_ingestion(self, job_id: str):
                 # A remote write may have landed before the document was
                 # deleted and the stage then failed for an unrelated reason.
                 if stop.reason == "deleted" and remote_writes and document_ids:
-                    _compensate_late_remote_writes(db, *document_ids, remote_writes)
+                    _compensate_late_remote_writes(
+                        db, *document_ids, remote_writes, bedrock_token=bedrock_token
+                    )
             else:
                 document.update_processing_status(ProcessingStatus.FAILED, str(e))
                 job.fail_job(str(e))

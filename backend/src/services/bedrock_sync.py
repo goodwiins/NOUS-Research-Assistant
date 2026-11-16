@@ -211,10 +211,10 @@ def staged_text_matches(document: DocumentRow) -> bool:
     """False when the row's text differs from the text last uploaded.
 
     Any path may rewrite ``content_text`` (an upgrade, a storage repair), so
-    callers compare instead of tracking each one. Unknown (no hash) is True.
+    callers compare instead of tracking each one. A row with no recorded hash
+    cannot be shown to match, so it does not: one extra restage is harmless.
     """
-    staged = _state(document).get("text_sha256")
-    return not staged or staged == _text_sha(document.content_text)
+    return bool(_state(document).get("text_sha256") == _text_sha(document.content_text))
 
 
 def begin_stage_write(document: DocumentRow) -> str:

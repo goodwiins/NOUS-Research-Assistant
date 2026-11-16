@@ -802,10 +802,26 @@ def test_arxiv_restages_only_documents_not_yet_indexed(enabled: Any) -> None:
     from src.services.arxiv.persistence import _needs_kb_sync
 
     # Bedrock records no data-source uuid: indexed means completed by this queue.
-    staged = {bs.META_KEY: {"stage_token": "t"}}
+    staged = {bs.META_KEY: {"stage_token": "t", "text_sha256": bs._text_sha("x")}}
     assert (
-        _needs_kb_sync(Document(do_kb_sync_status=COMPLETED, document_metadata=staged))
+        _needs_kb_sync(
+            Document(
+                do_kb_sync_status=COMPLETED, document_metadata=staged, content_text="x"
+            )
+        )
         is False
+    )
+    # No recorded hash: the upload cannot be shown to match, so restage.
+    unhashed = {bs.META_KEY: {"stage_token": "t"}}
+    assert (
+        _needs_kb_sync(
+            Document(
+                do_kb_sync_status=COMPLETED,
+                document_metadata=unhashed,
+                content_text="x",
+            )
+        )
+        is True
     )
     # A completed status left by the retired DigitalOcean KB must restage.
     assert _needs_kb_sync(Document(do_kb_sync_status=COMPLETED)) is True
@@ -829,8 +845,19 @@ def test_arxiv_restages_when_text_differs_from_the_staged_upload(
     document.do_kb_sync_status = COMPLETED
     assert _needs_kb_sync(document) is False
 
-    document.content_text = "repaired"
+    from types import SimpleNamespace
 
+    from src.services.arxiv.persistence import _repair_document
+
+    source = SimpleNamespace(
+        title="Paper",
+        content_text="repaired",
+        content_summary=None,
+        document_metadata={"has_full_text": True},
+    )
+    _repair_document(document, source, "2605.26355v1", {})
+
+    assert document.content_text == "repaired"
     assert _needs_kb_sync(document) is True
     db.close()
 
@@ -906,7 +933,15 @@ def test_late_upload_for_a_deleted_document_requeues_its_removal(
     token = bs.begin_stage_write(document)
     db.commit()
 
-    _compensate_late_remote_writes(db, doc_id, org_id, {"bedrock_kb"})
+    # A second writer is uploading for the same document.
+    from src.services.documents.satellite_state import begin_write
+
+    begin_write(document, bs.WRITE_SATELLITE, "other-writer")
+    db.commit()
+
+    _compensate_late_remote_writes(
+        db, doc_id, org_id, {"bedrock_kb"}, bedrock_token=token
+    )
     db.close()
 
     doc = _load(session_factory, doc_id)
@@ -916,6 +951,8 @@ def test_late_upload_for_a_deleted_document_requeues_its_removal(
     from src.services.documents.satellite_state import pending_writes
 
     assert token not in pending_writes(doc, bs.WRITE_SATELLITE)
+    # The other writer's token survives, so its upload is still cleaned up.
+    assert "other-writer" in pending_writes(doc, bs.WRITE_SATELLITE)
 
 
 def test_pipeline_stages_the_final_text_after_results_are_stored(
