@@ -4,7 +4,7 @@ Knowledge Graph API endpoints
 
 import logging
 from typing import Any, Dict, Iterable, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -143,6 +143,41 @@ def _raise_kg_http_error(error: Exception, context: str) -> None:
             status_code=503, detail="Knowledge graph temporarily unavailable"
         )
     raise HTTPException(status_code=500, detail="Internal server error")
+
+
+def _reserve_and_publish_job(db, job: ProcessingJob, task: Any, queue: str) -> None:
+    """Commit ``job`` as a QUEUED attempt, then publish ``task`` for it.
+
+    GOO-464: publishing before the commit let a fast worker look up a job row
+    that was not durable yet. Same reserve-then-publish shape as
+    ``ProcessingService.queue_processing_job``: the task id is generated up
+    front, stamped on the row and committed, and only then is the message
+    published under that id. If publication raises, the reserved attempt is
+    failed (unless a worker already moved it on) and the caller gets a 503.
+    """
+    task_id = str(uuid4())
+    db.add(job)
+    db.flush()
+    job.celery_task_id = task_id
+    job.queue_job(queue_name=queue)
+    db.commit()
+
+    try:
+        task.apply_async(args=[str(job.id)], queue=queue, task_id=task_id)
+    except Exception:
+        logger.error(
+            "Failed to publish job %s (task %s)", job.id, task_id, exc_info=True
+        )
+        # The broker may have accepted the message and still raised; only fail
+        # the attempt this request reserved, never a worker's newer state.
+        db.refresh(job, with_for_update=True)
+        if job.status == JobStatus.QUEUED and job.celery_task_id == task_id:
+            job.fail_job("Failed to queue job: broker unavailable")
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Job queue temporarily unavailable",
+        )
 
 
 class MergeJobEntityRef(BaseModel):
@@ -834,22 +869,7 @@ def create_merge_job(
         total_steps=len(request.groups),
         queue_name="graph_processing",
     )
-    db.add(job)
-    # Flush (not commit) so job.id is available for apply_async without
-    # persisting a PENDING/celery_task_id=NULL row yet. There is no try/except
-    # here, so if apply_async raises (e.g. broker down) the exception propagates
-    # and the request's session is closed uncommitted -> the flush is rolled
-    # back, leaving no orphaned PENDING job. The commit lands only after the
-    # task is actually enqueued.
-    db.flush()
-
-    task = kg_merge_entities_job.apply_async(
-        args=[str(job.id)],
-        queue="graph_processing",
-    )
-    job.celery_task_id = task.id
-    job.queue_job(queue_name="graph_processing")
-    db.commit()
+    _reserve_and_publish_job(db, job, kg_merge_entities_job, "graph_processing")
 
     return {"job_id": str(job.id), "status": job.status.value}
 
@@ -898,22 +918,7 @@ def create_extraction_job(
         total_steps=len(request.document_ids),
         queue_name="entity_processing",
     )
-    db.add(job)
-    # Flush (not commit) so job.id is available for apply_async without
-    # persisting a PENDING/celery_task_id=NULL row yet. There is no try/except
-    # here, so if apply_async raises (e.g. broker down) the exception propagates
-    # and the request's session is closed uncommitted -> the flush is rolled
-    # back, leaving no orphaned PENDING job. The commit lands only after the
-    # task is actually enqueued.
-    db.flush()
-
-    task = kg_extract_entities_job.apply_async(
-        args=[str(job.id)],
-        queue="entity_processing",
-    )
-    job.celery_task_id = task.id
-    job.queue_job(queue_name="entity_processing")
-    db.commit()
+    _reserve_and_publish_job(db, job, kg_extract_entities_job, "entity_processing")
 
     return {"job_id": str(job.id), "status": job.status.value}
 

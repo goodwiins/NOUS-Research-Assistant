@@ -1,28 +1,21 @@
-"""Guard: KG job endpoints must not commit before enqueuing.
+"""Guard: KG job endpoints reserve the job durably, then publish (GOO-464).
 
-`create_merge_job` (POST /api/v1/merge-jobs) and `create_extraction_job`
-(POST /api/v1/extraction-jobs) each committed a `ProcessingJob(status=PENDING)`
-*before* calling `apply_async` — with no try/except around the enqueue:
+`create_merge_job` (POST /merge-jobs) and `create_extraction_job`
+(POST /extraction-jobs) once committed a PENDING job and then called
+`apply_async` with no error handling, orphaning the row when the broker was
+down. The follow-up fix flushed, published and only then committed, which
+closed the orphan but let a fast worker receive the message before the job row
+was durable (GOO-464).
 
-    db.add(job)
-    db.commit()          # persists PENDING, celery_task_id=NULL
-    db.refresh(job)
-    task = kg_..._job.apply_async(...)   # raises if broker down
-    ...
-    db.commit()
-
-If `apply_async` raised (broker/Redis down), the exception propagated with the
-PENDING row already committed → an orphaned `ProcessingJob(status=PENDING,
-celery_task_id=NULL)` that no worker picks up and no janitor resets.
-
-Fix: `flush` (not `commit`) before `apply_async`; the single `commit` lands only
-after the enqueue succeeds. On failure the request's session closes uncommitted,
-rolling back the flush — no orphan. This guard asserts neither endpoint commits
-between adding the job and enqueuing it.
+Both now go through `_reserve_and_publish_job`: generate the task id, stamp it
+on the row as a QUEUED attempt and commit, then publish under that id. A
+publish failure fails the reserved attempt (no orphan) and returns 503.
+Behaviour is covered in `tests/unit/api/test_knowledge_graph_job_publish_order.py`;
+this guard pins the shape so neither endpoint regresses to publish-first.
 """
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 # tests/ -> backend/
 ROUTER = (
@@ -33,39 +26,40 @@ ROUTER = (
     / "knowledge_graph.py"
 )
 
-# (function name, the qualified enqueue call that ends the pre-enqueue window)
-CASES = [
-    ("create_merge_job", "kg_merge_entities_job.apply_async("),
-    ("create_extraction_job", "kg_extract_entities_job.apply_async("),
+ENDPOINTS = [
+    ("create_merge_job", "kg_merge_entities_job"),
+    ("create_extraction_job", "kg_extract_entities_job"),
 ]
 
 
 def _fn_source(name: str) -> str:
     source = ROUTER.read_text()
     start = source.index(f"def {name}(")
-    m = re.search(r"\n(async def |def )", source[start + 10 :])
+    m = re.search(r"\n(async def |def |@)", source[start + 10 :])
     end = start + 10 + m.start() if m else len(source)
     return source[start:end]
 
 
-def test_no_commit_before_enqueue():
-    for name, enqueue_call in CASES:
+def test_endpoints_delegate_to_reserve_then_publish():
+    for name, task in ENDPOINTS:
         fn = _fn_source(name)
-        before = fn[fn.index("db.add(job)") : fn.index(enqueue_call)]
-        assert "db.commit()" not in before, (
-            f"{name} commits before {enqueue_call} — a broker failure then orphans "
-            f"a PENDING ProcessingJob. Flush before enqueue, commit once after."
+        assert f"_reserve_and_publish_job(db, job, {task}," in fn, (
+            f"{name} must enqueue through _reserve_and_publish_job so the job "
+            "row is committed before its message can reach a worker"
         )
-        assert "db.flush()" in before, (
-            f"{name} must flush (not commit) before {enqueue_call} so a queue "
-            f"failure rolls back cleanly"
+        assert f"{task}.apply_async(" not in fn, (
+            f"{name} must not publish {task} directly; a publish before the "
+            "commit lets a worker read a job row that does not exist yet"
         )
 
 
-def test_commit_after_enqueue():
-    for name, enqueue_call in CASES:
-        fn = _fn_source(name)
-        after = fn[fn.index(enqueue_call) :]
-        assert (
-            "db.commit()" in after
-        ), f"{name} must commit after {enqueue_call} succeeds"
+def test_helper_commits_before_publishing_with_the_reserved_id():
+    fn = _fn_source("_reserve_and_publish_job")
+    publish = fn.index(".apply_async(")
+    assert "db.commit()" in fn[:publish], "reservation must commit before publish"
+    assert (
+        "task_id=task_id" in fn[publish:]
+    ), "the message must carry the task id persisted on the reserved row"
+    assert (
+        "fail_job(" in fn[publish:]
+    ), "a publish failure must fail the reserved attempt, not orphan it"
