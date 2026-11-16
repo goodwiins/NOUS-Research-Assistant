@@ -162,10 +162,12 @@ def _entity_scope_predicate(
     """Build the org-scoping WHERE predicate for an Entity alias (#50 read-flip).
 
     Prefers the indexed `organization_id` (stamped on writes + the one-time
-    backfill) — but OR's it with the legacy `source_document_id IN $ids` list so
-    the SAME query stays correct on environments whose backfill has not run yet
-    (organization_id NULL there). Once every environment is backfilled the IN-list
-    arg can be dropped, leaving a pure indexed equality.
+    backfill) — but OR's it with document-list membership
+    (``_entity_in_documents_predicate``: the creator stamp or any id in
+    ``document_ids``) so the SAME query stays correct on environments whose
+    backfill has not run yet (organization_id NULL there), and a project /
+    document scope also sees entities first extracted from another document
+    (GOO-495).
 
     Mutates `params` with whichever bind vars it uses. Returns the predicate (no
     leading WHERE/AND). With neither scope it returns ``"false"`` so the query
@@ -178,7 +180,7 @@ def _entity_scope_predicate(
         preds.append(f"{alias}.organization_id = $organization_id")
         params["organization_id"] = organization_id
     if source_document_ids is not None:
-        preds.append(f"{alias}.source_document_id IN $source_document_ids")
+        preds.append(_entity_in_documents_predicate(alias))
         params["source_document_ids"] = source_document_ids
     if not preds:
         # Both scopes None → a dropped tenant scope. Fail closed: match nothing
@@ -221,7 +223,7 @@ def _two_endpoint_scope(
     """Scope a relationship/traversal query by BOTH endpoint Entity aliases (#50).
 
     Same OR semantics as ``_entity_scope_predicate``: when both scopes are
-    supplied each endpoint matches `org = $org OR source_document_id IN $ids`.
+    supplied each endpoint matches `org = $org OR <document membership>`.
     Org-exclusive precedence here used to make legacy NULL-org relationships
     listable (via the OR'ing sibling) but undeletable and untraversable.
 
@@ -234,7 +236,7 @@ def _two_endpoint_scope(
         preds.append("{alias}.organization_id = $organization_id")
         params["organization_id"] = organization_id
     if source_document_ids is not None:
-        preds.append("{alias}.source_document_id IN $source_document_ids")
+        preds.append(_entity_in_documents_predicate("{alias}"))
         params["source_document_ids"] = source_document_ids
     if preds:
         joined = "(" + " OR ".join(preds) + ")"
@@ -268,6 +270,26 @@ def _entity_document_ids_expr(alias: str) -> str:
         f"coalesce({alias}.document_ids, "
         f"CASE WHEN {alias}.source_document_id IS NULL THEN [] "
         f"ELSE [{alias}.source_document_id] END)"
+    )
+
+
+def _entity_in_documents_predicate(alias: str) -> str:
+    """Cypher: the Entity ``alias`` belongs to any document in
+    ``$source_document_ids`` (GOO-495).
+
+    Membership is the per-document ``document_ids`` list (KN2), not only the
+    ``source_document_id`` creator stamp: an entity first extracted from
+    document A is shared by document B, and a scope on B (a project that holds
+    B but not A) must still see it. The creator-stamp disjunct keeps legacy
+    nodes with no ``document_ids`` matching exactly as before (the same
+    fallback as ``_entity_document_ids_expr``). Ids are bound parameters;
+    ``alias`` may be the ``"{alias}"`` template placeholder that callers
+    ``.format`` later. List containment is not index-backed.
+    """
+    return (
+        f"({alias}.source_document_id IN $source_document_ids"
+        f" OR any(doc_id IN coalesce({alias}.document_ids, [])"
+        " WHERE doc_id IN $source_document_ids))"
     )
 
 
@@ -1862,12 +1884,8 @@ class KnowledgeGraphService:
                     conditions.append("target.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 elif source_document_ids is not None:
-                    conditions.append(
-                        "source.source_document_id IN $source_document_ids"
-                    )
-                    conditions.append(
-                        "target.source_document_id IN $source_document_ids"
-                    )
+                    conditions.append(_entity_in_documents_predicate("source"))
+                    conditions.append(_entity_in_documents_predicate("target"))
                     params["source_document_ids"] = source_document_ids
 
                 if relationship_types:
@@ -1989,12 +2007,8 @@ class KnowledgeGraphService:
                     conditions.append("target.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 elif source_document_ids is not None:
-                    conditions.append(
-                        "source.source_document_id IN $source_document_ids"
-                    )
-                    conditions.append(
-                        "target.source_document_id IN $source_document_ids"
-                    )
+                    conditions.append(_entity_in_documents_predicate("source"))
+                    conditions.append(_entity_in_documents_predicate("target"))
                     params["source_document_ids"] = source_document_ids
                 where_clause = " AND ".join(conditions)
                 query = f"""
@@ -2036,12 +2050,8 @@ class KnowledgeGraphService:
                     conditions.append("target.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 elif source_document_ids is not None:
-                    conditions.append(
-                        "source.source_document_id IN $source_document_ids"
-                    )
-                    conditions.append(
-                        "target.source_document_id IN $source_document_ids"
-                    )
+                    conditions.append(_entity_in_documents_predicate("source"))
+                    conditions.append(_entity_in_documents_predicate("target"))
                     params["source_document_ids"] = source_document_ids
                 where_clause = " AND ".join(conditions)
                 query = f"""
@@ -2256,7 +2266,7 @@ class KnowledgeGraphService:
                 if organization_id is not None:
                     node_preds.append("n.organization_id = $organization_id")
                 if source_document_ids is not None:
-                    node_preds.append("n.source_document_id IN $source_document_ids")
+                    node_preds.append(_entity_in_documents_predicate("n"))
                 if len(node_preds) > 1:
                     path_node_predicate = "(" + " OR ".join(node_preds) + ")"
                 else:
@@ -2926,9 +2936,7 @@ class KnowledgeGraphService:
                     scope_preds.append("{alias}.organization_id = $organization_id")
                     params["organization_id"] = organization_id
                 if source_document_ids is not None:
-                    scope_preds.append(
-                        "{alias}.source_document_id IN $source_document_ids"
-                    )
+                    scope_preds.append(_entity_in_documents_predicate("{alias}"))
                     params["source_document_ids"] = source_document_ids
                 # The guard above ensures scope_preds is non-empty.
                 joined = " AND ".join(scope_preds)
