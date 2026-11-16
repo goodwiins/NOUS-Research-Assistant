@@ -8,6 +8,7 @@ Neo4j therefore pinned threadpool workers and never opened the breaker.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -63,8 +64,10 @@ def test_session_run_applies_query_timeout(
     monkeypatch: pytest.MonkeyPatch, svc: KnowledgeGraphService, breaker: MagicMock
 ) -> None:
     monkeypatch.setattr(kg_module.settings, "NEO4J_QUERY_TIMEOUT_SECONDS", 12.0)
+    assert isinstance(svc.driver, MagicMock)
     raw = svc.driver.session.return_value
 
+    session: Any
     with svc.get_session() as session:
         session.run("MATCH (e:Entity) RETURN e", {"a": 1})
 
@@ -79,8 +82,10 @@ def test_explicit_transaction_gets_query_timeout(
     monkeypatch: pytest.MonkeyPatch, svc: KnowledgeGraphService, breaker: MagicMock
 ) -> None:
     monkeypatch.setattr(kg_module.settings, "NEO4J_QUERY_TIMEOUT_SECONDS", 12.0)
+    assert isinstance(svc.driver, MagicMock)
     raw = svc.driver.session.return_value
 
+    session: Any
     with svc.get_session() as session:
         session.begin_transaction()
 

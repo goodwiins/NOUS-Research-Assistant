@@ -35,7 +35,9 @@ def _entity(entity_id: str) -> SimpleNamespace:
     )
 
 
-def _svc(page: List[SimpleNamespace], total: int | None) -> tuple:
+def _svc(
+    monkeypatch: pytest.MonkeyPatch, page: List[SimpleNamespace], total: int | None
+) -> tuple:
     svc = KnowledgeGraphService()
     calls: dict = {}
 
@@ -49,8 +51,8 @@ def _svc(page: List[SimpleNamespace], total: int | None) -> tuple:
         calls["count"] = kwargs
         return total
 
-    svc.search_entities = _search_entities  # type: ignore[method-assign]
-    svc.count_search_entities = _count  # type: ignore[method-assign]
+    monkeypatch.setattr(svc, "search_entities", _search_entities)
+    monkeypatch.setattr(svc, "count_search_entities", _count)
     return svc, calls
 
 
@@ -62,8 +64,8 @@ def _search(svc: KnowledgeGraphService, limit: int, offset: int) -> Any:
     )
 
 
-def test_offset_is_forwarded_to_the_query() -> None:
-    svc, calls = _svc([_entity("e3")], total=None)
+def test_offset_is_forwarded_to_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    svc, calls = _svc(monkeypatch, [_entity("e3")], total=None)
 
     _search(svc, limit=2, offset=2)
 
@@ -71,8 +73,10 @@ def test_offset_is_forwarded_to_the_query() -> None:
     assert calls["search"]["limit"] == 2
 
 
-def test_full_page_reports_counted_total_and_has_more() -> None:
-    svc, calls = _svc([_entity("e1"), _entity("e2")], total=5)
+def test_full_page_reports_counted_total_and_has_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc, calls = _svc(monkeypatch, [_entity("e1"), _entity("e2")], total=5)
 
     response = _search(svc, limit=2, offset=0)
 
@@ -84,8 +88,8 @@ def test_full_page_reports_counted_total_and_has_more() -> None:
     assert calls["count"]["require_source_document"] is True
 
 
-def test_last_full_page_has_no_more() -> None:
-    svc, _ = _svc([_entity("e3"), _entity("e4")], total=4)
+def test_last_full_page_has_no_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    svc, _ = _svc(monkeypatch, [_entity("e3"), _entity("e4")], total=4)
 
     response = _search(svc, limit=2, offset=2)
 
@@ -93,8 +97,10 @@ def test_last_full_page_has_no_more() -> None:
     assert response.has_more is False
 
 
-def test_short_page_total_is_exact_without_a_count_query() -> None:
-    svc, _ = _svc([_entity("e5")], total=None)
+def test_short_page_total_is_exact_without_a_count_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc, _ = _svc(monkeypatch, [_entity("e5")], total=None)
 
     response = _search(svc, limit=2, offset=4)
 

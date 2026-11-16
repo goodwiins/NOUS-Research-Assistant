@@ -17,20 +17,27 @@ from neo4j.exceptions import ServiceUnavailable
 
 from src.api.search import search as search_api
 from src.core.circuit_breaker import ServiceUnavailableError as CircuitBreakerError
-from src.models.search_schemas import SearchQuery, SearchType
+from src.models.search_schemas import SearchQuery, SearchSortOrder, SearchType
 from src.services.knowledge_graph.knowledge_graph_service import knowledge_graph_service
 
 pytestmark = pytest.mark.unit
 
 
-def _user() -> SimpleNamespace:
+def _user() -> Any:
+    # Stands in for the ``User`` dependency; only ``id`` and
+    # ``organization_id`` are read on this path.
     return SimpleNamespace(id="user-1", organization_id="org-1")
 
 
 async def _run(search_type: SearchType) -> HTTPException:
     with pytest.raises(HTTPException) as exc:
         await search_api.search_documents(
-            search_request=SearchQuery(query="bert", search_type=search_type),
+            search_request=SearchQuery(
+                query="bert",
+                search_type=search_type,
+                sort_order=SearchSortOrder.RELEVANCE,
+                filters=None,
+            ),
             background_tasks=BackgroundTasks(),
             current_user=_user(),
             db=MagicMock(),
