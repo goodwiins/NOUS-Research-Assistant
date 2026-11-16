@@ -210,6 +210,7 @@ class MultimodalProcessingService:
 
             # Update document with processing results
             await self.update_document_with_results(document, processing_results)
+            self._stage_for_bedrock(document, processing_results)
 
             # Finalize the job to MATCH the document outcome.
             self._finalize_job(job, document, processing_results)
@@ -1154,16 +1155,12 @@ class MultimodalProcessingService:
 
             start_time = time.time()
 
-            from src.services.bedrock_sync import (
-                bedrock_sync_enabled,
-                stage_document_sync,
-            )
+            from src.services.bedrock_sync import bedrock_sync_enabled
 
             if bedrock_sync_enabled():
-                # Staged only; the Bedrock queue tick marks it indexed later.
-                outcome = stage_document_sync(self.db, document)
-                self.db.commit()
-                results["bedrock_kb_stage"] = outcome.value
+                # This step runs before update_document_with_results stores
+                # the extracted text, so process_document stages afterwards.
+                results["bedrock_kb_stage"] = "deferred"
                 return results
 
             # Phase 5: DO KB owns retrieval. Push the document directly.
@@ -1312,6 +1309,20 @@ class MultimodalProcessingService:
                 f"Document processing failed for {document.id}: "
                 f"{processing_results['errors']}"
             )
+
+    def _stage_for_bedrock(self, document: Document, results: Dict[str, Any]) -> None:
+        """Stage the final text (extraction plus captions) for the Bedrock KB.
+
+        Staged only; the Bedrock queue tick marks the document indexed later.
+        """
+        from src.services.bedrock_sync import bedrock_sync_enabled, stage_document_sync
+
+        if not (bedrock_sync_enabled() and results.get("success")):
+            return
+        if not document.content_text:
+            return
+        results["bedrock_kb_stage"] = stage_document_sync(self.db, document).value
+        self.db.commit()
 
     async def update_document_with_results(
         self, document: Document, results: Dict[str, Any]

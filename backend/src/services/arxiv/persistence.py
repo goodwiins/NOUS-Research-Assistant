@@ -225,14 +225,18 @@ def _managed_storage_fields(document: Document) -> Optional[dict[str, Any]]:
     return None
 
 
-def _needs_kb_sync(document: Document) -> bool:
+def _needs_kb_sync(document: Document, *, content_changed: bool = False) -> bool:
     from src.services.bedrock_sync import bedrock_sync_enabled, is_indexed
     from src.shared.enums import SatelliteSyncStatus
 
     if bedrock_sync_enabled():
         # Bedrock records no data-source uuid; anything not settled by a
         # Bedrock job (pending, failed, or a DigitalOcean-era status) restages.
-        return not is_indexed(document.do_kb_sync_status, document.document_metadata)
+        # So does an indexed document whose text was just upgraded: the KB
+        # would otherwise keep serving the old text.
+        return content_changed or not is_indexed(
+            document.do_kb_sync_status, document.document_metadata
+        )
     return (
         not document.do_kb_data_source_uuid
         or document.do_kb_sync_status != SatelliteSyncStatus.COMPLETED.value
@@ -437,7 +441,7 @@ async def persist_arxiv_documents(
                         enriched = _upgrade_full_text(document, sources[index])
                         if document.search_vector is None or enriched:
                             vector_documents[str(document.id)] = document
-                        if _needs_kb_sync(document):
+                        if _needs_kb_sync(document, content_changed=enriched):
                             kb_document_ids.add(str(document.id))
 
                     for (
@@ -539,7 +543,9 @@ async def persist_arxiv_documents(
                                 document_id = str(checksum_winner.id)
                                 document_ids_by_index[index] = document_id
                                 reused_document_ids.add(document_id)
-                                if _needs_kb_sync(checksum_winner):
+                                if _needs_kb_sync(
+                                    checksum_winner, content_changed=enriched
+                                ):
                                     kb_document_ids.add(document_id)
                                 continue
 
@@ -628,7 +634,7 @@ async def persist_arxiv_documents(
                             document_id = str(winner.id)
                             document_ids_by_index[index] = document_id
                             reused_document_ids.add(document_id)
-                            if _needs_kb_sync(winner):
+                            if _needs_kb_sync(winner, content_changed=enriched):
                                 kb_document_ids.add(document_id)
                             continue
 
@@ -644,7 +650,7 @@ async def persist_arxiv_documents(
                             discarded_storage.append(storage_fields)
                             if document.search_vector is None or enriched:
                                 vector_documents[str(document.id)] = document
-                        if _needs_kb_sync(document):
+                        if _needs_kb_sync(document, content_changed=enriched):
                             kb_document_ids.add(str(document.id))
 
                     if vector_documents:

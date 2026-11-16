@@ -20,6 +20,11 @@ Deleted documents are re-marked pending inside the soft-delete transaction
 (``mark_deleted``); the tick removes their objects before starting the job, so
 the data source's DELETE policy drops their vectors.
 
+A failed staging upload leaves the row ``failed`` with no retry in the tick.
+Recovery is the next ingest of that document or ``scripts/backfill_bedrock_kb``
+(which restages everything not indexed); until then scoped retrieval answers
+from keyword search.
+
 Enabled only when ``BEDROCK_KB_ID`` and ``BEDROCK_KB_DATA_SOURCE_ID`` are both
 set; every entry point is a no-op otherwise.
 """

@@ -26,7 +26,9 @@ from src.models.graph import EntityType as GraphEntityType
 from src.models.graph import ExtractionMethod as GraphExtractionMethod
 from src.models.graph import RelationshipType as GraphRelationshipType
 from src.models.processing import JobStatus, JobType, ProcessingJob
-from src.services.bedrock_sync import bedrock_sync_enabled, stage_document_sync
+from src.services.bedrock_sync import bedrock_sync_enabled
+from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
+from src.services.bedrock_sync import stage_document_sync
 from src.services.documents.satellite_state import begin_write, finish_write
 from src.services.knowledge_graph.knowledge_graph_service import (
     GraphExtractor,
@@ -299,6 +301,12 @@ def _compensate_late_remote_writes(
         )
         if current is None or not current.is_deleted:
             return
+        if "bedrock_kb" in writes:
+            # The upload may have landed after the queue tick removed this
+            # document's objects. Queue the removal again; the tick deletes
+            # the objects and runs a job so nothing stale is indexed.
+            mark_bedrock_deleted(current)
+            db.commit()
         if "graph" in writes:
             _cleanup_deleted_document_graph(current)
             # The graph outcome holds a short Document lock. Release it before
@@ -612,6 +620,9 @@ def process_document_ingestion(self, job_id: str):
         if document.content_text and bedrock_sync_enabled():
             # Bedrock: stage only. The queue tick marks completed once an
             # ingestion job covering the file finishes (never here).
+            # Recorded first: if the document is deleted while the upload is
+            # in flight, the stopped handler re-queues its removal.
+            remote_writes.add("bedrock_kb")
             stage_document_sync(db, document)
         elif document.content_text:
             if settings.DO_KB_ENABLED:

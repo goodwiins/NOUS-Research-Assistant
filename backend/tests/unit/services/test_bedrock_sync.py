@@ -728,3 +728,56 @@ def test_arxiv_restages_only_documents_not_yet_indexed(enabled: Any) -> None:
     assert _needs_kb_sync(Document(do_kb_sync_status=COMPLETED)) is True
     assert _needs_kb_sync(Document(do_kb_sync_status=PENDING)) is True
     assert _needs_kb_sync(Document(do_kb_sync_status=None)) is True
+    # An indexed document whose full text was just upgraded must restage.
+    indexed = Document(do_kb_sync_status=COMPLETED, document_metadata=staged)
+    assert _needs_kb_sync(indexed, content_changed=True) is True
+
+
+def test_late_upload_for_a_deleted_document_requeues_its_removal(
+    session_factory: Any, enabled: Any
+) -> None:
+    """An upload that lands after cleanup must not leave indexable objects."""
+    from src.tasks.processing_tasks import _compensate_late_remote_writes
+
+    org_id = uuid4()
+    doc_id = _add(session_factory, org_id)
+    db = session_factory()
+    document = db.get(Document, doc_id)
+    document.is_deleted = True
+    document.do_kb_sync_status = COMPLETED  # the tick already settled removal
+    db.commit()
+
+    _compensate_late_remote_writes(db, doc_id, org_id, {"bedrock_kb"})
+    db.close()
+
+    doc = _load(session_factory, doc_id)
+    assert doc.do_kb_sync_status == PENDING
+    assert _state(doc)["stage_token"] and "job_id" not in _state(doc)
+
+
+def test_pipeline_stages_the_final_text_after_results_are_stored(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    from src.services.processing.multimodal_processing_service import (
+        MultimodalProcessingService,
+    )
+
+    org_id = uuid4()
+    doc_id = _add(session_factory, org_id, text="old")
+    db = session_factory()
+    document = db.get(Document, doc_id)
+    pipeline = MultimodalProcessingService.__new__(MultimodalProcessingService)
+    pipeline.db = db
+    results: dict[str, Any] = {
+        "success": True,
+        "errors": [],
+        "text_extraction": {"text_content": "new"},
+    }
+
+    asyncio.run(pipeline.update_document_with_results(document, results))
+    pipeline._stage_for_bedrock(document, results)
+    db.close()
+
+    assert s3.puts[f"{PREFIX}{org_id}/{doc_id}.txt"] == b"new"
+    assert results["bedrock_kb_stage"] == "staged"
+    assert _load(session_factory, doc_id).do_kb_sync_status == PENDING
