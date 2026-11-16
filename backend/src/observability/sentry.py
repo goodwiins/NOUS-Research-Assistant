@@ -40,17 +40,19 @@ def _make_traces_sampler(rate: float) -> Any:
     """Sample ``rate`` of transactions, never probe traffic.
 
     A continued trace keeps its parent's decision so distributed traces
-    (API -> Celery) stay whole.
+    (API -> Celery) stay whole. The probe exclusion is checked first: a
+    probe that arrives with a ``sentry-trace`` header must not be traced
+    just because the caller sampled its own trace.
     """
 
     def _sampler(sampling_context: dict[str, Any]) -> float:
-        parent_sampled = sampling_context.get("parent_sampled")
-        if parent_sampled is not None:
-            return 1.0 if parent_sampled else 0.0
         scope = sampling_context.get("asgi_scope") or {}
         path = str(scope.get("path") or "")
         if path.startswith(_UNTRACED_PATH_PREFIXES):
             return 0.0
+        parent_sampled = sampling_context.get("parent_sampled")
+        if parent_sampled is not None:
+            return 1.0 if parent_sampled else 0.0
         return rate
 
     return _sampler
