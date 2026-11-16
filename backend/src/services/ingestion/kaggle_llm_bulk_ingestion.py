@@ -418,10 +418,10 @@ Response (JSON array only):"""
                             },
                         )
 
-            # 4. Generate embedding (Qdrant vector store retired; nothing to
-            # persist to, but the embedding count is still surfaced in stats).
-            if self.enable_embeddings and text:
-                await self._generate_embeddings([text])
+            # No embedding step: the Qdrant vector store was retired, so an
+            # embedding computed here had nowhere to go and was discarded —
+            # paid Azure calls for nothing on every paper (GOO-487).
+            # ``enable_embeddings`` is still accepted for API compatibility.
 
             result["success"] = True
             return result
