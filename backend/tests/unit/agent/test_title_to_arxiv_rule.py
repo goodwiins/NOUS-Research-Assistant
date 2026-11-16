@@ -50,5 +50,9 @@ async def test_zero_hit_hint_points_paper_titles_at_search_arxiv() -> None:
     )
 
     assert result["total"] == 0
-    assert "search_arxiv" in result["suggestion"]
+    assert "on arXiv" in result["suggestion"]
     assert "do_kb_retrieve" in result["suggestion"]
+    # search_documents is also bound to the data lane, which has no
+    # search_arxiv, so the hint must not name that tool (see
+    # test_recovery_suggestions_are_callable.py).
+    assert "search_arxiv" not in result["suggestion"]

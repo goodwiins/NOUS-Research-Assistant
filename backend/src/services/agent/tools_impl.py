@@ -3484,7 +3484,7 @@ async def _tool_search_documents(
             # sat unused one call away (live miss 2026-08-12).
             payload["suggestion"] = (
                 "No title/filename matched. If the user named a published paper and "
-                "search_arxiv is available, look its title up with search_arxiv "
+                "an arXiv search tool is available, look its exact title up on arXiv "
                 "before saying it could not be found. Otherwise, if the user requested "
                 "a specific named source, state that it could not be identified and do "
                 "not substitute broad retrieval. This tool does not search document "
