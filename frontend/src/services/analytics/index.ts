@@ -202,7 +202,6 @@ export const getServiceStatus = () => {
     },
     api: {
       baseUrl: getPublicApiOrigin(),
-      authenticated: !!localStorage.getItem('authToken'),
     },
   };
 };
