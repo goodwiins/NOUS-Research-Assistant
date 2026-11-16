@@ -65,6 +65,18 @@ def _env_is_strict(info: ValidationInfo) -> bool:
     return _is_strict_environment(str(info.data.get("ENVIRONMENT", "development")))
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    """Whether a CORS origin points at the local machine (GOO-507)."""
+    try:
+        host = urlsplit(origin).hostname
+    except ValueError:
+        return False
+    return (host or "").lower() in _LOOPBACK_HOSTS
+
+
 def _longest_literal_hostname_run(pattern: str) -> int:
     """Longest contiguous literal hostname segment (project slug specificity)."""
     pattern = re.sub(r"\[[^\]]+\](?:[+*?]|\{[^}]+\})?", "", pattern)
@@ -258,12 +270,22 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        """Parse CORS_ORIGINS string into a list."""
+        """Parse CORS_ORIGINS string into a list.
+
+        GOO-507: CORS is registered with ``allow_credentials=True``, so in a
+        strict (non-throwaway) environment loopback origins are dropped — a
+        page on a developer's localhost must not make credentialed requests
+        to a shared deployment. Local/CI environments keep them.
+        """
+        strict = _is_strict_environment(self.ENVIRONMENT)
         if not self.CORS_ORIGINS:
-            return ["http://localhost:3000"]
-        return [
+            return [] if strict else ["http://localhost:3000"]
+        origins = [
             origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()
         ]
+        if strict:
+            origins = [o for o in origins if not _is_loopback_origin(o)]
+        return origins
 
     @property
     def cors_headers_list(self) -> List[str]:

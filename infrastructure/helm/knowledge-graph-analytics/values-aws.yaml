@@ -222,7 +222,9 @@ backend:
       value: "2"
     - name: CORS_ORIGINS
       # dev-app.goodwiinz.tech was retired (NXDOMAIN); the frontend is goodwiinz.tech.
-      value: "http://localhost:3000,http://127.0.0.1:3000,https://goodwiinz.tech,https://www.goodwiinz.tech"
+      # No loopback origins (GOO-507): CORS is credentialed, and the backend
+      # drops them in strict environments anyway.
+      value: "https://goodwiinz.tech,https://www.goodwiinz.tech"
     - name: FRONTEND_BASE_URL
       value: "https://goodwiinz.tech"
     - name: DB_ASYNC_POOL_SIZE
