@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState, type ComponentType } from 'react';
+import { useState, type ComponentType, type ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { KeyboardShortcuts } from '../KeyboardShortcuts';
@@ -12,7 +12,11 @@ vi.mock('next/navigation', () => ({
 
 type OverlayProps = { isOpen: boolean; onClose: () => void };
 
-function Harness({ Overlay }: { Overlay: ComponentType<OverlayProps> }) {
+function Harness({
+  Overlay,
+}: {
+  Overlay: ComponentType<OverlayProps>;
+}): ReactElement {
   const [open, setOpen] = useState(false);
   return (
     <>
