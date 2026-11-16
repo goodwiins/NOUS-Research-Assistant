@@ -408,6 +408,11 @@ class Settings(BaseSettings):
 
     # JWT Configuration
     JWT_SECRET_KEY: str = ""
+    # Server-only keys for short-lived, narrowly scoped Trigger credentials.
+    TRIGGER_AGENT_SIGNING_KEY: str = ""
+    TRIGGER_SERVICE_SIGNING_KEY: str = ""
+    # An existing active user whose tenancy and permissions bound service jobs.
+    TRIGGER_SERVICE_USER_ID: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_HOURS: int = 24
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30

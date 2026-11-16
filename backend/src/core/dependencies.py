@@ -48,7 +48,7 @@ async def get_current_user(
     result = await db.execute(stmt)
     user = result.scalars().first()
 
-    if user is None:
+    if user is None and not token_data.is_trigger_service:
         from src.core.user_provisioning import (
             SupabaseEmailLookupError,
             ensure_user_and_org,

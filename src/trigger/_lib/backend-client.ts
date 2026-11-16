@@ -1,7 +1,8 @@
 import { logger } from "@trigger.dev/sdk";
 import { z } from "zod";
+import { createHmac } from "node:crypto";
 
-const BACKEND_API_URL = process.env.BACKEND_API_URL ?? "http://localhost:8000";
+const BACKEND_API_URL = process.env.BACKEND_API_URL || "https://localhost:8000";
 
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1000;
@@ -91,10 +92,37 @@ async function request<T>(
   throw lastError ?? new Error(`Failed after ${MAX_RETRIES + 1} attempts`);
 }
 
-function authHeaders(): Record<string, string> {
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!key) return {};
-  return { Authorization: `Bearer ${key}` };
+function authHeaders(method: string, path: string): Record<string, string> {
+  const key = process.env.TRIGGER_SERVICE_SIGNING_KEY;
+  const userId = process.env.TRIGGER_SERVICE_USER_ID;
+  if (!key || Buffer.byteLength(key) < 32 || !userId) {
+    throw new Error("Trigger backend service identity is not configured");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(
+    JSON.stringify({ alg: "HS256", typ: "JWT" }),
+  ).toString("base64url");
+  const claims = Buffer.from(
+    JSON.stringify({
+      iss: "nous-trigger",
+      aud: "nous-backend",
+      sub: userId,
+      scope: "trigger:service",
+      method,
+      path,
+      iat: now,
+      exp: now + 120,
+    }),
+  ).toString("base64url");
+  const signingInput = `${header}.${claims}`;
+  const signature = createHmac("sha256", key)
+    .update(signingInput)
+    .digest("base64url");
+  return { Authorization: `Bearer ${signingInput}.${signature}` };
+}
+
+export function backendTokenHeaders(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}` };
 }
 
 export const backendClient = {
@@ -105,7 +133,9 @@ export const backendClient = {
   ) {
     return request<T>("GET", path, {
       schema,
-      headers: { ...authHeaders(), ...extraHeaders },
+      headers: extraHeaders?.Authorization
+        ? extraHeaders
+        : { ...authHeaders("GET", path), ...extraHeaders },
     });
   },
 
@@ -118,7 +148,9 @@ export const backendClient = {
     return request<T>("POST", path, {
       body,
       schema,
-      headers: { ...authHeaders(), ...extraHeaders },
+      headers: extraHeaders?.Authorization
+        ? extraHeaders
+        : { ...authHeaders("POST", path), ...extraHeaders },
     });
   },
 

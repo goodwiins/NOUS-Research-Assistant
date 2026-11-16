@@ -1,5 +1,9 @@
 import { logger, task, wait, metadata } from "@trigger.dev/sdk";
-import { backendClient, BackendApiError } from "../_lib/backend-client";
+import {
+  backendClient,
+  backendTokenHeaders,
+  BackendApiError,
+} from "../_lib/backend-client";
 import {
   JobStartResponseSchema,
   JobStatusResponseSchema,
@@ -11,13 +15,9 @@ const MAX_POLL_ATTEMPTS = 120;
 const POLL_INTERVAL_SECONDS = 3;
 const APPROVAL_ID_RE = /^[a-f0-9]{64}$/;
 
-function userAuth(accessToken: string): Record<string, string> {
-  return { Authorization: `Bearer ${accessToken}` };
-}
-
 async function pollUntilDone(
   jobId: string,
-  accessToken: string,
+  backendToken: string,
   userId: string,
 ): Promise<{ status: string; result?: Record<string, unknown> }> {
   for (let i = 0; i < MAX_POLL_ATTEMPTS; i++) {
@@ -26,7 +26,7 @@ async function pollUntilDone(
       job = await backendClient.get(
         `/api/v1/agent/jobs/${jobId}`,
         JobStatusResponseSchema,
-        userAuth(accessToken),
+        backendTokenHeaders(backendToken),
       );
     } catch (err) {
       if (err instanceof BackendApiError && err.status === 404) {
@@ -84,7 +84,7 @@ async function pollUntilDone(
         `/api/v1/agent/confirm/${jobId}`,
         { confirmed: decision.confirmed, approval_id: approvalId },
         undefined,
-        userAuth(accessToken),
+        backendTokenHeaders(backendToken),
       );
 
       continue;
@@ -106,11 +106,22 @@ export const executeAgent = task({
     factor: 2,
   },
   run: async (payload: AgentExecutePayload) => {
-    const { accessToken, userId, ...requestFields } = payload;
+    const { backendToken, userId, ...requestFields } = payload;
+    // Keep run metadata bound to the signed subject, not an independently
+    // editable payload field. The backend verifies the signature on the call.
+    let ticketUserId: unknown;
+    try {
+      ticketUserId = JSON.parse(
+        Buffer.from(backendToken.split(".")[1], "base64url").toString("utf8"),
+      ).sub;
+    } catch {
+      throw new Error("Invalid agent task ticket");
+    }
+    if (ticketUserId !== userId)
+      throw new Error("Agent task identity mismatch");
 
     logger.info("Starting durable agent execution", { userId });
     metadata.set("status", "running");
-    metadata.set("userId", userId);
 
     const backendRequest = {
       messages: requestFields.messages,
@@ -125,13 +136,14 @@ export const executeAgent = task({
       "/api/v1/agent/execute",
       backendRequest,
       JobStartResponseSchema,
-      userAuth(accessToken),
+      backendTokenHeaders(backendToken),
     );
 
     metadata.set("backendJobId", job_id);
+    metadata.set("userId", userId);
     logger.info("Backend job created", { jobId: job_id });
 
-    const result = await pollUntilDone(job_id, accessToken, userId);
+    const result = await pollUntilDone(job_id, backendToken, userId);
 
     metadata.set("status", result.status);
     logger.info("Agent execution finished", {
