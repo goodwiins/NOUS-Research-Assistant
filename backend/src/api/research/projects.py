@@ -553,28 +553,31 @@ async def add_document_to_project(
                 )
                 db.add(kg_job)
                 # Flush so kg_job.id is populated for the enqueue registration.
-                # celery_task_id is intentionally NOT set here and the row stays
-                # PENDING: the worker stamps celery_task_id via start_job when it
-                # picks the job up, so the create-time value is redundant — and
-                # unavailable anyway, because enqueue_after_commit_apply_async
-                # fires the apply_async only *after* the commit below (closing
-                # the worker-reads-before-commit race), returning no task id to
-                # read pre-commit. The enqueue is dropped if the transaction
-                # rolls back; a broker outage in the post-commit window leaves
-                # the job PENDING/celery_task_id=NULL, which the lost-job
-                # reconciler (src.tasks.reconcile_jobs) re-enqueues.
+                # celery_task_id cannot be set pre-commit: the
+                # enqueue_after_commit_apply_async dispatch fires only *after*
+                # the commit below (closing the worker-reads-before-commit
+                # race). It is recorded right after that commit instead, once
+                # the message landed (GOO-463), so the lost-job reconciler sees
+                # a backlogged job as dispatched. The enqueue is dropped if the
+                # transaction rolls back; a broker outage in the post-commit
+                # window leaves the job PENDING/celery_task_id=NULL, which the
+                # lost-job reconciler (src.tasks.reconcile_jobs) re-enqueues.
                 await db.flush()
 
-                from src.tasks.enqueue import enqueue_after_commit_apply_async
+                from src.tasks.enqueue import (
+                    enqueue_after_commit_apply_async,
+                    record_dispatched_task_id,
+                )
                 from src.tasks.processing_tasks import kg_extract_entities_job
 
-                enqueue_after_commit_apply_async(
+                dispatch = enqueue_after_commit_apply_async(
                     db,
                     kg_extract_entities_job,
                     args=[str(kg_job.id)],
                     queue="entity_processing",
                 )
                 await db.commit()
+                await record_dispatched_task_id(db, kg_job.id, dispatch.task_id)
                 kg_job_id = str(kg_job.id)
 
                 logger.info(

@@ -12,6 +12,10 @@ This beat task recovers exactly that class. Every
 stuck-job sweep so recovery runs first) it selects PENDING, non-deleted,
 never-dispatched (``celery_task_id IS NULL``) rows untouched for that long and
 re-enqueues each the same way its origin site did (see ``_REENQUEUE_BY_JOB_TYPE``).
+NULL means "never dispatched" only because every producer, and this task's own
+re-enqueue, records the published message's id once it landed
+(``src.tasks.enqueue.record_dispatched_task_id``, GOO-463); a job merely queued
+behind a backlog therefore carries an id and is never published twice.
 Each re-enqueue bumps the attempt counter (``retry_count`` — a never-started
 job's counter is otherwise untouched, so there is no collision with the worker's
 own retry bookkeeping); after ``LOST_JOB_RECONCILE_MAX_ATTEMPTS`` (default 3) the
@@ -150,8 +154,15 @@ def reconcile_lost_processing_jobs() -> Mapping[str, object]:
             # A broker error here propagates to the outer handler (whole run
             # rolls back and retries next tick) — expected: if the broker is
             # still down there is nothing to recover to.
-            celery_app.send_task(task_name, **send_kwargs)
+            sent = celery_app.send_task(task_name, **send_kwargs)
 
+            # GOO-463: record the published message's id so a re-enqueue that
+            # waits behind a backlog past the stale window is not re-published
+            # on the next tick. If that message is itself lost, the stuck-job
+            # sweep fails the row (it only ever re-drives NULL-id rows here).
+            sent_task_id = getattr(sent, "id", None)
+            if isinstance(sent_task_id, str) and sent_task_id:
+                job.celery_task_id = sent_task_id
             job.retry_count = attempts + 1
             summary["reenqueued"] += 1
             logger.info(

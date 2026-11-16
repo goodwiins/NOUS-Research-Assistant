@@ -12,10 +12,18 @@ zero-arg thunks, and a single pair of listeners per session drains them on
 ``after_commit`` and discards them on ``after_rollback``. Draining before firing
 means a raising enqueue can't block its siblings and a second commit can't
 re-fire an already-fired registration.
+
+Each registration returns an ``EnqueueHandle`` whose ``task_id`` is the id of
+the published message once the post-commit dispatch succeeded (``None`` before
+commit, after a rollback, or when the dispatch raised). Producers of
+``ProcessingJob`` rows pass it to ``record_dispatched_task_id`` so the lost-job
+reconciler can tell a message queued behind a backlog from one that never
+reached the broker (GOO-463).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import structlog
@@ -33,16 +41,29 @@ _PENDING_KEY = "_enqueue_after_commit_pending"
 _Pending = list[tuple[Any, Callable[[], Any]]]
 
 
+@dataclass
+class EnqueueHandle:
+    """Result slot for one deferred enqueue; filled when the dispatch fires."""
+
+    result: Any = None
+
+    @property
+    def task_id(self) -> str | None:
+        """The published message's id, or None if nothing was published."""
+        task_id = getattr(self.result, "id", None)
+        return task_id if isinstance(task_id, str) and task_id else None
+
+
 def enqueue_after_commit(
     db: AsyncSession, task: Any, *args: Any, **kwargs: Any
-) -> None:
+) -> EnqueueHandle:
     """Register ``task.delay(*args, **kwargs)`` to fire after ``db`` commits.
 
     Dropped (never fired) if the session rolls back instead. Registrations fire
     in order on the next successful commit; a raising ``delay`` is logged, not
     propagated.
     """
-    _register(db, task, lambda: task.delay(*args, **kwargs))
+    return _register(db, task, lambda: task.delay(*args, **kwargs))
 
 
 def enqueue_after_commit_apply_async(
@@ -52,24 +73,79 @@ def enqueue_after_commit_apply_async(
     args: list[Any] | tuple[Any, ...] | None = None,
     kwargs: dict[str, Any] | None = None,
     **options: Any,
-) -> None:
+) -> EnqueueHandle:
     """Register ``task.apply_async(args, kwargs, **options)`` for after commit.
 
     The ``.apply_async`` sibling of ``enqueue_after_commit``, for callers that
     need a ``queue=`` (or other apply_async option) override. Same post-commit /
     drop-on-rollback semantics.
     """
-    _register(db, task, lambda: task.apply_async(args=args, kwargs=kwargs, **options))
+    return _register(
+        db, task, lambda: task.apply_async(args=args, kwargs=kwargs, **options)
+    )
 
 
-def _register(db: AsyncSession, task: Any, thunk: Callable[[], Any]) -> None:
+async def record_dispatched_task_id(
+    db: AsyncSession, job_id: Any, task_id: str | None
+) -> None:
+    """Persist ``task_id`` on a ``ProcessingJob`` whose message was published.
+
+    Call after the commit that fired the dispatch. The lost-job reconciler
+    re-enqueues PENDING rows with ``celery_task_id IS NULL`` as "never
+    dispatched"; without this stamp a message merely queued behind a backlog
+    looks lost and is published again (GOO-463).
+
+    Only a still-PENDING, never-stamped row is updated, so a worker that already
+    claimed the job (``start_job`` stamps its own id) is never overwritten.
+    No-op without a task id. Best effort: the message is already in the broker,
+    so a failed stamp is logged and rolled back rather than failing the caller —
+    that row just keeps the pre-fix reconciler behaviour.
+    """
+    if not isinstance(task_id, str) or not task_id:
+        return
+    from sqlalchemy import update
+
+    from src.models.processing import JobStatus, ProcessingJob
+
+    try:
+        await db.execute(
+            update(ProcessingJob)
+            .where(
+                ProcessingJob.id == job_id,
+                ProcessingJob.status == JobStatus.PENDING,
+                ProcessingJob.celery_task_id.is_(None),
+            )
+            .values(celery_task_id=task_id)
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+    except Exception:
+        logger.warning(
+            "record_dispatched_task_id_failed",
+            job_id=str(job_id),
+            task_id=task_id,
+            exc_info=True,
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            logger.warning("record_dispatched_task_id_rollback_failed", exc_info=True)
+
+
+def _register(db: AsyncSession, task: Any, thunk: Callable[[], Any]) -> EnqueueHandle:
+    handle = EnqueueHandle()
+
+    def _fire_and_capture() -> None:
+        handle.result = thunk()
+
     sync_session = db.sync_session
     pending: _Pending | None = sync_session.info.get(_PENDING_KEY)
     if pending is None:
         pending = []
         sync_session.info[_PENDING_KEY] = pending
         _install_listeners(sync_session)
-    pending.append((task, thunk))
+    pending.append((task, _fire_and_capture))
+    return handle
 
 
 def _install_listeners(sync_session: Session) -> None:
