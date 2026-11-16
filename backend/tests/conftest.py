@@ -52,7 +52,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     Replaces the removed src.core.security.create_access_token.
     Accepts the same {sub, email, organization_id, role} dict for backward compat.
     """
-    from jose import jwt as jose_jwt
+    import jwt as pyjwt
 
     if expires_delta is None:
         expires_delta = timedelta(hours=1)
@@ -67,6 +67,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         "exp": datetime.utcnow() + expires_delta,
         "iat": datetime.utcnow(),
         "iss": "supabase",
+        # Real Supabase access tokens always carry this; verify_token requires
+        # it (PyJWT rejects a missing `aud` once an audience is expected).
+        "aud": "authenticated",
         "role": "authenticated",
         "app_metadata": {"role": role},
     }
@@ -74,7 +77,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     secret = os.environ.get(
         "SUPABASE_JWT_SECRET", "super-secret-jwt-token-with-at-least-32-characters-long"
     )
-    return jose_jwt.encode(payload, secret, algorithm="HS256")
+    return pyjwt.encode(payload, secret, algorithm="HS256")
 
 
 # ============================================================================

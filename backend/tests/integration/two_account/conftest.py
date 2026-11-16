@@ -42,10 +42,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
 
+import jwt
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
 from sqlalchemy import create_engine, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (

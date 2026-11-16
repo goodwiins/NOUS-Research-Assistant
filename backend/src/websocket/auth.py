@@ -10,10 +10,10 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
+import jwt
 import redis.asyncio as redis
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import ExpiredSignatureError, JWTError, jwt
 from redis.asyncio import Redis
 from sqlalchemy import select
 
@@ -21,6 +21,7 @@ from src.models.organization import Organization
 from src.models.user import User
 
 from ..core.config import settings
+from ..core.security import check_iat_is_numeric
 
 logger = logging.getLogger(__name__)
 
@@ -317,12 +318,16 @@ class WebSocketAuthenticator:
                 logger.error("SUPABASE_JWT_SECRET not configured for WebSocket auth")
                 return None
 
+            # `verify_iat: False` keeps python-jose's tolerance of a future
+            # `iat` (clock skew); see _DECODE_OPTIONS in src/core/security.py.
             payload = jwt.decode(
                 token,
                 settings.SUPABASE_JWT_SECRET,
                 algorithms=["HS256"],
                 audience="authenticated",
+                options={"verify_iat": False},
             )
+            check_iat_is_numeric(payload)
 
             # Check required claims
             user_id = payload.get("sub")
@@ -336,10 +341,10 @@ class WebSocketAuthenticator:
 
             return payload
 
-        except ExpiredSignatureError:
+        except jwt.ExpiredSignatureError:
             logger.warning("JWT token has expired")
             return None
-        except JWTError as e:
+        except jwt.PyJWTError as e:
             logger.warning(f"JWT validation error: {e}")
             return None
         except Exception as e:

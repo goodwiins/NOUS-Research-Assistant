@@ -4,10 +4,10 @@ import asyncio
 import time
 from typing import Any
 
+import jwt
 import pytest
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import StreamingResponse
-from jose import jwt
 from sqlalchemy import select
 from starlette.testclient import TestClient
 

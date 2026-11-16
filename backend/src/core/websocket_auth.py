@@ -15,11 +15,11 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+import jwt
 from fastapi import WebSocket
-from jose import jwt
 
 from .config import settings
-from .security import verify_token
+from .security import peek_unverified_claims, verify_token
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ class WebSocketAuthenticator:
             token_data = verify_token(token)
             if not token_data:
                 try:
-                    claims = jwt.get_unverified_claims(token)
+                    claims = peek_unverified_claims(token)
                     expires_at = claims.get("exp")
                     if expires_at and datetime.fromtimestamp(
                         expires_at, tz=timezone.utc
@@ -173,7 +173,7 @@ class WebSocketAuthenticator:
 
         except WebSocketAuthError:
             raise
-        except jwt.JWTError as e:
+        except jwt.PyJWTError as e:
             logger.warning(f"WebSocket authentication failed: Invalid token - {e}")
             raise WebSocketAuthError(
                 f"Invalid authentication token: {str(e)}", code=4003

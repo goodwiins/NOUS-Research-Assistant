@@ -266,7 +266,7 @@ class TokenManager:
 
         except jwt.ExpiredSignatureError:
             return None
-        except jwt.JWTError as e:
+        except jwt.PyJWTError as e:
             logger.warning(f"Invalid token: {e}")
             return None
 
@@ -305,7 +305,7 @@ class TokenManager:
             )
 
             return True
-        except jwt.JWTError:
+        except jwt.PyJWTError:
             return False
 
     def revoke_all_user_tokens(self, user_id: str) -> None:
