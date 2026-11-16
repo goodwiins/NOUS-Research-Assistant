@@ -67,6 +67,43 @@ export function trackStreamAcceptance(
 export const STREAM_INTERRUPTED_NOTE =
   'Connection lost — this answer stopped partway. Send your message again to retry.';
 
+/**
+ * Trigger.dev run statuses that end a run without a successful completion.
+ * A run in any of these never changes again, so a durable-run poll must stop.
+ */
+const DURABLE_RUN_FAILURE_STATUSES = new Set([
+  'CANCELED',
+  'FAILED',
+  'CRASHED',
+  'INTERRUPTED',
+  'SYSTEM_FAILURE',
+  'EXPIRED',
+  'TIMED_OUT',
+]);
+
+/**
+ * Classify a polled Trigger.dev run status. `null` means the run can still
+ * change, so keep polling. The pollers used to hand-list COMPLETED-with-output,
+ * FAILED and CRASHED, and spun for the full ten-minute budget on a canceled,
+ * timed-out or expired run, or one that completed with no output (GOO-601).
+ */
+export function durableRunOutcome(
+  status: string | null | undefined
+): 'completed' | 'failed' | null {
+  if (status === 'COMPLETED') return 'completed';
+  if (status && DURABLE_RUN_FAILURE_STATUSES.has(status)) return 'failed';
+  return null;
+}
+
+function durableRunFailureMessage(
+  run: { status: string; error: unknown },
+  fallback: string
+): string {
+  if (typeof run.error === 'string' && run.error) return run.error;
+  if (run.status === 'CANCELED') return 'This request was cancelled.';
+  return fallback;
+}
+
 const DEFAULT_PAGE_CONTEXT: PageContext = {
   type: 'unknown',
   label: 'Dashboard',
@@ -816,10 +853,12 @@ export const useAgentChatStore = create<AgentChatStore>()(
             return;
           }
 
-          if (run.status === 'COMPLETED' && run.output) {
-            const result = run.output as Record<string, unknown>;
+          const outcome = durableRunOutcome(run.status);
+
+          if (outcome === 'completed') {
+            const result = (run.output ?? {}) as Record<string, unknown>;
             const content =
-              (result.result as Record<string, unknown>)?.message ??
+              (result.result as Record<string, unknown> | undefined)?.message ??
               result.status ??
               'Done';
             set((state) => {
@@ -841,7 +880,7 @@ export const useAgentChatStore = create<AgentChatStore>()(
             return;
           }
 
-          if (run.status === 'FAILED' || run.status === 'CRASHED') {
+          if (outcome === 'failed') {
             set((state) => {
               const idx = state.messages.findIndex(
                 (m) => m.id === placeholderId
@@ -850,9 +889,10 @@ export const useAgentChatStore = create<AgentChatStore>()(
                 state.messages[idx] = {
                   id: placeholderId,
                   role: 'assistant',
-                  content:
-                    run.error ||
-                    'Sorry, something went wrong. Please try again.',
+                  content: durableRunFailureMessage(
+                    run,
+                    'Sorry, something went wrong. Please try again.'
+                  ),
                   timestamp: new Date(),
                   isStreaming: false,
                   isError: true,
@@ -1303,10 +1343,12 @@ export const useAgentChatStore = create<AgentChatStore>()(
             // stable anchor.)
             if (!isCurrentGeneration()) return;
 
-            if (run.status === 'COMPLETED' && run.output) {
-              const result = run.output as Record<string, unknown>;
+            const outcome = durableRunOutcome(run.status);
+            if (outcome === 'completed') {
+              const result = (run.output ?? {}) as Record<string, unknown>;
               const content =
-                (result.result as Record<string, unknown>)?.message ??
+                (result.result as Record<string, unknown> | undefined)
+                  ?.message ??
                 result.status ??
                 'Done';
               set((state) => {
@@ -1328,7 +1370,7 @@ export const useAgentChatStore = create<AgentChatStore>()(
               });
               return;
             }
-            if (run.status === 'FAILED' || run.status === 'CRASHED') {
+            if (outcome === 'failed') {
               set((state) => {
                 const lastAsst = [...state.messages]
                   .reverse()
@@ -1338,7 +1380,10 @@ export const useAgentChatStore = create<AgentChatStore>()(
                     (m) => m.id === lastAsst.id
                   );
                   if (idx !== -1) {
-                    state.messages[idx].content = run.error || 'Action failed.';
+                    state.messages[idx].content = durableRunFailureMessage(
+                      run,
+                      'Action failed.'
+                    );
                     state.messages[idx].isStreaming = false;
                   }
                 }
