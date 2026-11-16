@@ -33,6 +33,7 @@ set; every entry point is a no-op otherwise.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -47,6 +48,13 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.models.document import Document
+from src.services.documents.satellite_state import (
+    PENDING_WRITES,
+    begin_write,
+    finish_write,
+    pending_writes,
+    retire_settled_writes,
+)
 from src.shared.enums import SatelliteSyncStatus
 
 logger = logging.getLogger(__name__)
@@ -54,6 +62,7 @@ logger = logging.getLogger(__name__)
 META_KEY = "bedrock_sync"
 MAX_ATTEMPTS = 3
 STAGE_RETRY_BATCH = 10  # failed uploads retried per tick
+WRITE_SATELLITE = "bedrock_kb"  # key under ``pending_satellite_writes``
 CONTENT_EXTENSIONS = ("txt", "pdf", "png")
 SIDECAR_SUFFIX = ".metadata.json"
 BEDROCK_REGION = "us-east-1"  # matches bedrock_retrieval.retrieve_chunks
@@ -181,17 +190,48 @@ def _write_state(document: DocumentRow, state: dict[str, Any]) -> None:
     document.document_metadata = {**(document.document_metadata or {}), META_KEY: state}
 
 
-def _mark_pending(document: DocumentRow) -> None:
+def _text_sha(text: Optional[str]) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _mark_pending(document: DocumentRow, *, text: Optional[str] = None) -> None:
     """Pending, unclaimed, fresh token and attempt budget."""
-    _write_state(
-        document,
-        {
-            "stage_token": uuid4().hex,
-            "staged_at": datetime.now(timezone.utc).isoformat(),
-            "attempts": 0,
-        },
-    )
+    state: dict[str, Any] = {
+        "stage_token": uuid4().hex,
+        "staged_at": datetime.now(timezone.utc).isoformat(),
+        "attempts": 0,
+    }
+    if text is not None:
+        state["text_sha256"] = _text_sha(text)
+    _write_state(document, state)
     document.do_kb_sync_status = _PENDING
+
+
+def staged_text_matches(document: DocumentRow) -> bool:
+    """False when the row's text differs from the text last uploaded.
+
+    Any path may rewrite ``content_text`` (an upgrade, a storage repair), so
+    callers compare instead of tracking each one. Unknown (no hash) is True.
+    """
+    staged = _state(document).get("text_sha256")
+    return not staged or staged == _text_sha(document.content_text)
+
+
+def begin_stage_write(document: DocumentRow) -> str:
+    """Record an upload about to start. The caller commits BEFORE uploading.
+
+    The token outlives a worker that dies mid-upload. If the document is
+    deleted meanwhile, the tick queues its removal again once the writer's
+    lease has passed (``_requeue_orphaned_uploads``).
+    """
+    token = uuid4().hex
+    begin_write(document, WRITE_SATELLITE, token)
+    return token
+
+
+def finish_stage_write(document: DocumentRow, token: str) -> None:
+    """Settle the upload's token. The caller commits with the staging outcome."""
+    finish_write(document, WRITE_SATELLITE, token)
 
 
 def mark_deleted(document: DocumentRow) -> None:
@@ -262,7 +302,7 @@ def stage_document_sync(db: Session, document: DocumentRow) -> StageOutcome:
         logger.warning("bedrock_kb stage upload error", exc_info=True)
         db.refresh(document, attribute_names=_FAILURE_RECHECK, with_for_update=True)
         return _record_stage_failure(document)
-    _mark_pending(document)
+    _mark_pending(document, text=document.content_text)
     return StageOutcome.STAGED
 
 
@@ -291,7 +331,7 @@ async def stage_document(session: AsyncSession, document: DocumentRow) -> StageO
             document, attribute_names=_FAILURE_RECHECK, with_for_update=True
         )
         return _record_stage_failure(document)
-    _mark_pending(document)
+    _mark_pending(document, text=document.content_text)
     return StageOutcome.STAGED
 
 
@@ -381,13 +421,22 @@ async def _settle_job(
     # COMPLETE does not mean every document was ingested: the job also reports
     # a failed-document count, and ``failureReasons`` need not name each one.
     # When more documents failed than we can name, none of the live claimed
-    # documents is provably indexed, so they keep their retry budget.
-    failed_count = int(
-        (job.get("statistics") or {}).get("numberOfDocumentsFailed") or 0
+    # documents is provably indexed, so they keep their retry budget. Both
+    # ``statistics`` and the count are optional in the API: a missing count is
+    # unknown, never zero.
+    statistics = job.get("statistics")
+    failed_count = (
+        statistics.get("numberOfDocumentsFailed")
+        if isinstance(statistics, dict)
+        else None
     )
-    unattributed = failed_count > sum(1 for _, named in claimed if named)
-    if unattributed:
-        summary["unattributed_failures"] = failed_count
+    unattributed = failed_count is None or int(failed_count) > sum(
+        1 for _, named in claimed if named
+    )
+    if complete and unattributed:
+        summary["unattributed_failures"] = (
+            "unknown" if failed_count is None else int(failed_count)
+        )
     for document, named in claimed:
         # A deleted document has no object left to fail ingestion.
         suspect = named or (unattributed and not document.is_deleted)
@@ -429,6 +478,46 @@ async def _settle_claimed(
             return True
         await _settle_job(db, job_id, document_ids, job, summary)
     return False
+
+
+async def _requeue_orphaned_uploads(db: AsyncSession, summary: dict[str, Any]) -> None:
+    """Queue removal again for deleted documents an upload may have outlived.
+
+    A staging upload can land after the tick removed a deleted document's
+    objects, and its worker can die before saying so. The upload's token is
+    still on the row. Once the writer's lease has passed, whatever it sent has
+    landed, so one more removal (objects, then a job) is final.
+    """
+    document_ids = (
+        (
+            await db.execute(
+                select(Document.id).where(
+                    Document.is_deleted.is_(True),
+                    Document.document_metadata[PENDING_WRITES][WRITE_SATELLITE]
+                    .as_string()
+                    .is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    await db.rollback()
+    for document_id in document_ids:
+        document = await _lock_row(db, document_id)
+        if document is None or not document.is_deleted:
+            await db.rollback()
+            continue
+        now = datetime.now(timezone.utc)
+        before = pending_writes(document, WRITE_SATELLITE)
+        # Drops only tokens whose writers were already dead at ``now``.
+        retire_settled_writes(document, WRITE_SATELLITE, now)
+        if not before or pending_writes(document, WRITE_SATELLITE):
+            await db.rollback()  # a writer may still be uploading: wait
+            continue
+        mark_deleted(document)
+        summary["requeued_orphans"] = summary.get("requeued_orphans", 0) + 1
+        await db.commit()
 
 
 def _stage_failures_column() -> Any:
@@ -492,7 +581,7 @@ async def _retry_failed_stages(
             _record_stage_failure(document)
             summary["stage_retry_failed"] = summary.get("stage_retry_failed", 0) + 1
         else:
-            _mark_pending(document)
+            _mark_pending(document, text=document.content_text)
             summary["restaged"] = summary.get("restaged", 0) + 1
         await db.commit()
 
@@ -601,6 +690,7 @@ async def run_sync_tick(
     if not bedrock_sync_enabled():
         summary["skipped"] = "disabled"
         return summary
+    await _requeue_orphaned_uploads(db, summary)
     if await _settle_claimed(db, client, summary):
         return summary
     if await _job_running_elsewhere(client):

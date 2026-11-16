@@ -27,6 +27,8 @@ from src.models.document import Document
 from src.services.bedrock_sync import (
     StageOutcome,
     bedrock_sync_enabled,
+    begin_stage_write,
+    finish_stage_write,
     not_indexed_clause,
     stage_document_sync,
 )
@@ -89,7 +91,10 @@ def backfill(
                     if document is None:
                         report.skipped += 1
                         continue
+                    write_token = begin_stage_write(document)
+                    db.commit()  # durable before the upload starts
                     outcome = stage(db, document)
+                    finish_stage_write(document, write_token)
                     db.commit()
                     if outcome is StageOutcome.STAGED:
                         report.staged += 1

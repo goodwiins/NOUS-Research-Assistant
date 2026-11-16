@@ -64,7 +64,7 @@ _COMPLETED = SatelliteSyncStatus.COMPLETED.value
 _PENDING = SatelliteSyncStatus.PENDING.value
 
 
-def _reconcilable_filters(*, do_kb_enabled: bool = True):
+def _reconcilable_filters(*, do_kb_enabled: bool = True, do_kb_redrive: bool = True):
     """Filter list selecting reconcilable documents.
 
     Single source of truth shared by the count, the org listing, and the
@@ -84,7 +84,11 @@ def _reconcilable_filters(*, do_kb_enabled: bool = True):
                 Document.processing_status == ProcessingStatus.COMPLETED,
                 or_(
                     Document.neo4j_index_status == _FAILED,
-                    Document.do_kb_sync_status == _FAILED if do_kb_enabled else False,
+                    (
+                        Document.do_kb_sync_status == _FAILED
+                        if do_kb_enabled and do_kb_redrive
+                        else False
+                    ),
                 ),
             ),
             and_(
@@ -367,9 +371,12 @@ def reconcile_satellite_indexes() -> dict:
     apply_mode = bool(settings_local.RECONCILER_APPLY)
     cap = max(1, int(settings_local.RECONCILER_MAX_DOCS_PER_RUN))
     page_size = max(1, int(settings_local.RECONCILER_BATCH_SIZE))
+    do_kb_enabled = bool(settings_local.DO_KB_ENABLED)
     # With Bedrock sync on, do_kb_sync_status belongs to its queue tick
-    # (src.tasks.bedrock_sync_tasks); re-driving it here via DO KB would fight it.
-    do_kb_enabled = bool(settings_local.DO_KB_ENABLED) and not bedrock_sync_enabled()
+    # (src.tasks.bedrock_sync_tasks); re-driving it here via DO KB would fight
+    # it. Cleanup of a deleted document's DO KB data source still runs: that
+    # remote copy does not go away because the write path moved.
+    do_kb_redrive = do_kb_enabled and not bedrock_sync_enabled()
 
     summary: dict = {
         "mode": "apply" if apply_mode else "report-only",
@@ -401,9 +408,10 @@ def reconcile_satellite_indexes() -> dict:
         # order. Failed/unknown writes rotate behind untouched work across runs.
         # DO-disabled-only rows remain reported but consume no actionable budget.
         actionable = _reconcilable_filters(
-            do_kb_enabled=do_kb_enabled if apply_mode else True
+            do_kb_enabled=do_kb_enabled if apply_mode else True,
+            do_kb_redrive=do_kb_redrive if apply_mode else True,
         )
-        if apply_mode and not do_kb_enabled:
+        if apply_mode and not do_kb_redrive:
             summary["do_kb_skipped_disabled"] = (
                 summary["eligible"] - db.query(Document.id).filter(*actionable).count()
             )
@@ -514,7 +522,7 @@ def reconcile_satellite_indexes() -> dict:
                             summary["kg_still_failed"] += 1
 
                     if needs_kb:
-                        if not do_kb_enabled:
+                        if not do_kb_redrive:
                             summary["do_kb_skipped_disabled"] += 1
                             logger.info(
                                 "reconciler: DO KB disabled — leaving "

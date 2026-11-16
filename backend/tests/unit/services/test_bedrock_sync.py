@@ -132,7 +132,11 @@ class FakeBedrock:
             )
         job_id = f"job-{len(self.started) + 1}"
         self.started.append(job_id)
-        self.jobs[job_id] = {"ingestionJobId": job_id, "status": "STARTING"}
+        self.jobs[job_id] = {
+            "ingestionJobId": job_id,
+            "status": "STARTING",
+            "statistics": {"numberOfDocumentsFailed": 0},
+        }
         return {"ingestionJob": dict(self.jobs[job_id])}
 
 
@@ -507,6 +511,29 @@ def test_complete_job_with_unnamed_failures_completes_nothing(
         assert _state(doc)["attempts"] == 1
 
 
+@pytest.mark.parametrize("statistics", [None, {}, {"numberOfDocumentsScanned": 2}])
+def test_complete_job_without_a_failed_count_completes_nothing(
+    session_factory: Any, s3: Any, enabled: Any, statistics: Any
+) -> None:
+    """The API may omit the statistics or the count: unknown is not zero."""
+    doc_id = _add(session_factory)
+    _stage(session_factory, doc_id)
+    client = FakeBedrock()
+    _tick(session_factory, client, s3)
+    client.jobs["job-1"]["status"] = "COMPLETE"
+    if statistics is None:
+        del client.jobs["job-1"]["statistics"]
+    else:
+        client.jobs["job-1"]["statistics"] = statistics
+
+    summary = _tick(session_factory, client, s3)
+
+    doc = _load(session_factory, doc_id)
+    assert summary["completed"] == 0 and summary["retried"] == 1
+    assert summary["unattributed_failures"] == "unknown"
+    assert doc.do_kb_sync_status == PENDING and _state(doc)["attempts"] == 1
+
+
 def test_complete_job_with_every_failure_named_completes_the_rest(
     session_factory: Any, s3: Any, enabled: Any
 ) -> None:
@@ -789,6 +816,81 @@ def test_arxiv_restages_only_documents_not_yet_indexed(enabled: Any) -> None:
     assert _needs_kb_sync(indexed, content_changed=True) is True
 
 
+def test_arxiv_restages_when_text_differs_from_the_staged_upload(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    """A storage repair rewrites the text without reporting an upgrade."""
+    from src.services.arxiv.persistence import _needs_kb_sync
+
+    doc_id = _add(session_factory, text="old")
+    _stage(session_factory, doc_id)
+    db = session_factory()
+    document = db.get(Document, doc_id)
+    document.do_kb_sync_status = COMPLETED
+    assert _needs_kb_sync(document) is False
+
+    document.content_text = "repaired"
+
+    assert _needs_kb_sync(document) is True
+    db.close()
+
+
+def _add_deleted_with_upload_token(session_factory: Any, *, minutes_ago: int) -> Any:
+    from datetime import datetime, timedelta, timezone
+
+    from src.services.documents.satellite_state import begin_write
+
+    doc_id = _add(session_factory)
+    db = session_factory()
+    document = db.get(Document, doc_id)
+    document.is_deleted = True
+    document.do_kb_sync_status = COMPLETED  # removal already settled
+    begin_write(
+        document,
+        bs.WRITE_SATELLITE,
+        "tok",
+        now=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago),
+    )
+    db.commit()
+    db.close()
+    return doc_id
+
+
+def test_tick_requeues_removal_after_a_dead_worker_upload(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    """The worker died after uploading; only its durable token says so."""
+    from src.services.documents.satellite_state import pending_writes
+
+    doc_id = _add_deleted_with_upload_token(session_factory, minutes_ago=20)
+    client = FakeBedrock()
+
+    summary = _tick(session_factory, client, s3)
+
+    doc = _load(session_factory, doc_id)
+    assert summary["requeued_orphans"] == 1
+    assert pending_writes(doc, bs.WRITE_SATELLITE) == {}
+    # Removed again and covered by a job started in the same tick.
+    assert any(str(doc_id) in key for key in s3.deletes)
+    assert doc.do_kb_sync_status == PENDING and _state(doc)["job_id"] == "job-1"
+
+
+def test_tick_waits_while_an_upload_may_still_be_running(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    from src.services.documents.satellite_state import pending_writes
+
+    doc_id = _add_deleted_with_upload_token(session_factory, minutes_ago=1)
+    client = FakeBedrock()
+
+    summary = _tick(session_factory, client, s3)
+
+    doc = _load(session_factory, doc_id)
+    assert "requeued_orphans" not in summary and client.started == []
+    assert doc.do_kb_sync_status == COMPLETED
+    assert "tok" in pending_writes(doc, bs.WRITE_SATELLITE)
+
+
 def test_late_upload_for_a_deleted_document_requeues_its_removal(
     session_factory: Any, enabled: Any
 ) -> None:
@@ -801,6 +903,7 @@ def test_late_upload_for_a_deleted_document_requeues_its_removal(
     document = db.get(Document, doc_id)
     document.is_deleted = True
     document.do_kb_sync_status = COMPLETED  # the tick already settled removal
+    token = bs.begin_stage_write(document)
     db.commit()
 
     _compensate_late_remote_writes(db, doc_id, org_id, {"bedrock_kb"})
@@ -809,6 +912,10 @@ def test_late_upload_for_a_deleted_document_requeues_its_removal(
     doc = _load(session_factory, doc_id)
     assert doc.do_kb_sync_status == PENDING
     assert _state(doc)["stage_token"] and "job_id" not in _state(doc)
+    # The handler ran after the upload, so its token is settled here.
+    from src.services.documents.satellite_state import pending_writes
+
+    assert token not in pending_writes(doc, bs.WRITE_SATELLITE)
 
 
 def test_pipeline_stages_the_final_text_after_results_are_stored(

@@ -26,10 +26,19 @@ from src.models.graph import EntityType as GraphEntityType
 from src.models.graph import ExtractionMethod as GraphExtractionMethod
 from src.models.graph import RelationshipType as GraphRelationshipType
 from src.models.processing import JobStatus, JobType, ProcessingJob
-from src.services.bedrock_sync import bedrock_sync_enabled
+from src.services.bedrock_sync import WRITE_SATELLITE as BEDROCK_WRITE_SATELLITE
+from src.services.bedrock_sync import (
+    bedrock_sync_enabled,
+    begin_stage_write,
+    finish_stage_write,
+)
 from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
 from src.services.bedrock_sync import stage_document_sync
-from src.services.documents.satellite_state import begin_write, finish_write
+from src.services.documents.satellite_state import (
+    begin_write,
+    finish_write,
+    pending_writes,
+)
 from src.services.knowledge_graph.knowledge_graph_service import (
     GraphExtractor,
     knowledge_graph_service,
@@ -304,7 +313,10 @@ def _compensate_late_remote_writes(
         if "bedrock_kb" in writes:
             # The upload may have landed after the queue tick removed this
             # document's objects. Queue the removal again; the tick deletes
-            # the objects and runs a job so nothing stale is indexed.
+            # the objects and runs a job so nothing stale is indexed. That
+            # removal follows this attempt's upload, so its token is settled.
+            for token in list(pending_writes(current, BEDROCK_WRITE_SATELLITE)):
+                finish_write(current, BEDROCK_WRITE_SATELLITE, token)
             mark_bedrock_deleted(current)
             db.commit()
         if "graph" in writes:
@@ -620,10 +632,14 @@ def process_document_ingestion(self, job_id: str):
         if document.content_text and bedrock_sync_enabled():
             # Bedrock: stage only. The queue tick marks completed once an
             # ingestion job covering the file finishes (never here).
-            # Recorded first: if the document is deleted while the upload is
-            # in flight, the stopped handler re-queues its removal.
+            # Recorded durably first: if the document is deleted while the
+            # upload is in flight, the stopped handler re-queues its removal,
+            # and if this worker dies instead the queue tick does.
+            bedrock_token = begin_stage_write(document)
+            commit_if_active()
             remote_writes.add("bedrock_kb")
             stage_document_sync(db, document)
+            finish_stage_write(document, bedrock_token)
         elif document.content_text:
             if settings.DO_KB_ENABLED:
                 # Visible in-flight marker; overwritten by the outcome below.
@@ -966,7 +982,10 @@ def generate_embeddings(self, job_id: str):
 
         if bedrock_sync_enabled():
             # Staged, not indexed: the Bedrock queue tick owns completion.
+            write_token = begin_stage_write(document)
+            db.commit()  # durable before the upload starts
             outcome = stage_document_sync(db, document)
+            finish_stage_write(document, write_token)
             db.commit()
             result = {"status": outcome.value, "backend": "bedrock_kb"}
             job.complete_job(result=result)

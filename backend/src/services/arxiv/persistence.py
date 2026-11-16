@@ -226,16 +226,23 @@ def _managed_storage_fields(document: Document) -> Optional[dict[str, Any]]:
 
 
 def _needs_kb_sync(document: Document, *, content_changed: bool = False) -> bool:
-    from src.services.bedrock_sync import bedrock_sync_enabled, is_indexed
+    from src.services.bedrock_sync import (
+        bedrock_sync_enabled,
+        is_indexed,
+        staged_text_matches,
+    )
     from src.shared.enums import SatelliteSyncStatus
 
     if bedrock_sync_enabled():
         # Bedrock records no data-source uuid; anything not settled by a
         # Bedrock job (pending, failed, or a DigitalOcean-era status) restages.
-        # So does an indexed document whose text was just upgraded: the KB
-        # would otherwise keep serving the old text.
-        return content_changed or not is_indexed(
-            document.do_kb_sync_status, document.document_metadata
+        # So does an indexed document whose text changed since its upload
+        # (a full-text upgrade or a storage repair): the KB would otherwise
+        # keep serving the old text.
+        return (
+            content_changed
+            or not is_indexed(document.do_kb_sync_status, document.document_metadata)
+            or not staged_text_matches(document)
         )
     return (
         not document.do_kb_data_source_uuid
@@ -679,6 +686,8 @@ async def persist_arxiv_documents(
     from src.services.bedrock_sync import (
         StageOutcome,
         bedrock_sync_enabled,
+        begin_stage_write,
+        finish_stage_write,
         stage_document,
     )
 
@@ -693,8 +702,11 @@ async def persist_arxiv_documents(
                     Document.is_deleted.is_(False),
                 )
                 for document in (await kb_db.execute(stmt)).scalars().all():
+                    write_token = begin_stage_write(document)
+                    await kb_db.commit()  # durable before the upload starts
                     outcome = await stage_document(kb_db, document)
                     kb_sync_failed |= outcome is StageOutcome.FAILED
+                    finish_stage_write(document, write_token)
                     await kb_db.commit()
         except Exception as exc:  # noqa: BLE001 - PostgreSQL remains authoritative
             kb_sync_failed = True
