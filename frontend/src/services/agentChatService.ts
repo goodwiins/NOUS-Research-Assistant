@@ -134,7 +134,9 @@ export interface AgentStreamCallbacks {
   ) => void;
   /** External Codex requested an exact, one-shot native approval or input. */
   onApprovalRequired?: (requestId: string) => void;
-  /** The accepted external run is still alive; only its browser observation ended. */
+  /** The stream ended before a terminal frame. The durable run may still be
+   * alive; only this browser's observation of it ended. Fired for every
+   * execution provider, immediately before the matching `onError`. */
   onConnectionLost?: () => void;
   onTrace?: (threadId: string) => void;
   /** Keepalive emitted roughly every 15s during silent planner/LLM phases,
@@ -842,9 +844,11 @@ class AgentChatService {
 
       const terminalSeen = await consumeSse(response, callbacks, { signal });
       if (!terminalSeen && !signal?.aborted) {
-        if (request.execution_provider === 'codex') {
-          callbacks.onConnectionLost?.();
-        }
+        // A clean EOF with no terminal frame is a transport outcome for every
+        // provider: a proxy can close the response gracefully while the
+        // durable run keeps going. Report it as lost observation so the caller
+        // reattaches instead of finishing the turn as a generation failure.
+        callbacks.onConnectionLost?.();
         callbacks.onError?.(INCOMPLETE_STREAM_ERROR);
       }
     } finally {

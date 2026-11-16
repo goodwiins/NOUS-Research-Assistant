@@ -182,6 +182,56 @@ describe('useChatStreaming maps the server error category onto the bubble', () =
   });
 });
 
+// GOO-600: the service reports a clean EOF with no terminal frame as lost
+// observation for the NOUS provider too. The turn must not finish as a failed
+// generation; the run stays live and the resume effect reattaches to it.
+describe('useChatStreaming NOUS stream that ends without a terminal frame', () => {
+  beforeEach(() => {
+    streamMessageMock.mockReset();
+    streamConfirmMock.mockReset();
+    resumeStreamMock.mockReset();
+    resumeStreamMock.mockResolvedValue({ status: 'resumed' });
+    useAgentActivityStore.setState({ runs: {}, currentThreadId: null });
+    useChatStore.setState({
+      currentThreadId: THREAD_ID,
+      isStreaming: false,
+      streamingThreadId: null,
+    });
+  });
+
+  it('reattaches to the run instead of showing a failure bubble', async () => {
+    streamMessageMock.mockImplementation(
+      (
+        _req: unknown,
+        cb: {
+          onConnectionLost?: () => void;
+          onError?: (error: string) => void;
+        }
+      ) => {
+        cb.onConnectionLost?.();
+        cb.onError?.('Stream ended before completion. Please retry.');
+        return Promise.resolve();
+      }
+    );
+    const setMessages = vi.fn();
+    const { useChatStreaming } = await import('@/hooks/chat/useChatStreaming');
+    const { result } = renderHook(
+      () => useChatStreaming(makeParams(setMessages as Setter)),
+      { wrapper }
+    );
+    await act(async () => {
+      await result.current.handleSubmit('hello');
+    });
+
+    expect(lastErrorBubble(setMessages.mock.calls as never)).toBeUndefined();
+    await waitFor(() => expect(resumeStreamMock).toHaveBeenCalled());
+    expect(resumeStreamMock.mock.calls[0][0]).toBe(THREAD_ID);
+    expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).not.toBe(
+      'error'
+    );
+  });
+});
+
 describe('useChatStreaming confirm-path failure bubble', () => {
   const CONFIRMATION = {
     tool_name: 'create_note',

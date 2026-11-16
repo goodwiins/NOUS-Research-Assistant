@@ -1428,8 +1428,18 @@ export function useChatStreaming(
             },
             onConnectionLost: () => {
               if (!isCurrentSession()) return;
-              transportLost = true;
-              harnessConnection.markConnectionLost(currentThreadId);
+              if (harnessConnection.executionProvider === 'codex') {
+                transportLost = true;
+                harnessConnection.markConnectionLost(currentThreadId);
+              } else if (currentThreadId) {
+                // Without a thread there is no durable run to reattach to, so
+                // in that case onError reports the failure as usual.
+                transportLost = true;
+                // The run stays 'running' (onError skips finishRun), so the
+                // resume effect reattaches once this turn unwinds. Re-arm it
+                // in case this activation already spent its one attempt.
+                resumeTriedRef.current.delete(currentThreadId);
+              }
             },
             onSeq: (seq) => {
               if (!isCurrentSession()) return;
