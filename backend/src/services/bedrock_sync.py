@@ -20,10 +20,11 @@ Deleted documents are re-marked pending inside the soft-delete transaction
 (``mark_deleted``); the tick removes their objects before starting the job, so
 the data source's DELETE policy drops their vectors.
 
-A failed staging upload leaves the row ``failed`` with no retry in the tick.
-Recovery is the next ingest of that document or ``scripts/backfill_bedrock_kb``
-(which restages everything not indexed); until then scoped retrieval answers
-from keyword search.
+A failed staging upload leaves the row ``failed`` and counts the failure in
+``stage_failures``. The tick retries the upload, a few rows per run, until
+``MAX_ATTEMPTS`` failures; after that recovery is the next ingest of the
+document or ``scripts/backfill_bedrock_kb``. Until a retry succeeds, scoped
+retrieval answers from keyword search.
 
 Enabled only when ``BEDROCK_KB_ID`` and ``BEDROCK_KB_DATA_SOURCE_ID`` are both
 set; every entry point is a no-op otherwise.
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 META_KEY = "bedrock_sync"
 MAX_ATTEMPTS = 3
+STAGE_RETRY_BATCH = 10  # failed uploads retried per tick
 CONTENT_EXTENSIONS = ("txt", "pdf", "png")
 SIDECAR_SUFFIX = ".metadata.json"
 BEDROCK_REGION = "us-east-1"  # matches bedrock_retrieval.retrieve_chunks
@@ -231,6 +233,9 @@ def _record_stage_failure(document: DocumentRow) -> StageOutcome:
         extra={"document_id": str(document.id)},
     )
     if not document.is_deleted:
+        state = _state(document)
+        state["stage_failures"] = int(state.get("stage_failures") or 0) + 1
+        _write_state(document, state)
         document.do_kb_sync_status = _FAILED
     return StageOutcome.FAILED
 
@@ -426,6 +431,72 @@ async def _settle_claimed(
     return False
 
 
+def _stage_failures_column() -> Any:
+    return Document.document_metadata[META_KEY]["stage_failures"].as_integer()
+
+
+async def _retry_failed_stages(
+    db: AsyncSession, helper_factory: Callable[[], Any], summary: dict[str, Any]
+) -> None:
+    """Re-upload documents whose staging upload failed, within the budget.
+
+    Each row is locked for its own upload. An ingest that changed the row
+    holds that lock until it commits, so this never uploads text older than
+    the committed row, and a row restaged meanwhile is no longer ``failed``.
+    """
+    document_ids = (
+        (
+            await db.execute(
+                select(Document.id)
+                .where(
+                    Document.do_kb_sync_status == _FAILED,
+                    Document.is_deleted.is_(False),
+                    _stage_failures_column().between(1, MAX_ATTEMPTS - 1),
+                )
+                .order_by(Document.id)
+                .limit(STAGE_RETRY_BATCH)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    await db.rollback()
+    helper = None
+    for document_id in document_ids:
+        document = await _lock_row(db, document_id)
+        failures = int(_state(document).get("stage_failures") or 0) if document else 0
+        if (
+            document is None
+            or document.do_kb_sync_status != _FAILED
+            or document.is_deleted
+            or not document.content_text
+            or not 1 <= failures < MAX_ATTEMPTS
+        ):
+            await db.rollback()
+            continue
+        try:
+            helper = helper or helper_factory()
+            await asyncio.to_thread(
+                upload_document_objects,
+                helper,
+                document.organization_id,
+                document.id,
+                document.content_text,
+            )
+        except Exception:  # noqa: BLE001 - counted; retried on a later tick
+            logger.warning(
+                "bedrock_kb stage retry failed",
+                extra={"document_id": str(document_id)},
+                exc_info=True,
+            )
+            _record_stage_failure(document)
+            summary["stage_retry_failed"] = summary.get("stage_retry_failed", 0) + 1
+        else:
+            _mark_pending(document)
+            summary["restaged"] = summary.get("restaged", 0) + 1
+        await db.commit()
+
+
 async def _job_running_elsewhere(client: Any) -> bool:
     response = await asyncio.to_thread(
         client.list_ingestion_jobs,
@@ -539,5 +610,6 @@ async def run_sync_tick(
         from src.core.s3_client import S3StorageHelper
 
         helper_factory = S3StorageHelper
+    await _retry_failed_stages(db, helper_factory, summary)
     await _claim_new_job(db, client, helper_factory, summary)
     return summary

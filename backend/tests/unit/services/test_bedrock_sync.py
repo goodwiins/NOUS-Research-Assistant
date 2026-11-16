@@ -285,6 +285,62 @@ def test_stage_upload_failure_is_recorded_not_raised(
     assert _load(session_factory, doc_id).do_kb_sync_status == FAILED
 
 
+def test_tick_retries_a_failed_staging_upload(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    org_id = uuid4()
+    doc_id = _add(session_factory, org_id, text="body")
+    s3.fail_upload = True
+    _stage(session_factory, doc_id)
+    assert _state(_load(session_factory, doc_id))["stage_failures"] == 1
+    s3.fail_upload = False
+    client = FakeBedrock()
+
+    summary = _tick(session_factory, client, s3)
+
+    doc = _load(session_factory, doc_id)
+    assert s3.puts[f"{PREFIX}{org_id}/{doc_id}.txt"] == b"body"
+    assert doc.do_kb_sync_status == PENDING
+    assert "stage_failures" not in _state(doc)
+    # Restaged and claimed by the job started in the same tick.
+    assert summary["restaged"] == 1 and _state(doc)["job_id"] == "job-1"
+
+
+def test_tick_stops_retrying_staging_after_the_attempt_budget(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    doc_id = _add(session_factory)
+    s3.fail_upload = True
+    _stage(session_factory, doc_id)
+    client = FakeBedrock()
+
+    summaries = [_tick(session_factory, client, s3) for _ in range(4)]
+
+    retried = [s.get("stage_retry_failed", 0) for s in summaries]
+    assert retried == [1, 1, 0, 0]
+    doc = _load(session_factory, doc_id)
+    assert doc.do_kb_sync_status == FAILED
+    assert _state(doc)["stage_failures"] == bs.MAX_ATTEMPTS
+    assert client.started == []
+
+
+def test_tick_does_not_retry_staging_for_a_deleted_document(
+    session_factory: Any, s3: Any, enabled: Any
+) -> None:
+    doc_id = _add(session_factory)
+    s3.fail_upload = True
+    _stage(session_factory, doc_id)
+    s3.fail_upload = False
+    db = session_factory()
+    db.get(Document, doc_id).is_deleted = True
+    db.commit()
+    db.close()
+
+    summary = _tick(session_factory, FakeBedrock(), s3)
+
+    assert "restaged" not in summary and s3.puts == {}
+
+
 def test_stage_failure_keeps_a_concurrent_delete_queued(
     session_factory: Any, s3: Any, enabled: Any
 ) -> None:
