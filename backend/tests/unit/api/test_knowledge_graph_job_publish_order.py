@@ -7,6 +7,8 @@ first (pre-generated task id + QUEUED, committed), publish with that task id,
 and mark the reserved job FAILED when publication raises.
 """
 
+from collections.abc import Callable, Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,17 +21,17 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def events():
+def events() -> list[Any]:
     return []
 
 
 @pytest.fixture
-def added():
+def added() -> list[Any]:
     return []
 
 
 @pytest.fixture
-def mock_sync_db(events, added):
+def mock_sync_db(events: list[Any], added: list[Any]) -> MagicMock:
     db = MagicMock()
     db.add.side_effect = added.append
     db.flush.side_effect = lambda *a, **k: events.append("flush")
@@ -39,10 +41,12 @@ def mock_sync_db(events, added):
 
 
 @pytest.fixture(autouse=True)
-def _override_dependencies(test_app, mock_user, mock_sync_db):
+def _override_dependencies(
+    test_app: Any, mock_user: Any, mock_sync_db: MagicMock
+) -> Iterator[None]:
     test_app.dependency_overrides[get_current_user] = lambda: mock_user
 
-    def override_get_db_sync():
+    def override_get_db_sync() -> Iterator[MagicMock]:
         yield mock_sync_db
 
     test_app.dependency_overrides[get_db_sync] = override_get_db_sync
@@ -53,8 +57,8 @@ def _override_dependencies(test_app, mock_user, mock_sync_db):
         test_app.dependency_overrides.pop(get_db_sync, None)
 
 
-def _publisher(events):
-    def publish(*args, **kwargs):
+def _publisher(events: list[Any]) -> MagicMock:
+    def publish(*args: Any, **kwargs: Any) -> MagicMock:
         events.append(("publish", kwargs.get("task_id")))
         return MagicMock(id=kwargs.get("task_id"))
 
@@ -71,7 +75,7 @@ MERGE_PAYLOAD = {
 }
 
 
-def _post_merge(test_client, mock_sync_db):
+def _post_merge(test_client: Any, mock_sync_db: MagicMock) -> Any:
     # No cross-org source documents.
     mock_sync_db.query.return_value.filter.return_value.all.return_value = []
     with patch(
@@ -83,7 +87,7 @@ def _post_merge(test_client, mock_sync_db):
         )
 
 
-def _post_extraction(test_client, mock_sync_db):
+def _post_extraction(test_client: Any, mock_sync_db: MagicMock) -> Any:
     doc = MagicMock()
     doc.id = "doc-1"
     mock_sync_db.query.return_value.filter.return_value.all.return_value = [doc]
@@ -100,8 +104,13 @@ CASES = [
 
 @pytest.mark.parametrize("task_attr,post", CASES)
 def test_job_row_is_committed_before_the_task_is_published(
-    task_attr, post, test_client, mock_sync_db, events, added
-):
+    task_attr: str,
+    post: Callable[[Any, MagicMock], Any],
+    test_client: Any,
+    mock_sync_db: MagicMock,
+    events: list[Any],
+    added: list[Any],
+) -> None:
     publisher = _publisher(events)
     with patch(f"src.api.search.knowledge_graph.{task_attr}.apply_async", publisher):
         response = post(test_client, mock_sync_db)
@@ -124,8 +133,13 @@ def test_job_row_is_committed_before_the_task_is_published(
 
 @pytest.mark.parametrize("task_attr,post", CASES)
 def test_publish_failure_fails_the_reserved_job(
-    task_attr, post, test_client, mock_sync_db, events, added
-):
+    task_attr: str,
+    post: Callable[[Any, MagicMock], Any],
+    test_client: Any,
+    mock_sync_db: MagicMock,
+    events: list[Any],
+    added: list[Any],
+) -> None:
     with patch(
         f"src.api.search.knowledge_graph.{task_attr}.apply_async",
         side_effect=RuntimeError("broker down"),
