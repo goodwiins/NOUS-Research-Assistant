@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHmac, timingSafeEqual } from 'crypto';
 
+import { triggerUpstreamError } from '@/lib/trigger-proxy';
+
 const TRIGGER_API_URL =
   process.env.TRIGGER_API_URL ?? 'https://api.trigger.dev';
 const TRIGGER_SECRET_KEY = process.env.TRIGGER_SECRET_KEY;
@@ -67,11 +69,7 @@ export async function POST(request: NextRequest) {
   );
 
   if (!res.ok) {
-    const text = await res.text();
-    return NextResponse.json(
-      { error: `Trigger.dev error: ${text}` },
-      { status: res.status }
-    );
+    return triggerUpstreamError(res, 'github push reindex trigger');
   }
 
   const data = await res.json();
