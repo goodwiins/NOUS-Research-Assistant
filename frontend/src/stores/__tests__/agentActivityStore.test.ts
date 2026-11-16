@@ -87,6 +87,18 @@ describe('agentActivityStore', () => {
     expect(plan[2].tool).toBeUndefined();
   });
 
+  it('ignores a replayed start for a callId that already ran (any state)', () => {
+    const { startRun, pushToolStart, pushToolEnd } =
+      useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'task');
+    pushToolStart('t1', 'search_arxiv', 'call-1');
+    pushToolEnd('t1', 'search_arxiv', true, 'call-1');
+    pushToolStart('t1', 'search_arxiv', 'call-1');
+    const steps = getRun('t1').steps;
+    expect(steps).toHaveLength(1);
+    expect(steps[0].status).toBe('done');
+  });
+
   it('a successful tool completion marks the matching plan item done', () => {
     const { startRun, setPlan, pushToolStart, pushToolEnd } =
       useAgentActivityStore.getState();
@@ -401,5 +413,68 @@ describe('agentActivityStore — no-op updates do not notify subscribers', () =>
     useAgentActivityStore.getState().clearRun('missing');
     unsub();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('agentActivityStore — setStreamSeq cursor', () => {
+  beforeEach(() => {
+    useAgentActivityStore.setState({ runs: {}, currentThreadId: null });
+  });
+
+  const run = (): ReturnType<
+    typeof useAgentActivityStore.getState
+  >['runs'][string] => useAgentActivityStore.getState().runs.t1;
+
+  it('ignores a lower seq for the same stream (resume replays from 0)', () => {
+    const { startRun, setStreamSeq } = useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'task');
+    setStreamSeq('t1', 50, 's1');
+    setStreamSeq('t1', 1, 's1');
+    setStreamSeq('t1', 2);
+    expect(run().streamSeq).toBe(50);
+    expect(run().streamId).toBe('s1');
+    setStreamSeq('t1', 51, 's1');
+    expect(run().streamSeq).toBe(51);
+  });
+
+  it('does not notify subscribers for a replayed lower seq', () => {
+    const { startRun, setStreamSeq } = useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'task');
+    setStreamSeq('t1', 50, 's1');
+    let calls = 0;
+    const unsub = useAgentActivityStore.subscribe(() => {
+      calls++;
+    });
+    setStreamSeq('t1', 1, 's1');
+    setStreamSeq('t1', 2);
+    unsub();
+    expect(calls).toBe(0);
+  });
+
+  it('keeps the higher cursor while adopting a stream id it did not have yet', () => {
+    const { startRun, setStreamSeq } = useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'task');
+    setStreamSeq('t1', 7);
+    setStreamSeq('t1', 1, 's1');
+    expect(run().streamSeq).toBe(7);
+    expect(run().streamId).toBe('s1');
+  });
+
+  it('starts over for a different stream id', () => {
+    const { startRun, setStreamSeq } = useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'task');
+    setStreamSeq('t1', 50, 's1');
+    setStreamSeq('t1', 3, 's2');
+    expect(run().streamSeq).toBe(3);
+    expect(run().streamId).toBe('s2');
+  });
+
+  it('does not carry the cursor into a new run on the same thread', () => {
+    const { startRun, setStreamSeq } = useAgentActivityStore.getState();
+    startRun('t1', 'NOUS', 'first');
+    setStreamSeq('t1', 50);
+    startRun('t1', 'NOUS', 'second');
+    setStreamSeq('t1', 1);
+    expect(run().streamSeq).toBe(1);
   });
 });

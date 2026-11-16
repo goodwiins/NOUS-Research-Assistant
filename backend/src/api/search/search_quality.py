@@ -18,6 +18,7 @@ from src.models.search_schemas import SearchQuery, SearchResponse, SearchType
 from src.models.user import User
 from src.services.search.hybrid_search_service import hybrid_search_service
 from src.services.search.search_quality_service import (
+    BENCHMARK_SEARCH_TYPES,
     QualityMetric,
     QualityMetricType,
     SearchEvaluation,
@@ -279,6 +280,20 @@ async def run_quality_benchmark(
             raise HTTPException(
                 status_code=400, detail="Maximum 10 test queries allowed per benchmark"
             )
+        unsupported = [
+            t.value
+            for t in request.search_types or []
+            if t not in BENCHMARK_SEARCH_TYPES
+        ]
+        if unsupported:
+            supported = ", ".join(t.value for t in BENCHMARK_SEARCH_TYPES)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported benchmark search_types: {', '.join(unsupported)}. "
+                    f"Supported: {supported}."
+                ),
+            )
 
         benchmark_results = await run_in_threadpool(
             search_quality_service.run_quality_benchmark,
@@ -349,7 +364,7 @@ async def run_quality_benchmark(
         background_tasks.add_task(
             logger.info,
             f"Benchmark completed: benchmark_id={benchmark_id}, user_id={current_user.id}, "
-            f"queries={len(request.test_queries)}, search_types={len(request.search_types) if request.search_types else 3}",
+            f"queries={len(request.test_queries)}, search_types={len(request.search_types) if request.search_types else len(BENCHMARK_SEARCH_TYPES)}",
         )
 
         return BenchmarkResponse(

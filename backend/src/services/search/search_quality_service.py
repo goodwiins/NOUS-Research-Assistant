@@ -73,6 +73,14 @@ class SearchEvaluation:
     recommendations: List[str]
 
 
+# Search types the benchmark can execute. VECTOR was Qdrant-backed and is
+# rejected by the search API; the other types have no benchmark path.
+BENCHMARK_SEARCH_TYPES: Tuple[SearchType, ...] = (
+    SearchType.FULLTEXT,
+    SearchType.HYBRID,
+)
+
+
 class SearchQualityService:
     """Service for evaluating search quality and calculating metrics"""
 
@@ -520,7 +528,7 @@ class SearchQualityService:
     ) -> Dict[str, Dict[str, SearchEvaluation]]:
         """Run comprehensive quality benchmark on test queries"""
         if search_types is None:
-            search_types = [SearchType.FULLTEXT, SearchType.VECTOR, SearchType.HYBRID]
+            search_types = list(BENCHMARK_SEARCH_TYPES)
 
         benchmark_results = {}
 
@@ -549,7 +557,8 @@ class SearchQualityService:
                             organization_id=organization_id,
                         )
                     else:
-                        # VECTOR benchmarking removed with the Qdrant arm.
+                        # Unsupported types are rejected at the API; skip
+                        # defensively for direct callers.
                         continue
 
                     # Evaluate search quality

@@ -547,6 +547,7 @@ export const ChatSidebar = memo(function ChatSidebar({
               <button
                 onClick={handleBulkDelete}
                 disabled={selectedIds.length === 0}
+                aria-label={`Delete ${selectedIds.length} selected ${selectedIds.length === 1 ? 'conversation' : 'conversations'}`}
                 className="inline-flex items-center gap-1 px-2 py-[3px] rounded-full border border-(--nous-mars)/40 text-(--nous-mars) text-[10px] hover:bg-(--nous-mars)/10 transition-colors disabled:opacity-40"
                 style={{ fontFamily: 'var(--nous-font-mono)' }}
               >

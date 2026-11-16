@@ -63,69 +63,38 @@ export const EntityMergeTool: React.FC = () => {
   const [jobProgress, setJobProgress] = useState(0);
   const [jobStep, setJobStep] = useState('');
 
-  useEffect(() => {
-    if (!activeJobId) return;
-    let consecutivePollFailures = 0;
+  const levenshteinDistance = (str1: string, str2: string): number => {
+    const matrix: number[][] = [];
 
-    const poll = setInterval(async () => {
-      try {
-        const job = await entityService.getProcessingJob(activeJobId);
-        consecutivePollFailures = 0;
-        setJobProgress(job.progress_percentage || 0);
-        setJobStep(job.current_step || 'Processing merge job');
+    for (let i = 0; i <= str2.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= str1.length; j++) matrix[0][j] = j;
 
-        if (job.status === 'completed') {
-          clearInterval(poll);
-          setActiveJobId(null);
-          setSelectedGroups(new Set());
-          toast.success('Merge job completed');
-          findDuplicates();
+    for (let i = 1; i <= str2.length; i++) {
+      for (let j = 1; j <= str1.length; j++) {
+        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1,
+            matrix[i][j - 1] + 1,
+            matrix[i - 1][j] + 1
+          );
         }
-
-        if (job.status === 'failed' || job.status === 'cancelled') {
-          clearInterval(poll);
-          setActiveJobId(null);
-          setError({
-            message: job.error_message || 'Merge job failed',
-            context: 'merge',
-          });
-          toast.error('Merge job failed');
-        }
-      } catch (pollError) {
-        if (isRetryablePollError(pollError) && consecutivePollFailures < 10) {
-          consecutivePollFailures += 1;
-          setJobStep('Waiting for job status...');
-          return;
-        }
-        clearInterval(poll);
-        setActiveJobId(null);
-        setError({ message: 'Failed to fetch merge job status', context: 'merge' });
       }
-    }, 2000);
+    }
 
-    return () => clearInterval(poll);
-  }, [activeJobId]);
+    return matrix[str2.length][str1.length];
+  };
 
-  if (!canBulkEdit) {
-    return (
-      <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
-        <CardHeader>
-          <CardTitle className="text-xs font-mono font-bold uppercase tracking-widest text-(--nous-fg-3) flex items-center gap-2">
-            <Lock className="w-4 h-4" />
-            Entity Merge Tool
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-4">
-          <div className="text-center py-12">
-            <Lock className="w-12 h-12 mx-auto mb-4 text-(--nous-fg-3)" />
-            <p className="text-sm font-mono text-(--nous-fg-3)">
-              Entity merging is restricted to administrators only.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
+  const calculateSimilarity = (str1: string, str2: string): number => {
+    const longer = str1.length > str2.length ? str1 : str2;
+    const shorter = str1.length > str2.length ? str2 : str1;
+
+    if (longer.length === 0) return 1.0;
+
+    const editDistance = levenshteinDistance(longer, shorter);
+    return (longer.length - editDistance) / longer.length;
+  };
 
   const findDuplicates = async () => {
     try {
@@ -233,38 +202,69 @@ export const EntityMergeTool: React.FC = () => {
     }
   };
 
-  const calculateSimilarity = (str1: string, str2: string): number => {
-    const longer = str1.length > str2.length ? str1 : str2;
-    const shorter = str1.length > str2.length ? str2 : str1;
+  useEffect(() => {
+    if (!activeJobId) return;
+    let consecutivePollFailures = 0;
 
-    if (longer.length === 0) return 1.0;
+    const poll = setInterval(async () => {
+      try {
+        const job = await entityService.getProcessingJob(activeJobId);
+        consecutivePollFailures = 0;
+        setJobProgress(job.progress_percentage || 0);
+        setJobStep(job.current_step || 'Processing merge job');
 
-    const editDistance = levenshteinDistance(longer, shorter);
-    return (longer.length - editDistance) / longer.length;
-  };
-
-  const levenshteinDistance = (str1: string, str2: string): number => {
-    const matrix: number[][] = [];
-
-    for (let i = 0; i <= str2.length; i++) matrix[i] = [i];
-    for (let j = 0; j <= str1.length; j++) matrix[0][j] = j;
-
-    for (let i = 1; i <= str2.length; i++) {
-      for (let j = 1; j <= str1.length; j++) {
-        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-          matrix[i][j] = matrix[i - 1][j - 1];
-        } else {
-          matrix[i][j] = Math.min(
-            matrix[i - 1][j - 1] + 1,
-            matrix[i][j - 1] + 1,
-            matrix[i - 1][j] + 1
-          );
+        if (job.status === 'completed') {
+          clearInterval(poll);
+          setActiveJobId(null);
+          setSelectedGroups(new Set());
+          toast.success('Merge job completed');
+          findDuplicates();
         }
-      }
-    }
 
-    return matrix[str2.length][str1.length];
-  };
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          clearInterval(poll);
+          setActiveJobId(null);
+          setError({
+            message: job.error_message || 'Merge job failed',
+            context: 'merge',
+          });
+          toast.error('Merge job failed');
+        }
+      } catch (pollError) {
+        if (isRetryablePollError(pollError) && consecutivePollFailures < 10) {
+          consecutivePollFailures += 1;
+          setJobStep('Waiting for job status...');
+          return;
+        }
+        clearInterval(poll);
+        setActiveJobId(null);
+        setError({ message: 'Failed to fetch merge job status', context: 'merge' });
+      }
+    }, 2000);
+
+    return () => clearInterval(poll);
+  }, [activeJobId]);
+
+  if (!canBulkEdit) {
+    return (
+      <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
+        <CardHeader>
+          <CardTitle className="text-xs font-mono font-bold uppercase tracking-widest text-(--nous-fg-3) flex items-center gap-2">
+            <Lock className="w-4 h-4" />
+            Entity Merge Tool
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4">
+          <div className="text-center py-12">
+            <Lock className="w-12 h-12 mx-auto mb-4 text-(--nous-fg-3)" />
+            <p className="text-sm font-mono text-(--nous-fg-3)">
+              Entity merging is restricted to administrators only.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
 
   const enqueueMergeJob = async (groups: DuplicateGroup[]) => {
     try {
@@ -483,6 +483,7 @@ export const EntityMergeTool: React.FC = () => {
                 </Button>
                 <Button
                   onClick={() => setError(null)}
+                  aria-label="Dismiss error"
                   size="sm"
                   variant="ghost"
                   className="font-mono text-[10px] text-red-400/60 px-2"
