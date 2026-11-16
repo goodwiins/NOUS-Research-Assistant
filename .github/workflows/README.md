@@ -1,9 +1,11 @@
 # CI and release workflows
 
 A successful full Test Pipeline push on `develop` starts `release-dev.yml`,
-which builds that exact source SHA and opens a digest-pinned GitOps pull request. PR creation
-uses `RELEASE_PR_TOKEN` when configured so the PR's workflow checks start
-normally. PRs created with the built-in `GITHUB_TOKEN` require a human to approve
+which builds that exact source SHA and opens a digest-pinned GitOps pull request.
+Test Pipeline cancels superseded pull request runs, while push and manual runs
+finish so each successful `develop` push can serve as release evidence.
+PR creation uses `RELEASE_PR_TOKEN` when configured so the PR's workflow checks
+start normally. PRs created with the built-in `GITHUB_TOKEN` require a human to approve
 their workflow runs; manually dispatched workflows do not satisfy the PR's
 checks. If the secret is absent, creation falls back to `GITHUB_TOKEN` and emits
 a warning that the owner must approve the PR's workflow runs.
