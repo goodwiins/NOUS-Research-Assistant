@@ -193,6 +193,8 @@ describe('useChatStreaming NOUS stream that ends without a terminal frame', () =
     resumeStreamMock.mockReset();
     resumeStreamMock.mockResolvedValue({ status: 'resumed' });
     useAgentActivityStore.setState({ runs: {}, currentThreadId: null });
+    // Persisted rows from an earlier test must not answer this one's turn.
+    useChatStore.getState().reset();
     useChatStore.setState({
       currentThreadId: THREAD_ID,
       isStreaming: false,
@@ -217,15 +219,23 @@ describe('useChatStreaming NOUS stream that ends without a terminal frame', () =
   async function loseStream(opts: {
     tokenBeforeDrop: boolean;
     resume: { status: string };
-    persisted?: Array<Record<string, unknown>>;
+    /** Persisted rows, newest first as the API pages them, given the
+     * client_message_id the submitted user turn carried. */
+    persisted?: (userClientId: string) => Array<Record<string, unknown>>;
+    /** Every message refresh fails, so refreshMessages returns false. */
+    refreshFails?: boolean;
   }): Promise<{
     setMessages: ReturnType<typeof vi.fn>;
     resumeCalls: unknown[][];
   }> {
-    vi.mocked(workspaceService.listMessages).mockResolvedValue({
-      messages: opts.persisted ?? [],
-      has_more: false,
-    } as never);
+    let userClientId = '';
+    vi.mocked(workspaceService.listMessages).mockImplementation((async () => {
+      if (opts.refreshFails) throw new Error('listMessages down');
+      return {
+        messages: opts.persisted?.(userClientId) ?? [],
+        has_more: false,
+      };
+    }) as never);
     resumeStreamMock.mockResolvedValue({ status: 'idle' });
     // The drop is held until the loading state has rendered: the resume
     // effect only re-runs when isLoading actually flips back to false.
@@ -234,7 +244,13 @@ describe('useChatStreaming NOUS stream that ends without a terminal frame', () =
       dropStream = resolve;
     });
     streamMessageMock.mockImplementation(
-      async (_req: unknown, cb: LostStreamCallbacks) => {
+      async (
+        req: { messages: Array<{ client_message_id?: string }> },
+        cb: LostStreamCallbacks
+      ) => {
+        userClientId =
+          [...req.messages].reverse().find((m) => m.client_message_id)
+            ?.client_message_id ?? '';
         await dropped;
         if (opts.tokenBeforeDrop) cb.onToken?.('partial');
         cb.onConnectionLost?.();
@@ -300,54 +316,124 @@ describe('useChatStreaming NOUS stream that ends without a terminal frame', () =
       const { setMessages } = await loseStream({
         tokenBeforeDrop,
         resume: { status: 'idle' },
+        persisted: (cid) => [userRow('u-1', cid, 1)],
       });
-      await waitFor(() =>
-        expect(
-          lastErrorBubble(setMessages.mock.calls as never)?.error?.message
-        ).toBe('This response failed to generate. Please try again.')
-      );
-      expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).toBe(
-        'error'
-      );
+      await expectFailureBubble(setMessages);
     }
   );
 
-  it('shows no error when the run is gone but its reply was persisted', async () => {
-    // Newest first, as the API pages them.
-    const { setMessages } = await loseStream({
-      tokenBeforeDrop: false,
-      resume: { status: 'idle' },
-      persisted: [
-        {
-          id: 'a-1',
-          thread_id: THREAD_ID,
-          role: 'assistant',
-          content: 'the persisted answer',
-          created_at: '2026-11-16T00:00:02Z',
-        },
-        {
-          id: 'u-1',
-          thread_id: THREAD_ID,
-          role: 'user',
-          content: 'hello',
-          created_at: '2026-11-16T00:00:01Z',
-        },
-      ],
-    });
+  // Rows are newest first, as the API pages them. `at` orders them.
+  function userRow(
+    id: string,
+    clientMessageId: string | null,
+    at: number
+  ): Record<string, unknown> {
+    return {
+      id,
+      thread_id: THREAD_ID,
+      role: 'user',
+      content: `question ${id}`,
+      client_message_id: clientMessageId,
+      created_at: `2026-11-16T00:00:0${at}Z`,
+    };
+  }
+  function assistantRow(id: string, at: number): Record<string, unknown> {
+    return {
+      id,
+      thread_id: THREAD_ID,
+      role: 'assistant',
+      content: `answer ${id}`,
+      created_at: `2026-11-16T00:00:0${at}Z`,
+    };
+  }
+
+  async function expectFailureBubble(
+    setMessages: ReturnType<typeof vi.fn>
+  ): Promise<void> {
+    await waitFor(() =>
+      expect(
+        lastErrorBubble(setMessages.mock.calls as never)?.error?.message
+      ).toBe('This response failed to generate. Please try again.')
+    );
+    expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).toBe(
+      'error'
+    );
+  }
+
+  async function expectNoVerdictFailure(
+    setMessages: ReturnType<typeof vi.fn>
+  ): Promise<void> {
     await waitFor(() =>
       expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).toBe(
         'done'
       )
     );
     expect(lastErrorBubble(setMessages.mock.calls as never)).toBeUndefined();
+  }
+
+  it("shows the persisted reply with no error when the turn's user row has one", async () => {
+    const { setMessages } = await loseStream({
+      tokenBeforeDrop: false,
+      resume: { status: 'idle' },
+      persisted: (cid) => [assistantRow('a-1', 2), userRow('u-1', cid, 1)],
+    });
+    await expectNoVerdictFailure(setMessages);
     expect(
       useChatStore
         .getState()
-        .messages[THREAD_ID]?.some((m) => m.content === 'the persisted answer')
+        .messages[THREAD_ID]?.some((m) => m.content === 'answer a-1')
     ).toBe(true);
-    expect(useAgentActivityStore.getState().runs[THREAD_ID]?.state).toBe(
-      'done'
-    );
+  });
+
+  it("fails the turn when only an earlier turn's reply precedes its user row", async () => {
+    const { setMessages } = await loseStream({
+      tokenBeforeDrop: false,
+      resume: { status: 'idle' },
+      persisted: (cid) => [
+        userRow('u-2', cid, 3),
+        assistantRow('a-1', 2),
+        userRow('u-1', 'older-turn', 1),
+      ],
+    });
+    await expectFailureBubble(setMessages);
+  });
+
+  it("does not count a later turn's reply after an intervening user row", async () => {
+    // Another tab sent a newer turn that was answered; ours was not.
+    const { setMessages } = await loseStream({
+      tokenBeforeDrop: false,
+      resume: { status: 'idle' },
+      persisted: (cid) => [
+        assistantRow('a-2', 3),
+        userRow('u-2', 'other-tab-turn', 2),
+        userRow('u-1', cid, 1),
+      ],
+    });
+    await expectFailureBubble(setMessages);
+  });
+
+  it('gives no failure verdict when the refresh fails', async () => {
+    const { setMessages } = await loseStream({
+      tokenBeforeDrop: false,
+      resume: { status: 'idle' },
+      refreshFails: true,
+    });
+    await expectNoVerdictFailure(setMessages);
+  });
+
+  it("gives no failure verdict when the turn's user row is not loaded", async () => {
+    const { setMessages } = await loseStream({
+      tokenBeforeDrop: false,
+      resume: { status: 'idle' },
+      // Newest row is someone else's unanswered turn: guessing from it would
+      // wrongly fail ours.
+      persisted: () => [
+        userRow('u-2', 'other-tab-turn', 3),
+        assistantRow('a-1', 2),
+        userRow('u-1', null, 1),
+      ],
+    });
+    await expectNoVerdictFailure(setMessages);
   });
 });
 

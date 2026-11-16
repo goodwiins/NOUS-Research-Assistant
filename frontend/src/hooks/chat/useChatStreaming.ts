@@ -247,28 +247,27 @@ const streamSliceOwner = { current: 0 };
 
 /**
  * Whether the chat store holds a persisted assistant reply for the turn whose
- * user message carries `userRuntimeId` (its id or client_message_id). With no
- * runtime id, or when that user row is not loaded, fall back to whether the
- * thread's newest persisted message is an assistant reply.
+ * user message carries `userRuntimeId` (its id or client_message_id). Only the
+ * rows between that user row and the next user row belong to the turn, so a
+ * later turn's reply (e.g. from another tab) never counts. With no runtime id,
+ * or when that user row is not loaded, the answer is 'unknown'.
  */
-function hasPersistedReply(
+function persistedReplyVerdict(
   threadId: string,
   userRuntimeId: string | null
-): boolean {
+): 'present' | 'missing' | 'unknown' {
+  if (!userRuntimeId) return 'unknown';
   const rows = useChatStore.getState().messages[threadId] ?? [];
-  const isAssistant = (row: (typeof rows)[number]): boolean =>
-    String(row.role) === 'assistant';
-  const userIndex = userRuntimeId
-    ? rows.findIndex(
-        (row) =>
-          row.id === userRuntimeId || row.client_message_id === userRuntimeId
-      )
-    : -1;
-  if (userIndex === -1) {
-    const last = rows[rows.length - 1];
-    return !!last && isAssistant(last);
+  const userIndex = rows.findIndex(
+    (row) => row.id === userRuntimeId || row.client_message_id === userRuntimeId
+  );
+  if (userIndex === -1) return 'unknown';
+  for (const row of rows.slice(userIndex + 1)) {
+    const role = String(row.role);
+    if (role === 'user') break;
+    if (role === 'assistant') return 'present';
   }
-  return rows.slice(userIndex + 1).some(isAssistant);
+  return 'missing';
 }
 
 function resetStreamingTurnState(): void {
@@ -2316,6 +2315,10 @@ export function useChatStreaming(
       // it when the new send arrives. Left running, its late confirmation
       // frame armed a phantom approval card and locked the composer.
       probeAbortRef.current?.abort();
+      // A new turn supersedes any earlier lost turn on this thread: its
+      // resume must not judge the new turn against the old one's user row.
+      const submitThreadId = useChatStore.getState().currentThreadId;
+      if (submitThreadId) delete lostTransportTurnRef.current[submitThreadId];
       try {
         // Create the idempotency/runtime identity before the optimistic bubble.
         // The backend stores this on the user row and derives the assistant row's
@@ -2936,9 +2939,22 @@ export function useChatStreaming(
               // died). Reconcile from the server, which is the sole persisted
               // writer: a persisted reply is shown as-is, otherwise the turn
               // failed and must say so rather than finish silently.
-              await useChatStore.getState().refreshMessages(threadId);
+              const refreshed = await useChatStore
+                .getState()
+                .refreshMessages(threadId);
               if (signal.aborted) return;
-              lostRunGone = !hasPersistedReply(threadId, lostTurn);
+              const verdict = refreshed
+                ? persistedReplyVerdict(threadId, lostTurn)
+                : 'unknown';
+              if (verdict === 'unknown') {
+                // The refresh failed or was superseded, or this turn's user
+                // row is not in the loaded page: no verdict from stale rows.
+                // Settle as before and let a later load reconcile the thread.
+                useChatStore.getState().markMessagesStale(threadId);
+                useAgentActivityStore.getState().finishRun(threadId, 'done');
+                return;
+              }
+              lostRunGone = verdict === 'missing';
               useAgentActivityStore
                 .getState()
                 .finishRun(threadId, lostRunGone ? 'error' : 'done');
