@@ -3808,6 +3808,9 @@ async def _tool_do_kb_retrieve(
         )
 
     resolved_project_id: Optional[str] = None
+    # Set during authorization: a requested document the Bedrock queue has not
+    # indexed yet (only consulted while the Bedrock write path is on).
+    unindexed_document = False
     if scoped_intent:
         if db is None:
             return scoped_limitation("requested_documents_unavailable")
@@ -3852,6 +3855,24 @@ async def _tool_do_kb_retrieve(
                 if member_document_ids != requested_document_id_set:
                     return scoped_limitation("requested_documents_unavailable")
 
+            from src.services.bedrock_sync import bedrock_sync_enabled, is_indexed
+
+            if bedrock_enabled and bedrock_sync_enabled():
+                # Same tenant + id predicates as the authorization read above.
+                status_rows = await db.execute(
+                    select(
+                        Document.do_kb_sync_status, Document.document_metadata
+                    ).where(
+                        Document.id.in_(requested_document_ids),
+                        Document.organization_id == current_user.organization_id,
+                        Document.is_deleted == False,
+                    )
+                )
+                unindexed_document = any(
+                    not is_indexed(sync_status, document_metadata)
+                    for sync_status, document_metadata in status_rows.all()
+                )
+
             if bedrock_enabled:
                 clauses = [
                     {"equals": {"key": "document_id", "value": str(document_id)}}
@@ -3888,19 +3909,26 @@ async def _tool_do_kb_retrieve(
             )
             return scoped_limitation("requested_documents_unavailable")
 
-        if not kb_enabled:
+        if not kb_enabled or unindexed_document:
             from src.core.database import engine
 
             # FullTextSearchService uses PostgreSQL-only @@/ts_headline syntax.
             if engine.dialect.name != "postgresql":
                 return scoped_limitation("scoped_retrieval_unavailable")
             try:
-                return await _local_scoped_fulltext_retrieve(
+                local_result = await _local_scoped_fulltext_retrieve(
                     query=query,
                     document_ids=requested_document_ids,
                     current_user=current_user,
                     top_k=top_k,
                 )
+                if unindexed_document:
+                    local_result["indexing_pending"] = True
+                    local_result["note"] = (
+                        "The requested document is still being indexed; these "
+                        "results come from keyword search. " + local_result["note"]
+                    )
+                return local_result
             except Exception:
                 logger.warning(
                     "PostgreSQL full-text fallback failed for scoped retrieval",

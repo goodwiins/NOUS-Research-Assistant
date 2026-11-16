@@ -7,11 +7,12 @@
 #     credentials are synced from Infisical (/redis).
 #   - Frontend is NOT in this chart (Vercel) — no frontend key.
 #   - Original DO credentials remain staged for rollback, but the backend
-#     reads/writes AWS RDS and S3; PostgreSQL hybrid search serves retrieval
-#     until Bedrock ingestion/deletion is wired end-to-end.
+#     reads/writes AWS RDS and S3. Retrieval uses the shared Bedrock KB, filled
+#     by the queued write path (BEDROCK_KB_* below) once the backfill has run.
 #   - backend.image.repository is used verbatim by templates/_helpers.tpl
 #     (includes the registry host); worker/beat share it.
-# rationale/rollback levers for per-var values: see values-dev.yaml (identical values)
+# rationale/rollback levers for per-var values: see values-dev.yaml (identical
+# values, except the AWS-only BEDROCK_KB_* entries)
 
 global:
   # 267685730035 = terraform output account_id (Task 2)
@@ -61,9 +62,9 @@ backend:
     # 267685730035 = terraform output account_id; repos pushed to ECR in Task 2.
     # Immutable source tag and ECR digest for the AWS image build.
     repository: "267685730035.dkr.ecr.us-east-1.amazonaws.com/nous/backend"
-    tag: "f52d2f40f114ad7618e87309d44182fad094ca06"
-    digest: "sha256:7ce8f242b64a7add40a82b45a4e2f11e361bcfebbd170a73319aa277a6d6939d"
-    sourceSha: "f52d2f40f114ad7618e87309d44182fad094ca06"
+    tag: "355fa5163a517e9148479169334da85126e2971e"
+    digest: "sha256:bb19c5705e7f51e55cc51495b991a2ba6450d9aaca856b466ef5119ea67c9362"
+    sourceSha: "355fa5163a517e9148479169334da85126e2971e"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -142,6 +143,18 @@ backend:
       value: "false"
     - name: DO_KB_PRIMARY_READ
       value: "false"
+    # ── Shared Bedrock knowledge base (us-east-1) ──
+    # Setting BEDROCK_KB_ID moves all KB retrieval to Bedrock. Setting both
+    # ids also turns on the queued write path: ingests stage to
+    # s3://nous-development-storage-3ilp9pj2/bedrock/nous-dev-knowledge-base/
+    # (the data source's only inclusion prefix) and the beat tick runs one
+    # ingestion job at a time. Needs the AppBedrockIngestion IAM statement in
+    # infrastructure/terraform/app-s3-irsa.tf applied. Worker and beat inherit
+    # this block. Rollback: remove both entries.
+    - name: BEDROCK_KB_ID
+      value: "GGYNMOGZAH"
+    - name: BEDROCK_KB_DATA_SOURCE_ID
+      value: "20LUZFVSDQ"
     - name: TRUSTED_HOSTS
       value: "localhost,127.0.0.1,testserver,*.gen-text.app,*.svc.cluster.local,*.goodwiinz.tech"
     - name: AGENT_FAST_PATH_ENABLED
@@ -222,7 +235,9 @@ backend:
       value: "2"
     - name: CORS_ORIGINS
       # dev-app.goodwiinz.tech was retired (NXDOMAIN); the frontend is goodwiinz.tech.
-      value: "http://localhost:3000,http://127.0.0.1:3000,https://goodwiinz.tech,https://www.goodwiinz.tech"
+      # No loopback origins (GOO-507): CORS is credentialed, and the backend
+      # drops them in strict environments anyway.
+      value: "https://goodwiinz.tech,https://www.goodwiinz.tech"
     - name: FRONTEND_BASE_URL
       value: "https://goodwiinz.tech"
     - name: DB_ASYNC_POOL_SIZE

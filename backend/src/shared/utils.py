@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Union
 
-import httpx
 import redis.asyncio as redis
 from fastapi import Request, Response
 from sqlalchemy import func
@@ -494,29 +493,6 @@ class MetricsCollector:
                 for key, values in self.histograms.items()
             },
         }
-
-
-async def make_http_request(
-    url: str,
-    method: str = "GET",
-    headers: Optional[Dict[str, str]] = None,
-    json_data: Optional[Dict[str, Any]] = None,
-    params: Optional[Dict[str, Any]] = None,
-    timeout: float = 30.0,
-    retries: int = 3,
-) -> Dict[str, Any]:
-    """Make HTTP request with retries"""
-
-    @retry_async(max_attempts=retries)
-    async def _request():
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.request(
-                method=method, url=url, headers=headers, json=json_data, params=params
-            )
-            response.raise_for_status()
-            return response.json()
-
-    return await _request()
 
 
 def sanitize_filename(filename: str) -> str:

@@ -85,6 +85,8 @@ def turn_reset_fields() -> dict[str, Any]:
         "reflection_count": 0,
         "compaction_count": 0,
         "intent_confidence": 0.0,
+        "intent_source": "",
+        "intent_fallback_reason": "",
         "last_error_info": {},
     }
 

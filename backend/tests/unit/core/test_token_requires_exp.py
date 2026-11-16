@@ -1,17 +1,18 @@
 """Bearer tokens without an ``exp`` claim must be rejected (audit I21).
 
-``python-jose`` only checks ``exp`` when the claim is present, and
+The JWT libraries only check ``exp`` when the claim is present, and
 ``TokenData.exp`` was ``None`` for an exp-less token, so the conditional
 expiry check in ``get_current_user_token`` skipped it: a validly-signed token
 with no ``exp`` never expired. ``verify_token`` is the single decode step that
 every live bearer path routes through (``get_current_user_token``,
 ``WebSocketAuthenticator``, the multi-tenancy middleware), so the guard is
-``options={"require_exp": True}`` on its ``jwt.decode`` calls.
+``options={"require": ["exp"]}`` (``_DECODE_OPTIONS``) on its ``jwt.decode``
+calls.
 
 Mutation check (docs/engineering/testing.md "Mutation verification"):
-  guard: ``backend/src/core/security.py`` ``_REQUIRE_EXP`` (passed as
+  guard: ``backend/src/core/security.py`` ``_DECODE_OPTIONS`` (passed as
   ``options=`` to every ``jwt.decode`` in ``verify_token``).
-  mutation: ``_REQUIRE_EXP = {"require_exp": False}``
+  mutation: drop ``"require": ["exp"]`` from ``_DECODE_OPTIONS``
   command: ``pytest -q backend/tests/unit/core/test_token_requires_exp.py``
   expected: every ``*_without_exp_*`` test fails (``verify_token`` returns
   TokenData / no HTTPException / no WebSocketAuthError); the with-exp and
@@ -23,12 +24,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import jwk, jwt
 
 import src.core.security as security
 from src.core.config import settings
@@ -122,15 +123,7 @@ def test_es256_jwks_token_requires_exp(
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-    pub_pem = (
-        priv.public_key()
-        .public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode()
-    )
-    pub_jwk = jwk.construct(pub_pem, algorithm="ES256").to_dict()
+    pub_jwk = jwt.algorithms.ECAlgorithm.to_jwk(priv.public_key(), as_dict=True)
     pub_jwk["kid"] = "kid"
     monkeypatch.setattr(security, "_get_supabase_jwks", lambda: {"keys": [pub_jwk]})
     payload: Dict[str, Any] = {"sub": "es-user", "aud": "authenticated"}

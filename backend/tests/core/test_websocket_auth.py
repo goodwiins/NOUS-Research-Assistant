@@ -198,7 +198,7 @@ async def test_authenticate_rejects_expired_token_with_4002():
     with (
         patch("src.core.websocket_auth.verify_token", return_value=None, create=True),
         patch(
-            "src.core.websocket_auth.jwt.get_unverified_claims",
+            "src.core.websocket_auth.peek_unverified_claims",
             return_value={"exp": int(expired_at.timestamp())},
         ),
     ):

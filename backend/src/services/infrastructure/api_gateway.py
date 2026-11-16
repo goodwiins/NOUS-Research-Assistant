@@ -51,7 +51,6 @@ from src.shared.utils import (
     MetricsCollector,
     RateLimiter,
     get_correlation_id,
-    make_http_request,
 )
 
 # Configuration
@@ -224,7 +223,7 @@ async def verify_jwt_token(
         return payload
     except jwt.ExpiredSignatureError:
         raise AuthenticationError("Token has expired")
-    except jwt.JWTError:
+    except jwt.PyJWTError:
         raise AuthenticationError("Invalid token")
 
 

@@ -18,12 +18,12 @@ import hmac
 import json
 from datetime import datetime, timedelta, timezone
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import jwt
 
 import src.core.security as security
 from src.core.config import settings
@@ -60,18 +60,8 @@ def es256_keypair():
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-    pub_pem = (
-        priv.public_key()
-        .public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode()
-    )
-    from jose import jwk
-
     kid = "test-kid"
-    pub_jwk = jwk.construct(pub_pem, algorithm="ES256").to_dict()
+    pub_jwk = jwt.algorithms.ECAlgorithm.to_jwk(priv.public_key(), as_dict=True)
     pub_jwk["kid"] = kid
     pub_jwk.setdefault("alg", "ES256")
     return priv_pem, {"keys": [pub_jwk]}, kid
@@ -174,7 +164,7 @@ def test_supabase_es256_valid_token(monkeypatch, es256_keypair):
 @pytest.mark.unit
 def test_es256_algorithm_confusion_rejected(monkeypatch, es256_keypair):
     """Classic alg-confusion attack: forge an HS256 token using the ES256
-    PUBLIC key material as the HMAC secret. ``jose.jwt.encode`` refuses to sign
+    PUBLIC key material as the HMAC secret. ``jwt.encode`` refuses to sign
     HS256 with an asymmetric key, so — exactly as a real attacker would — we
     hand-roll the JWT bytes. Because the JWKS path pins ``algorithms=["ES256"]``
     and the header alg is HS256, no branch accepts it."""

@@ -20,7 +20,7 @@ pgvector==0.5.1  # document_embeddings vector(1024) column + cosine ops (GOO-435
 supabase>=2.28.0
 
 # Authentication & Security
-python-jose[cryptography]==3.5.0
+PyJWT>=2.13.0  # CVE-2026-48526 (GHSA-xgmm-8j9v-c9wx); replaced python-jose (GOO-474)
 cryptography>=50.0.2  # CVE fixes (GHSA cryptography advisories)
 passlib[bcrypt]==1.7.4
 python-multipart>=0.0.32
@@ -130,7 +130,6 @@ pytest-asyncio>=1.4.0
 pytest-cov>=7.1.0
 testcontainers[postgres,redis]>=4.0.0
 aiosqlite>=0.19.0  # For async SQLite in tests
-PyJWT>=2.13.0  # CVE-2026-48526 (GHSA-xgmm-8j9v-c9wx)
 
 # External Database Connectors (optional)
 bioservices>=1.11.0  # Bridge to 70+ biological web services

@@ -229,6 +229,47 @@ export function appendProgressStep(
   return [...steps, next].slice(-MAX_PROGRESS_STEPS);
 }
 
+/**
+ * Monotonic claim on the chat store's live-streaming slice. runStreamTurn and
+ * the confirm-resume path are separate stream owners that can overlap across
+ * an await (approve lands while the paused turn is still reconciling), so
+ * each stamps a token and only tears the slice down while it still holds the
+ * claim.
+ *
+ * The claim is shared by every useChatStreaming instance because the slice it
+ * guards is global. It used to be a per-instance ref. Leaving
+ * /chat mid-stream and returning at once mounts a second instance whose
+ * resume turn claims the slice while the old instance is still awaiting its
+ * terminal reconcile; the old instance's teardown must then see that it no
+ * longer owns the slice (GOO-602).
+ */
+const streamSliceOwner = { current: 0 };
+
+/**
+ * Whether the chat store holds a persisted assistant reply for the turn whose
+ * user message carries `userRuntimeId` (its id or client_message_id). Only the
+ * rows between that user row and the next user row belong to the turn, so a
+ * later turn's reply (e.g. from another tab) never counts. With no runtime id,
+ * or when that user row is not loaded, the answer is 'unknown'.
+ */
+function persistedReplyVerdict(
+  threadId: string,
+  userRuntimeId: string | null
+): 'present' | 'missing' | 'unknown' {
+  if (!userRuntimeId) return 'unknown';
+  const rows = useChatStore.getState().messages[threadId] ?? [];
+  const userIndex = rows.findIndex(
+    (row) => row.id === userRuntimeId || row.client_message_id === userRuntimeId
+  );
+  if (userIndex === -1) return 'unknown';
+  for (const row of rows.slice(userIndex + 1)) {
+    const role = String(row.role);
+    if (role === 'user') break;
+    if (role === 'assistant') return 'present';
+  }
+  return 'missing';
+}
+
 function resetStreamingTurnState(): void {
   useChatStore.setState({
     isStreaming: false,
@@ -546,7 +587,7 @@ export function useChatStreaming(
   // ---- Refs ----
   const lastStreamedContentRef = useRef<string>('');
   const abortControllerRef = useRef<AbortController | null>(null);
-  // Which stream-owner claim (see streamOwnerRef) the user's Stop targets.
+  // Which stream-owner claim (see streamSliceOwner) the user's Stop targets.
   // Stamped by handleStop with the claim that is live at that instant; every
   // reader compares against its own turn's claim, so a stop can only ever
   // affect the turn it was aimed at. This is what makes Stop locally
@@ -563,12 +604,6 @@ export function useChatStreaming(
   const activeRunThreadRef = useRef<string | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const submitLockRef = useRef(false);
-  // Monotonic claim on the store's live-streaming slice. runStreamTurn and
-  // the confirm-resume path are separate stream owners that can overlap
-  // across an await (approve lands while the paused turn is still
-  // reconciling), so each stamps a token and only tears the slice down
-  // while it still holds the claim.
-  const streamOwnerRef = useRef(0);
   // CX1 belt: isConfirming (React state) is not synchronous, so two
   // Approve clicks in the same tick both see isConfirming === false before
   // either setState flushes. A ref mirrors submitLockRef's guard so a
@@ -630,6 +665,11 @@ export function useChatStreaming(
   // even though the run has been finished as 'error' (server-authored error
   // frames deliberately do not land here — those turns really are over).
   const transportFailureRef = useRef<Set<string>>(new Set());
+  // Threads whose live NOUS turn ended on a clean EOF with no terminal frame,
+  // keyed to that turn's user runtime id (null when unknown). The resume
+  // effect hands such a turn off; if the server then has no active run, the
+  // turn must not finish silently (see the 'idle' branch there).
+  const lostTransportTurnRef = useRef<Record<string, string | null>>({});
   // Threads already asked whether they hold a parked HITL confirmation —
   // one probe per thread activation (see the cold-load effect below).
   const confirmationProbedRef = useRef<Set<string>>(new Set());
@@ -1030,7 +1070,7 @@ export function useChatStreaming(
         } else if (recoveryAttempt) {
           finishAuthRecoveryAttempt(recoveryAttempt);
         }
-        streamOwnerRef.current += 1;
+        streamSliceOwner.current += 1;
         abortControllerRef.current?.abort();
         abortControllerRef.current = null;
         probeAbortRef.current?.abort();
@@ -1124,6 +1164,11 @@ export function useChatStreaming(
       /** Resume: a replay that yields no tokens (nothing buffered / 204)
        * must unwind quietly instead of rendering a "no response" bubble. */
       quietWhenEmpty?: boolean;
+      /** Resume: consulted when the turn ends with no content. True means the
+       * turn this resume picked up after a lost connection is known to have
+       * failed (the server has no active run and persisted no reply), so it
+       * renders the generation-failure bubble instead of unwinding quietly. */
+      failWhenEmpty?: () => boolean;
       /** Resume: consulted before committing the rebuilt answer. A replay that
        * started past our cursor is missing a prefix, so the local
        * reconstruction must not be shown as this turn's answer — the reconcile
@@ -1160,6 +1205,7 @@ export function useChatStreaming(
         newMessages,
         assistantRuntimeId,
         quietWhenEmpty,
+        failWhenEmpty,
         suppressCommit,
         isReplayedPrefix,
         abandonTurn,
@@ -1169,8 +1215,8 @@ export function useChatStreaming(
         start,
       } = opts;
 
-      // Claim the store's streaming slice for this turn (see streamOwnerRef).
-      const streamOwner = (streamOwnerRef.current += 1);
+      // Claim the store's streaming slice for this turn (see streamSliceOwner).
+      const streamOwner = (streamSliceOwner.current += 1);
       const isStoppedByUser = (): boolean =>
         stopTargetRef.current === streamOwner;
 
@@ -1385,7 +1431,10 @@ export function useChatStreaming(
             },
             onRunId: (runId) => {
               if (!isCurrentSession()) return;
-              if (!currentThreadId || streamOwnerRef.current !== streamOwner) {
+              if (
+                !currentThreadId ||
+                streamSliceOwner.current !== streamOwner
+              ) {
                 return;
               }
               runIdByThreadRef.current[currentThreadId] = runId;
@@ -1428,8 +1477,20 @@ export function useChatStreaming(
             },
             onConnectionLost: () => {
               if (!isCurrentSession()) return;
-              transportLost = true;
-              harnessConnection.markConnectionLost(currentThreadId);
+              if (harnessConnection.executionProvider === 'codex') {
+                transportLost = true;
+                harnessConnection.markConnectionLost(currentThreadId);
+              } else if (currentThreadId) {
+                // Without a thread there is no durable run to reattach to, so
+                // in that case onError reports the failure as usual.
+                transportLost = true;
+                // The run stays 'running' (onError skips finishRun), so the
+                // resume effect reattaches once this turn unwinds. Re-arm it
+                // in case this activation already spent its one attempt.
+                resumeTriedRef.current.delete(currentThreadId);
+                lostTransportTurnRef.current[currentThreadId] =
+                  userRuntimeId ?? null;
+              }
             },
             onSeq: (seq) => {
               if (!isCurrentSession()) return;
@@ -1792,9 +1853,31 @@ export function useChatStreaming(
         const finalReasoningSummary =
           doneIds.reasoning_summary ?? turnReasoning;
         if (!finalContent.trim() && !finalReasoningSummary.trim()) {
-          // A user-stop before the first token: just unwind quietly — no error
-          // bubble for an answer the user chose not to wait for.
-          if (!isStoppedByUser() && !quietWhenEmpty) {
+          const lostRunGone = !isStoppedByUser() && !!failWhenEmpty?.();
+          if (lostRunGone) {
+            // The connection dropped without a terminal frame and the server
+            // has neither an active run nor a persisted reply for this turn:
+            // the generation failed, so say so instead of leaving the user's
+            // message unanswered.
+            const lostRunMessage: ChatPageMessage = {
+              runtimeId: crypto.randomUUID(),
+              source: 'local-only',
+              role: 'assistant',
+              content: '',
+              timestamp: Date.now(),
+              error: {
+                message: 'This response failed to generate. Please try again.',
+                category: 'stream-error',
+              },
+            };
+            if (isTurnDisplayed())
+              setMessages([
+                ...withoutReplacementMarkers(newMessages),
+                lostRunMessage,
+              ]);
+          } else if (!isStoppedByUser() && !quietWhenEmpty) {
+            // A user-stop before the first token: just unwind quietly — no
+            // error bubble for an answer the user chose not to wait for.
             const emptyResponseMessage: ChatPageMessage = {
               runtimeId: crypto.randomUUID(),
               source: 'local-only',
@@ -2006,16 +2089,16 @@ export function useChatStreaming(
           // slot is shared, so cancelling it while a confirm stream owns the
           // slice would drop that stream's first flush.
           if (
-            streamOwnerRef.current === streamOwner &&
+            streamSliceOwner.current === streamOwner &&
             streamingRafRef.current !== null
           ) {
             cancelAnimationFrame(streamingRafRef.current);
             streamingRafRef.current = null;
           }
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             flushPendingSeq();
           }
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             pendingStreamContentRef.current = null;
           }
           // Only tear the slice down if nothing newer claimed it. On a
@@ -2023,10 +2106,10 @@ export function useChatStreaming(
           // card; approving starts the confirm stream, and an unconditional wipe
           // here orphaned it — streaming UI gone, carried citations lost,
           // composer unlocked into a second concurrent SSE writer.
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             resetStreamingTurnState();
           }
-          if (streamOwnerRef.current === streamOwner) {
+          if (streamSliceOwner.current === streamOwner) {
             // Same ownership rule: these refs are shared with the confirm
             // stream; a newer owner's state must not be torn down here.
             lastStreamedContentRef.current = '';
@@ -2232,6 +2315,10 @@ export function useChatStreaming(
       // it when the new send arrives. Left running, its late confirmation
       // frame armed a phantom approval card and locked the composer.
       probeAbortRef.current?.abort();
+      // A new turn supersedes any earlier lost turn on this thread: its
+      // resume must not judge the new turn against the old one's user row.
+      const submitThreadId = useChatStore.getState().currentThreadId;
+      if (submitThreadId) delete lostTransportTurnRef.current[submitThreadId];
       try {
         // Create the idempotency/runtime identity before the optimistic bubble.
         // The backend stores this on the user row and derives the assistant row's
@@ -2641,7 +2728,7 @@ export function useChatStreaming(
         // Acceptance may reach the browser before it carries the durable run
         // id. Keep observing and retain Stop intent; onRunId will issue the
         // fenced cancellation once that identity arrives.
-        stopTargetRef.current = streamOwnerRef.current;
+        stopTargetRef.current = streamSliceOwner.current;
       }
       // Keep observing: the request may lose a completion race, and only the
       // persisted terminal event can say whether Codex stopped or completed.
@@ -2650,7 +2737,7 @@ export function useChatStreaming(
 
     // For the native in-process path Stop aborts the reader immediately. Mark
     // it first so the local completion path preserves the stopped partial.
-    stopTargetRef.current = streamOwnerRef.current;
+    stopTargetRef.current = streamSliceOwner.current;
     stopCitationsRef.current = useChatStore.getState().streamingCitations;
     if (normalRunStop && runThread && expectedRunId) {
       // Issue the durable command before aborting the local transport. The
@@ -2732,6 +2819,11 @@ export function useChatStreaming(
     resumeTriedRef.current.add(threadId);
     transportFailureRef.current.delete(threadId);
     const handedOff = handedOffRunRef.current.delete(threadId);
+    // Set only when this resume follows a NOUS turn whose stream ended with
+    // no terminal frame (undefined otherwise).
+    const lostTurn = lostTransportTurnRef.current[threadId];
+    delete lostTransportTurnRef.current[threadId];
+    let lostRunGone = false;
     console.log('[Chat] Resuming in-flight agent stream:', threadId);
     // ponytail: messages is the snapshot at effect time — if thread history
     // is still loading, the resumed commit appends to a stale list; a
@@ -2755,6 +2847,7 @@ export function useChatStreaming(
       newMessages: messages,
       assistantRuntimeId: `resume:${threadId}:${run.startedAt}`,
       quietWhenEmpty: true,
+      failWhenEmpty: () => lostRunGone,
       suppressCommit: () => replayGapSeen,
       isReplayedPrefix: () => replayingPrefix,
       abandonTurn: () => handOffUnsettled,
@@ -2838,6 +2931,33 @@ export function useChatStreaming(
               // completed. Keep the visible outcome unknown until replay has
               // delivered a persisted terminal event.
               harnessConnection.markConnectionLost(threadId);
+              return;
+            }
+            if (lostTurn !== undefined && !turnProcessedFrame) {
+              // The live stream for this turn dropped without a terminal
+              // frame and the server now has no active run (e.g. the worker
+              // died). Reconcile from the server, which is the sole persisted
+              // writer: a persisted reply is shown as-is, otherwise the turn
+              // failed and must say so rather than finish silently.
+              const refreshed = await useChatStore
+                .getState()
+                .refreshMessages(threadId);
+              if (signal.aborted) return;
+              const verdict = refreshed
+                ? persistedReplyVerdict(threadId, lostTurn)
+                : 'unknown';
+              if (verdict === 'unknown') {
+                // The refresh failed or was superseded, or this turn's user
+                // row is not in the loaded page: no verdict from stale rows.
+                // Settle as before and let a later load reconcile the thread.
+                useChatStore.getState().markMessagesStale(threadId);
+                useAgentActivityStore.getState().finishRun(threadId, 'done');
+                return;
+              }
+              lostRunGone = verdict === 'missing';
+              useAgentActivityStore
+                .getState()
+                .finishRun(threadId, lostRunGone ? 'error' : 'done');
               return;
             }
             // Nothing active server-side — clear the stale run record.
@@ -3133,7 +3253,7 @@ export function useChatStreaming(
         // runStreamTurn (a resumed HITL turn belongs to the confirmation's
         // workspace thread, which may differ from whatever thread is
         // currently displayed) — stamp it the same way.
-        const confirmStreamOwner = (streamOwnerRef.current += 1);
+        const confirmStreamOwner = (streamSliceOwner.current += 1);
         const isConfirmStopped = (): boolean =>
           stopTargetRef.current === confirmStreamOwner;
         useChatStore.setState({
@@ -3300,7 +3420,7 @@ export function useChatStreaming(
                 if (!isCurrentSession()) return;
                 if (
                   !confirmationThreadId ||
-                  streamOwnerRef.current !== confirmStreamOwner
+                  streamSliceOwner.current !== confirmStreamOwner
                 ) {
                   return;
                 }
@@ -3718,7 +3838,7 @@ export function useChatStreaming(
             // this reset and resurrect stale streamingContent into the store.
             // Owner-guarded like runStreamTurn's teardown: a newer stream that
             // claimed the shared slot must not lose its first scheduled flush.
-            if (streamOwnerRef.current === confirmStreamOwner) {
+            if (streamSliceOwner.current === confirmStreamOwner) {
               if (streamingRafRef.current !== null) {
                 cancelAnimationFrame(streamingRafRef.current);
                 streamingRafRef.current = null;
@@ -3729,7 +3849,7 @@ export function useChatStreaming(
             // Same ownership rule as runStreamTurn: a nested interrupt (or any
             // newer stream started while this one was reconciling) owns the
             // slice now, and must not be wiped by this turn's teardown.
-            if (streamOwnerRef.current === confirmStreamOwner) {
+            if (streamSliceOwner.current === confirmStreamOwner) {
               resetStreamingTurnState();
             }
             if (activeRunThreadRef.current === confirmationThreadId) {

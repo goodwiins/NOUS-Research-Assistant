@@ -1087,27 +1087,23 @@ async def _try_primary_do_kb_read(
     organization_id: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> Optional[List[dict]]:
-    """Run the complete primary-read stage inside the hot-path deadline."""
+    """Run the complete primary-read stage inside the hot-path deadline.
+
+    One deadline (GOO-494): the session, ownership check, retrieve and
+    resolve share ``DO_KB_RETRIEVE_TIMEOUT_SECONDS``, the retrieve gets only
+    what is left of it, and a rerank that runs past it keeps the retrieved
+    chunks un-reranked instead of discarding them.
+    """
     from src.core.config import settings as _kb_cfg
 
     timeout = float(_kb_cfg.DO_KB_RETRIEVE_TIMEOUT_SECONDS)
-    try:
-        return await asyncio.wait_for(
-            _try_primary_do_kb_read_impl(
-                query,
-                user_id,
-                organization_id,
-                project_id,
-            ),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "do_kb primary read exceeded %.1fs — falling back",
-            timeout,
-        )
-        _record_do_kb_read("do_kb_timeout")
-        return None
+    return await _try_primary_do_kb_read_impl(
+        query,
+        user_id,
+        organization_id,
+        project_id,
+        deadline=asyncio.get_running_loop().time() + timeout,
+    )
 
 
 async def _try_primary_do_kb_read_impl(
@@ -1115,6 +1111,8 @@ async def _try_primary_do_kb_read_impl(
     user_id: Optional[str],
     organization_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    *,
+    deadline: Optional[float] = None,
 ) -> Optional[List[dict]]:
     """Phase 4b: return DO KB chunks shaped like rag_node contexts.
 
@@ -1128,9 +1126,16 @@ async def _try_primary_do_kb_read_impl(
     that belong to the active project survive. DO KB itself is org-scoped,
     so cross-project leakage (chunks from sibling projects) is filtered
     via the ``collection_documents`` association table.
+
+    *deadline* is a loop-clock time (``loop.time()``); omitted, it is
+    ``DO_KB_RETRIEVE_TIMEOUT_SECONDS`` from now.
     """
+    loop = asyncio.get_running_loop()
     try:
         from src.core.config import settings as _kb_cfg
+
+        if deadline is None:
+            deadline = loop.time() + float(_kb_cfg.DO_KB_RETRIEVE_TIMEOUT_SECONDS)
 
         bedrock_kb_id = getattr(_kb_cfg, "BEDROCK_KB_ID", "")
         bedrock_enabled = isinstance(bedrock_kb_id, str) and bool(bedrock_kb_id)
@@ -1154,7 +1159,7 @@ async def _try_primary_do_kb_read_impl(
             retrieve_kb_chunks,
         )
 
-        async with tool_session() as session:
+        async with asyncio.timeout_at(deadline), tool_session() as session:
             kb_uuid = await resolve_org_kb_uuid(session, org_id)
             if not kb_uuid:
                 return None
@@ -1202,7 +1207,10 @@ async def _try_primary_do_kb_read_impl(
                 kb_uuid=kb_uuid,
                 query=query,
                 org_id=org_id,
-                timeout=_kb_cfg.DO_KB_RETRIEVE_TIMEOUT_SECONDS,
+                # What is left of the one deadline, not a fresh full budget.
+                # Floored above 0: ``retrieve_kb_chunks`` reads 0 as "no
+                # timeout"; the enclosing ``timeout_at`` still bounds it.
+                timeout=max(deadline - loop.time(), 0.001),
             )
             if outcome.status is DOKBRetrieveStatus.TIMEOUT:
                 _record_do_kb_read("do_kb_timeout")
@@ -1276,7 +1284,16 @@ async def _try_primary_do_kb_read_impl(
         if getattr(_kb_cfg, "AGENT_DOKB_COHERE_RERANK", False) and chunks_to_emit:
             from src.services.do_kb.rerank import cohere_rescore_chunks
 
-            chunks_to_emit = await cohere_rescore_chunks(query, chunks_to_emit)
+            try:
+                async with asyncio.timeout_at(deadline):
+                    chunks_to_emit = await cohere_rescore_chunks(query, chunks_to_emit)
+            except TimeoutError:
+                # The retrieve already succeeded inside the budget; keep its
+                # chunks in retrieval order rather than discard them.
+                logger.warning(
+                    "do_kb primary read: rerank ran past the deadline — "
+                    "keeping un-reranked chunks"
+                )
 
         # Filter BEFORE recording the outcome (audit review, PR #1395): recording
         # "success" first meant an all-filtered read (every chunk below the
@@ -1286,6 +1303,10 @@ async def _try_primary_do_kb_read_impl(
         kept = drop_low_relevance_chunks(shaped)
         _record_do_kb_read("success" if kept else "do_kb_low_relevance")
         return kept
+    except TimeoutError:
+        logger.warning("do_kb primary read exceeded its deadline — falling back")
+        _record_do_kb_read("do_kb_timeout")
+        return None
     except Exception:  # noqa: BLE001
         # exc_info keeps the traceback for operators; the raw exception string
         # stays out of the indexed message (can carry the user query / chunks).

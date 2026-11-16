@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useId, useState, type ReactElement } from 'react';
 
 import { getSelectedThreadUrl } from '@/components/chat/shared/chatNavigation';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useAuth } from '@/hooks/useAuth';
 import { scopeSummary } from '@/lib/integrations/scopeLabels';
 import { harnessService } from '@/services/harnessService';
@@ -258,15 +259,23 @@ export function ConnectedDevices(): ReactElement {
                         </p>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => revokeConsent.mutate(consent.request_id)}
-                      className="rounded border px-3 py-1 text-sm disabled:opacity-50"
-                      aria-label={`Revoke ${device.device_label} (${device.device_id}) access to ${consentName(consent)}`}
-                    >
-                      Revoke
-                    </button>
+                    <ConfirmDialog
+                      title={`Revoke ${device.device_label} access?`}
+                      description={`${device.device_label} stops being able to use ${consentName(consent)}. To restore access, approve the device again.`}
+                      confirmLabel="Revoke access"
+                      variant="destructive"
+                      onConfirm={() => revokeConsent.mutate(consent.request_id)}
+                      trigger={
+                        <button
+                          type="button"
+                          disabled={busy}
+                          className="rounded border px-3 py-1 text-sm disabled:opacity-50"
+                          aria-label={`Revoke ${device.device_label} (${device.device_id}) access to ${consentName(consent)}`}
+                        >
+                          Revoke
+                        </button>
+                      }
+                    />
                   </li>
                 ))}
               </ul>

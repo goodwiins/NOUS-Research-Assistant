@@ -2,19 +2,21 @@
 Pytest configuration and fixtures for security tests.
 """
 
-import pytest
-from jose import jwt
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, Optional
-from dataclasses import dataclass
+
 import httpx
+import jwt
+import pytest
 from httpx import AsyncClient
 
 
 @dataclass
 class TestConfig:
     """Security testing configuration"""
+
     base_url: str = os.environ.get("TEST_BASE_URL", "http://localhost:8000")
     api_prefix: str = "/api/v1"
     search_endpoint: str = "/search"
@@ -28,6 +30,7 @@ class TestConfig:
 @dataclass
 class TestUser:
     """Test user credentials and tokens"""
+
     id: str
     email: str
     password: str
@@ -44,25 +47,25 @@ def generate_test_token(
     organization_id: str = "test-org",
     expired: bool = False,
     secret: str = "test_secret_for_testing_only",
-    algorithm: str = "HS256"
+    algorithm: str = "HS256",
 ) -> str:
     """Generate a test JWT token"""
     now = datetime.utcnow()
-    
+
     if expired:
         exp = now - timedelta(hours=1)
     else:
         exp = now + timedelta(hours=1)
-    
+
     payload = {
         "sub": user_id,
         "role": role,
         "org_id": organization_id,
         "iat": now,
         "exp": exp,
-        "type": "access"
+        "type": "access",
     }
-    
+
     return jwt.encode(payload, secret, algorithm=algorithm)
 
 
@@ -75,14 +78,18 @@ def test_config():
 @pytest.fixture
 async def async_client(test_config):
     """Pytest fixture for async HTTP client"""
-    async with AsyncClient(base_url=test_config.base_url, timeout=test_config.timeout) as client:
+    async with AsyncClient(
+        base_url=test_config.base_url, timeout=test_config.timeout
+    ) as client:
         yield client
 
 
 @pytest.fixture
 def sync_client(test_config):
     """Pytest fixture for sync HTTP client"""
-    with httpx.Client(base_url=test_config.base_url, timeout=test_config.timeout) as client:
+    with httpx.Client(
+        base_url=test_config.base_url, timeout=test_config.timeout
+    ) as client:
         yield client
 
 
@@ -95,31 +102,31 @@ def test_users(test_config):
             email="user@test.com",
             password="UserPassword123!",
             role="user",
-            organization_id="org-1"
+            organization_id="org-1",
         ),
         "admin": TestUser(
             id="test-admin-1",
             email="admin@test.com",
             password="AdminPassword123!",
             role="admin",
-            organization_id="org-1"
+            organization_id="org-1",
         ),
         "analyst": TestUser(
             id="test-analyst-1",
             email="analyst@test.com",
             password="AnalystPassword123!",
             role="analyst",
-            organization_id="org-1"
+            organization_id="org-1",
         ),
         "other_org_user": TestUser(
             id="test-user-2",
             email="other@test.com",
             password="OtherPassword123!",
             role="user",
-            organization_id="org-2"
-        )
+            organization_id="org-2",
+        ),
     }
-    
+
     # Generate tokens for each user
     for name, user in users.items():
         user.access_token = generate_test_token(
@@ -127,9 +134,9 @@ def test_users(test_config):
             role=user.role,
             organization_id=user.organization_id,
             secret=test_config.jwt_secret,
-            algorithm=test_config.jwt_algorithm
+            algorithm=test_config.jwt_algorithm,
         )
-    
+
     return users
 
 
@@ -142,7 +149,7 @@ def expired_token(test_config):
         organization_id="org-1",
         expired=True,
         secret=test_config.jwt_secret,
-        algorithm=test_config.jwt_algorithm
+        algorithm=test_config.jwt_algorithm,
     )
 
 

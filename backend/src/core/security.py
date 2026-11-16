@@ -19,9 +19,9 @@ from typing import Any, Dict, Optional
 
 import bcrypt  # Changed from passlib
 import httpx
+import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwk, jwt
 from pydantic import BaseModel
 from starlette.datastructures import Address
 from starlette.requests import HTTPConnection
@@ -252,11 +252,44 @@ def _extract_supabase_token_data(payload: dict) -> Optional[TokenData]:
 _CLI_TOKEN_SCOPE = "cli"
 _CLI_TOKEN_ISSUER = "nous-backend"
 
-# jose only checks `exp` when the claim is present; without this a validly
-# signed token that omits `exp` never expires (audit I21). Every live bearer
-# path (HTTP deps, WebSocketAuthenticator, multi-tenancy middleware) decodes
-# via verify_token, so requiring it here covers them all.
-_REQUIRE_EXP = {"require_exp": True}
+# JWT libraries only check `exp` when the claim is present; without this a
+# validly signed token that omits `exp` never expires (audit I21). Every live
+# bearer path (HTTP deps, WebSocketAuthenticator, multi-tenancy middleware)
+# decodes via verify_token, so requiring it here covers them all.
+#
+# `verify_iat: False` keeps the python-jose behaviour this code was written
+# against (GOO-474): jose never rejected an `iat` in the future, while PyJWT
+# does with zero leeway, so a Supabase clock a fraction of a second ahead of
+# ours would 401 a fresh login. `check_iat_is_numeric` restores the type
+# check jose did make. `exp`, `nbf`, `aud` and `iss` stay fully verified.
+_DECODE_OPTIONS: Dict[str, Any] = {"require": ["exp"], "verify_iat": False}
+
+
+def check_iat_is_numeric(payload: Dict[str, Any]) -> None:
+    """Reject a non-numeric ``iat`` the way python-jose did.
+
+    ``_extract_cli_token_data`` feeds ``iat`` to ``utcfromtimestamp``; a
+    non-numeric value must fail as an invalid token, not as a ``TypeError``.
+    """
+    if "iat" not in payload:
+        return
+    try:
+        int(payload["iat"])
+    except (TypeError, ValueError):
+        raise jwt.InvalidIssuedAtError(
+            "Issued At claim (iat) must be an integer."
+        ) from None
+
+
+def peek_unverified_claims(token: str) -> Dict[str, Any]:
+    """Return a token's claims WITHOUT verifying its signature.
+
+    Never use the result for authentication or authorization. It exists only
+    so the WebSocket handshake can tell an expired token (close 4002) from an
+    invalid one (4003) after ``verify_token`` has already refused it.
+    Raises ``jwt.PyJWTError`` for a malformed token.
+    """
+    return jwt.decode(token, options={"verify_signature": False})
 
 
 def create_cli_token(
@@ -338,13 +371,14 @@ def verify_token(token: str) -> Optional[TokenData]:
                 settings.JWT_SECRET_KEY,
                 algorithms=[settings.JWT_ALGORITHM],
                 issuer=_CLI_TOKEN_ISSUER,
-                options={"verify_aud": False, **_REQUIRE_EXP},
+                options={**_DECODE_OPTIONS, "verify_aud": False},
             )
+            check_iat_is_numeric(payload)
             if payload.get("scope") == _CLI_TOKEN_SCOPE:
                 result = _extract_cli_token_data(payload)
                 if result:
                     return result
-        except JWTError:
+        except jwt.PyJWTError:
             pass  # Fall through to Supabase paths
 
     # Defense-in-depth (audit AU6): optionally pin the expected Supabase issuer.
@@ -363,15 +397,16 @@ def verify_token(token: str) -> Optional[TokenData]:
             decode_kwargs: Dict[str, Any] = {
                 "algorithms": ["HS256"],
                 "audience": "authenticated",
-                "options": _REQUIRE_EXP,
+                "options": _DECODE_OPTIONS,
             }
             if supabase_issuer:
                 decode_kwargs["issuer"] = supabase_issuer
             payload = jwt.decode(token, settings.SUPABASE_JWT_SECRET, **decode_kwargs)
+            check_iat_is_numeric(payload)
             result = _extract_supabase_token_data(payload)
             if result:
                 return result
-        except JWTError:
+        except jwt.PyJWTError:
             pass  # Fall through to JWKS/ES256
 
     # Try Supabase JWT — ES256 via JWKS
@@ -383,19 +418,27 @@ def verify_token(token: str) -> Optional[TokenData]:
                 kid = header.get("kid")
                 for key_data in jwks_data["keys"]:
                     if key_data.get("kid") == kid or kid is None:
-                        public_key = jwk.construct(key_data)
+                        # Pin ES256: the key's algorithm never comes from the
+                        # JWK's own `alg` or from the token header. A non-EC
+                        # P-256 key raises InvalidKeyError.
+                        public_key = jwt.PyJWK(key_data, algorithm="ES256").key
                         decode_kwargs = {
                             "algorithms": ["ES256"],
                             "audience": "authenticated",
-                            "options": _REQUIRE_EXP,
+                            "options": _DECODE_OPTIONS,
                         }
                         if supabase_issuer:
                             decode_kwargs["issuer"] = supabase_issuer
                         payload = jwt.decode(token, public_key, **decode_kwargs)
+                        check_iat_is_numeric(payload)
                         result = _extract_supabase_token_data(payload)
                         if result:
                             return result
-    except JWTError as e:
+    except (jwt.PyJWKError, jwt.InvalidKeyError) as e:
+        # An unusable JWKS entry is an operational problem, not a bad token;
+        # keep it at ERROR as it was under python-jose (JWKError).
+        logger.error(f"ES256 verification failed: {type(e).__name__}: {e}")
+    except jwt.PyJWTError as e:
         logger.debug(f"JWT validation failed (expected for expired tokens): {e}")
     except Exception as e:
         logger.error(f"ES256 verification failed: {type(e).__name__}: {e}")

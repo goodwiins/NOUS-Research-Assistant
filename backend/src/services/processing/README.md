@@ -9,6 +9,7 @@ The multimodal processing pipeline that turns an uploaded or ingested file into 
 | `multimodal_processing_service.py` | Async pipeline for OCR, transcription and AI analysis; the main upload path. When `DO_KB_ENABLED` is on it also syncs the document to the organization's KB. |
 | `processing_service.py` | Earlier multimodal pipeline service; its embedding step no longer writes to a vector store. |
 | `processing_integration.py` | Glue between the pipeline and WebSocket status updates. |
+| `job_reservation.py` | Sync-session reserve-then-publish persistence: commit a QUEUED job under a fresh task id before publishing, and fail that attempt if the publish raises (used by the KG job endpoints). |
 | `audio_processing_service.py`, `image_processing_service.py`, `video_processing_service.py` | Per-modality processing. |
 | `table_extraction_service.py`, `figure_extraction_service.py` | PDF table and math extraction; PyMuPDF figure extraction (embedded raster images and caption heuristics, bounded per-page work). |
 | `llm_entity_extraction.py` | LLM-based entity extraction (current). |

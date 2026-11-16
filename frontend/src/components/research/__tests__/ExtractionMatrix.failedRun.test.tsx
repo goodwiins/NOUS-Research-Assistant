@@ -23,6 +23,7 @@ import {
   listMatrices,
   triggerExtraction,
 } from '@/services/scispaceService';
+import { APIErrorClass } from '@/types/api';
 import type {
   ExtractionMatrix as ExtractionMatrixType,
   ExtractionTaskStatus,
@@ -286,5 +287,72 @@ describe('ExtractionMatrix polled task outcome', () => {
     await vi.waitFor(() => expect(getMatrix).toHaveBeenCalledTimes(2));
     expect(screen.queryByText(/^Extracting/)).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+// GOO-613: every poll error used to be swallowed, so a permanent error (403,
+// a task that never registers) polled every 3 s forever with no error shown.
+describe('ExtractionMatrix poll errors', () => {
+  const apiError = (status_code: number): APIErrorClass =>
+    new APIErrorClass({
+      message: `HTTP ${status_code}`,
+      status_code,
+      type: 'http_error',
+    });
+  const POLL_FAILED =
+    'Could not check extraction progress. Refresh the page to see the latest results.';
+
+  it('stops at once on a permanent client error and shows an alert', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(getExtractionTaskStatus).mockReset();
+      await createAndPoll(() => Promise.reject(apiError(403)));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(POLL_FAILED);
+      const calls = vi.mocked(getExtractionTaskStatus).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5 * 3000);
+      expect(getExtractionTaskStatus).toHaveBeenCalledTimes(calls);
+      // The raw error text is not shown.
+      expect(screen.queryByText(/HTTP 403/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps polling through a few 404s while the task registers', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(getExtractionTaskStatus).mockReset();
+      let calls = 0;
+      await createAndPoll(() => {
+        calls += 1;
+        return calls <= 2
+          ? Promise.reject(apiError(404))
+          : Promise.resolve(taskStatus({ status: 'running', completed: 1 }));
+      });
+
+      await vi.advanceTimersByTimeAsync(2 * 3000);
+      expect(await screen.findByText(/Extracting 1\/2/)).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up after a bounded number of consecutive failures', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(getExtractionTaskStatus).mockReset();
+      await createAndPoll(() => Promise.reject(apiError(404)));
+
+      await vi.advanceTimersByTimeAsync(12 * 3000);
+      expect(await screen.findByRole('alert')).toHaveTextContent(POLL_FAILED);
+      const calls = vi.mocked(getExtractionTaskStatus).mock.calls.length;
+      expect(calls).toBe(10);
+      await vi.advanceTimersByTimeAsync(5 * 3000);
+      expect(getExtractionTaskStatus).toHaveBeenCalledTimes(calls);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

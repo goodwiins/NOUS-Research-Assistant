@@ -1424,7 +1424,13 @@ class HybridSearchService:
         user_id: Optional[str],
         organization_id: Optional[str],
     ) -> SearchResponse:
-        """Fallback to full-text search if hybrid search fails"""
+        """Fallback to full-text search if hybrid search fails.
+
+        A failure here is re-raised, not turned into an empty page: an empty
+        page reads as a genuine NO_MATCH, so callers (rag_node's
+        ``retrieval_status``, the search routes) could not tell an outage from
+        "nothing relevant" (GOO-584).
+        """
         logger.warning("Hybrid search failed, falling back to full-text search")
 
         try:
@@ -1444,19 +1450,7 @@ class HybridSearchService:
             )
         except Exception as e:
             logger.error(f"Fallback full-text search also failed: {e}")
-            return SearchResponse(
-                query=search_request.query,
-                search_id=str(uuid.uuid4()),
-                search_type=SearchType.FULLTEXT,
-                results=[],
-                total_results=0,
-                returned_results=0,
-                search_time_ms=0,
-                limit=search_request.limit,
-                offset=search_request.offset,
-                has_more=False,
-                suggestions=[],
-            )
+            raise
 
 
 # Global hybrid search service instance
