@@ -482,7 +482,7 @@ module "rds" {
     },
     {
       name         = "log_statement"
-      value        = "all"
+      value        = "ddl"
       apply_method = "immediate"
     },
     {
