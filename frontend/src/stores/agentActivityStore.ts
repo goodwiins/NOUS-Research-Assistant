@@ -51,7 +51,9 @@ export interface Run {
    * when the new plan arrives.
    */
   carriedPlan?: PlanItem[];
-  /** Last SSE frame seq seen for this run — the resume cursor. */
+  /** Highest SSE frame seq applied for this run's stream; never decreases
+   * within one streamId. Codex resumes after it; the default resume replays
+   * from 0 and uses it to tell frames already handled from new ones. */
   streamSeq?: number;
   /** Run-correlation id (envelope stream_id) the cursor belongs to; passed
    * to resumeStream so a stale cursor can't attach to a newer run. */
@@ -137,6 +139,10 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
       // Return the existing state reference so Zustand's Object.is check
       // short-circuits and no subscribers are notified for this no-op.
       if (!run) return s;
+      // A callId names one tool call for good: a replayed start for a call
+      // that already ran (stream resume replays from seq 0) must not add a
+      // second step with the same id.
+      if (callId && run.steps.some((step) => step.callId === callId)) return s;
       const existing = run.steps.find(
         (step) =>
           step.status === 'active' &&
@@ -224,15 +230,33 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
   setStreamSeq: (threadId, seq, streamId) =>
     set((s) => {
       const run = s.runs[threadId];
-      if (!run || (run.streamSeq === seq && run.streamId === streamId))
-        return s;
+      if (!run) return s;
+      const nextStreamId = streamId ?? run.streamId;
+      // The cursor only moves forward within one stream. The default
+      // (non-Codex) resume replays the turn from seq 0 to rebuild its answer;
+      // letting those replayed seqs overwrite the cursor would make a remount
+      // mid-replay treat frames it already handled as new and re-run their
+      // side effects. A missing id on either side counts as the same stream
+      // (a seq can be flushed before its stream id arrives). A different
+      // stream id is a different buffer with its own numbering, so its seq is
+      // taken as-is. A new run never inherits a cursor (startRun builds a
+      // fresh record).
+      const sameStream =
+        streamId === undefined ||
+        run.streamId === undefined ||
+        streamId === run.streamId;
+      const nextSeq =
+        sameStream && run.streamSeq !== undefined
+          ? Math.max(run.streamSeq, seq)
+          : seq;
+      if (run.streamSeq === nextSeq && run.streamId === nextStreamId) return s;
       return {
         runs: {
           ...s.runs,
           [threadId]: {
             ...run,
-            streamSeq: seq,
-            streamId: streamId ?? run.streamId,
+            streamSeq: nextSeq,
+            streamId: nextStreamId,
           },
         },
       };

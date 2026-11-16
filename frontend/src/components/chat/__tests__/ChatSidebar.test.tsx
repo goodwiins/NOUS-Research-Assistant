@@ -435,7 +435,9 @@ describe('ChatSidebar', () => {
     clickSelectModeToggle();
     fireEvent.click(screen.getAllByRole('checkbox')[0]);
     fireEvent.click(screen.getAllByRole('checkbox')[1]);
-    fireEvent.click(screen.getByRole('button', { name: '2' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Delete 2 selected conversations' })
+    );
     expect(onBulkDelete).toHaveBeenCalledWith(['conv-1', 'conv-2']);
   });
 });
@@ -680,7 +682,9 @@ describe('ChatSidebar virtual conversation list', () => {
       expect(screen.getByText('Large conversation 499')).toBeInTheDocument()
     );
     fireEvent.click(screen.getByLabelText('Select Large conversation 499'));
-    fireEvent.click(screen.getByRole('button', { name: '2' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Delete 2 selected conversations' })
+    );
     expect(onBulkDelete).toHaveBeenCalledWith(['large-0', 'large-499']);
   });
 });

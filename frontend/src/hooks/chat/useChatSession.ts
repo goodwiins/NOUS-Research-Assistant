@@ -13,6 +13,7 @@ import { getSelectedThreadUrl } from '@/components/chat/shared/chatNavigation';
 import { ChatConversation } from '@/hooks/chat/chatTypes';
 import { useChatPersistence } from '@/hooks/useChatPersistence';
 import { upsertConversationFromThread } from '@/components/chat/shared/threadConversationState';
+import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
 import { useChatSessionGuard } from './useChatSessionGuard';
 import { useChatStore, onChatSessionReset } from '@/store/chat-store';
@@ -28,20 +29,6 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const THREADS_PAGE_SIZE = 50;
-
-function getErrorStatus(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null) return undefined;
-  const candidate = error as {
-    error?: { status_code?: unknown };
-    response?: { status?: unknown };
-    status_code?: unknown;
-  };
-  const status =
-    candidate.error?.status_code ??
-    candidate.response?.status ??
-    candidate.status_code;
-  return typeof status === 'number' ? status : undefined;
-}
 
 function isUnavailableThreadError(error: unknown): boolean {
   const status = getErrorStatus(error);

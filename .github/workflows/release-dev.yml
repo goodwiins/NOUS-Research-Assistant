@@ -107,11 +107,18 @@ jobs:
             -f query="$GRAPHQL_QUERY" \
             --jq '.data.repository.ref.branchProtectionRule' | python3 scripts/ci/check_release_protection.py
 
+      # Pinned release asset with a verified sha256 (cross-checked against the
+      # SHA-256 column of the release's `checksums` file), checked before the
+      # binary is installed or executed.
       - name: Install yq
+        env:
+          YQ_VERSION: v4.44.6
+          YQ_SHA256: 0c2b24e645b57d8e7c0566d18643a6d4f5580feeea3878127354a46f2a1e4598
         run: |
-          YQ_VERSION="v4.44.6"
-          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq
-          chmod +x /usr/local/bin/yq
+          curl -fsSLo yq_linux_amd64 "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          echo "${YQ_SHA256}  yq_linux_amd64" | sha256sum -c -
+          sudo install -m 0755 yq_linux_amd64 /usr/local/bin/yq
+          rm -f yq_linux_amd64
 
       - name: Install Helm
         uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v3.0.0

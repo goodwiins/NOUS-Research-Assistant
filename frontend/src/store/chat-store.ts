@@ -75,7 +75,7 @@ export const useChatStore = create<ChatStore>()(
         const isCurrentSession = captureChatSession();
         try {
           console.log('[ChatStore] Initializing default workspace...');
-          const { currentWorkspaceId, ownerUserId } = get();
+          const { currentWorkspaceId, ownerUserId, isReinitializing } = get();
           const workspace =
             await workspaceService.getOrCreateDefaultWorkspace(ownerUserId);
           if (!isCurrentSession()) return;
@@ -111,10 +111,19 @@ export const useChatStore = create<ChatStore>()(
           await get().setCurrentWorkspace(workspace.id);
           if (!isCurrentSession()) return;
 
-          // Reset retry counter on successful initialization
-          set((s) => {
-            s.reinitRetryCount = 0;
-          });
+          // Reset the retry counter only for a clean, user-initiated init. A
+          // recovery-triggered init (or one that started recovery) leaves it to
+          // handleStaleDataRecovery so MAX_REINIT_RETRIES can actually trip.
+          if (
+            !isReinitializing &&
+            !get().isReinitializing &&
+            !get().error &&
+            get().currentWorkspaceId === workspace.id
+          ) {
+            set((s) => {
+              s.reinitRetryCount = 0;
+            });
+          }
         } catch (error) {
           if (!isCurrentSession()) return;
           console.error(

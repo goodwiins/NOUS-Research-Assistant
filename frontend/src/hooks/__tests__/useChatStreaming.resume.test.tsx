@@ -4,18 +4,23 @@
  * seen seq), and a 204/idle result must clear the stale run record.
  */
 
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactNode } from 'react';
 import type { ChatPageMessage } from '@/components/chat/shared/cloudMessageView';
 import { makeChatPageMessage } from '@/test/chatMessageFactory';
 
+const testQueryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+});
+
 function wrapper({ children }: { children: ReactNode }) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return createElement(QueryClientProvider, { client }, children);
+  return createElement(
+    QueryClientProvider,
+    { client: testQueryClient },
+    children
+  );
 }
 
 // ---- Mocks ----
@@ -48,6 +53,7 @@ vi.mock('react-hot-toast', () => ({
 import { useChatStreaming } from '@/hooks/chat/useChatStreaming';
 import { useAgentActivityStore } from '@/stores/agentActivityStore';
 import { useChatStore } from '@/store/chat-store';
+import { useArtifactPanelStore } from '@/store/artifactPanelStore';
 import { workspaceService } from '@/services/workspaceService';
 
 function makeParams() {
@@ -82,6 +88,11 @@ function makeParams() {
 }
 
 describe('useChatStreaming stream resume on mount', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     resumeStreamMock.mockReset();
     useAgentActivityStore.setState({ runs: {}, currentThreadId: null });
@@ -96,7 +107,7 @@ describe('useChatStreaming stream resume on mount', () => {
     } as never);
   });
 
-  it('resumes a stale running run from its streamSeq when not streaming', async () => {
+  it('asks the backend to replay from 0 when this turn holds no content, whatever the saved cursor', async () => {
     useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
     useAgentActivityStore.getState().setStreamSeq('thread-A', 7);
     resumeStreamMock.mockResolvedValue({ status: 'resumed' });
@@ -107,7 +118,415 @@ describe('useChatStreaming stream resume on mount', () => {
 
     expect(resumeStreamMock).toHaveBeenCalledTimes(1);
     expect(resumeStreamMock.mock.calls[0][0]).toBe('thread-A');
-    expect(resumeStreamMock.mock.calls[0][1]).toBe(7);
+    // Saved cursor was 7, but this resume turn starts with an empty answer:
+    // replaying from 7 would rebuild only the tail.
+    expect(resumeStreamMock.mock.calls[0][1]).toBe(0);
+  });
+
+  // Backend stand-in: a buffered ledger of seq-stamped token frames; replays
+  // only frames with seq > afterSeq, like /agent/stream/resume.
+  function replayLedger(
+    tokens: string[],
+    attemptHook?: (afterSeq: number) => void
+  ) {
+    return (
+      _threadId: string,
+      afterSeq: number,
+      callbacks: {
+        onSeq: (seq: number) => void;
+        onToken: (content: string) => void;
+        onDone: (payload?: unknown) => void;
+      }
+    ) => {
+      attemptHook?.(afterSeq);
+      tokens.forEach((token, i) => {
+        const seq = i + 1;
+        if (seq <= afterSeq) return;
+        callbacks.onSeq(seq);
+        callbacks.onToken(token);
+      });
+      callbacks.onDone({
+        assistant_message_id: 'resume-assistant-1',
+        client_message_id: 'resume-runtime-1',
+      });
+      return Promise.resolve({ status: 'resumed' });
+    };
+  }
+
+  function lastCommittedAssistant(
+    setMessages: ReturnType<typeof vi.fn>
+  ): ChatPageMessage | undefined {
+    const commits = setMessages.mock.calls
+      .map(([arg]) => arg)
+      .filter((arg): arg is ChatPageMessage[] => Array.isArray(arg));
+    const last = commits[commits.length - 1] ?? [];
+    return last.filter((m) => m.role === 'assistant').pop();
+  }
+
+  it('rebuilds the FULL answer when resuming from a non-zero cursor', async () => {
+    // Tokens 1-3 streamed before the page was left; cursor saved at 3. This
+    // fresh turn holds none of them, so a replay from the cursor would commit
+    // only "tail" and drop the prefix until a reload.
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 3);
+    resumeStreamMock.mockImplementation(
+      replayLedger(['The ', 'whole ', 'answer ', 'tail'])
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    expect(resumeStreamMock).toHaveBeenCalledTimes(1);
+    expect(lastCommittedAssistant(params.setMessages)?.content).toBe(
+      'The whole answer tail'
+    );
+  });
+
+  it('retries from the latest cursor once this turn has processed frames', async () => {
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 3);
+    const ledger = ['a ', 'b ', 'c ', 'd ', 'e'];
+    const afterSeqs: number[] = [];
+    let attempt = 0;
+    resumeStreamMock.mockImplementation(
+      (
+        threadId: string,
+        afterSeq: number,
+        callbacks: {
+          onSeq: (seq: number) => void;
+          onToken: (c: string) => void;
+          onDone: (p?: unknown) => void;
+        },
+        ...rest: unknown[]
+      ) => {
+        attempt += 1;
+        afterSeqs.push(afterSeq);
+        if (attempt === 1) {
+          // connection drops after two frames, no terminal
+          callbacks.onSeq(1);
+          callbacks.onToken('a ');
+          callbacks.onSeq(2);
+          callbacks.onToken('b ');
+          return Promise.resolve({ status: 'failed', error: 'dropped' });
+        }
+        return replayLedger(ledger)(threadId, afterSeq, callbacks, ...rest);
+      }
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+    await waitFor(() => expect(resumeStreamMock).toHaveBeenCalledTimes(2), {
+      timeout: 10_000,
+    });
+
+    expect(afterSeqs).toEqual([0, 2]);
+    await waitFor(() =>
+      expect(lastCommittedAssistant(params.setMessages)?.content).toBe(
+        'a b c d e'
+      )
+    );
+  }, 20_000);
+
+  it('does not commit a partial replay when the buffer trimmed the prefix', async () => {
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 3);
+    resumeStreamMock.mockImplementation(
+      (
+        _t: string,
+        _after: number,
+        callbacks: {
+          onSeq: (seq: number) => void;
+          onToken: (c: string) => void;
+          onDone: (p?: unknown) => void;
+          onReplayGap?: (first: number, expected: number) => void;
+        }
+      ) => {
+        // buffer ring has dropped seq 1-4; replay starts at 5
+        callbacks.onReplayGap?.(5, 1);
+        callbacks.onSeq(5);
+        callbacks.onToken('tail only');
+        callbacks.onDone({ assistant_message_id: 'a1' });
+        return Promise.resolve({ status: 'resumed' });
+      }
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    const committed = params.setMessages.mock.calls
+      .flatMap(([arg]) => (Array.isArray(arg) ? arg : []))
+      .filter((m: ChatPageMessage) => m.role === 'assistant');
+    expect(committed.map((m: ChatPageMessage) => m.content)).not.toContain(
+      'tail only'
+    );
+  });
+
+  it('retries from the last seq this turn processed even when rAF never flushes the cursor (background tab)', async () => {
+    // A hidden tab never runs requestAnimationFrame, so the activity store
+    // still holds the previous mount's cursor (7) while this turn has only
+    // processed seq 1-2. Retrying from 7 would silently skip seq 3-7.
+    vi.stubGlobal('requestAnimationFrame', () => 0);
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 7);
+    const afterSeqs: number[] = [];
+    let attempt = 0;
+    resumeStreamMock.mockImplementation(
+      (
+        threadId: string,
+        afterSeq: number,
+        callbacks: {
+          onSeq: (seq: number) => void;
+          onToken: (c: string) => void;
+          onDone: (p?: unknown) => void;
+        },
+        ...rest: unknown[]
+      ) => {
+        attempt += 1;
+        afterSeqs.push(afterSeq);
+        if (attempt === 1) {
+          callbacks.onSeq(1);
+          callbacks.onToken('a ');
+          callbacks.onSeq(2);
+          callbacks.onToken('b ');
+          return Promise.resolve({ status: 'failed', error: 'dropped' });
+        }
+        return replayLedger(['a ', 'b ', 'c ', 'd ', 'e ', 'f ', 'g ', 'h'])(
+          threadId,
+          afterSeq,
+          callbacks,
+          ...rest
+        );
+      }
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+    await waitFor(() => expect(resumeStreamMock).toHaveBeenCalledTimes(2), {
+      timeout: 10_000,
+    });
+
+    expect(afterSeqs).toEqual([0, 2]);
+  }, 20_000);
+
+  it('does not re-apply activity side effects for tool frames at or below the saved cursor', async () => {
+    const note = JSON.stringify({
+      note_id: 'n1',
+      project_id: 'p1',
+      title: 'Note',
+    });
+    const store = useAgentActivityStore.getState();
+    store.startRun('thread-A', 'Agent', 'task');
+    store.setPlan('thread-A', [
+      { text: 'first note', tool: 'create_project_note' },
+      { text: 'second note', tool: 'create_project_note' },
+    ]);
+    // Seq 1-2 already ran on the earlier mount: finished tool, first plan
+    // item ticked.
+    store.pushToolStart('thread-A', 'create_project_note', 'c1');
+    store.pushToolEnd('thread-A', 'create_project_note', true, 'c1');
+    store.setStreamSeq('thread-A', 2);
+    const invalidate = vi.spyOn(testQueryClient, 'invalidateQueries');
+    const openArtifact = vi.spyOn(
+      useArtifactPanelStore.getState(),
+      'openArtifact'
+    );
+    resumeStreamMock.mockImplementation(
+      (
+        _t: string,
+        afterSeq: number,
+        callbacks: {
+          onSeq: (seq: number) => void;
+          onToolStart: (t: string, a: unknown, id?: string) => void;
+          onToolEnd: (t: string, r: string, e: boolean, id?: string) => void;
+          onToken: (c: string) => void;
+          onDone: (p?: unknown) => void;
+        }
+      ) => {
+        expect(afterSeq).toBe(0);
+        callbacks.onSeq(1);
+        callbacks.onToolStart('create_project_note', {}, 'c1');
+        callbacks.onSeq(2);
+        callbacks.onToolEnd('create_project_note', note, false, 'c1');
+        callbacks.onSeq(3);
+        callbacks.onToken('rest');
+        callbacks.onSeq(4);
+        callbacks.onDone({ assistant_message_id: 'a1' });
+        return Promise.resolve({ status: 'resumed' });
+      }
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    const run = useAgentActivityStore.getState().runs['thread-A'];
+    expect(run.steps.filter((st) => st.callId === 'c1')).toHaveLength(1);
+    expect(run.plan.map((p) => p.done)).toEqual([true, false]);
+    const projectInvalidations = invalidate.mock.calls.filter(
+      ([filters]) =>
+        Array.isArray(filters?.queryKey) && filters.queryKey[0] === 'project'
+    );
+    expect(projectInvalidations).toHaveLength(0);
+    expect(openArtifact).not.toHaveBeenCalled();
+    // The turn's own content still rebuilds from the full replay.
+    expect(lastCommittedAssistant(params.setMessages)?.content).toBe('rest');
+  });
+
+  it('keeps the saved cursor when the page remounts mid-replay, so frames already handled never re-run side effects', async () => {
+    // The unmount flush is the path under test: with rAF never running, the
+    // replayed prefix seq sits in the pending ref until cleanup writes it.
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+    const noteFor = (id: string): string =>
+      JSON.stringify({ note_id: id, project_id: 'p1', title: id });
+    const store = useAgentActivityStore.getState();
+    store.startRun('thread-A', 'Agent', 'task');
+    store.setPlan('thread-A', [
+      { text: 'first note', tool: 'create_project_note' },
+      { text: 'second note', tool: 'create_project_note' },
+      { text: 'third note', tool: 'create_project_note' },
+    ]);
+    // Seq 1-4 already ran on the earliest mount: two finished tools, two
+    // plan items ticked.
+    store.pushToolStart('thread-A', 'create_project_note', 'c1');
+    store.pushToolEnd('thread-A', 'create_project_note', true, 'c1');
+    store.pushToolStart('thread-A', 'create_project_note', 'c2');
+    store.pushToolEnd('thread-A', 'create_project_note', true, 'c2');
+    store.setStreamSeq('thread-A', 4);
+    const invalidate = vi.spyOn(testQueryClient, 'invalidateQueries');
+    const openArtifact = vi.spyOn(
+      useArtifactPanelStore.getState(),
+      'openArtifact'
+    );
+    type ReplayCallbacks = {
+      onSeq: (seq: number) => void;
+      onToolStart: (t: string, a: unknown, id?: string) => void;
+      onToolEnd: (t: string, r: string, e: boolean, id?: string) => void;
+      onToken: (c: string) => void;
+      onDone: (p?: unknown) => void;
+    };
+    let attempt = 0;
+    resumeStreamMock.mockImplementation(
+      (
+        _t: string,
+        _afterSeq: number,
+        callbacks: ReplayCallbacks,
+        signal: AbortSignal
+      ) => {
+        attempt += 1;
+        callbacks.onSeq(1);
+        callbacks.onToolStart('create_project_note', {}, 'c1');
+        callbacks.onSeq(2);
+        callbacks.onToolEnd('create_project_note', noteFor('n1'), false, 'c1');
+        if (attempt === 1) {
+          // First mount goes away while still inside the replayed prefix.
+          return new Promise((resolve) => {
+            signal.addEventListener('abort', () =>
+              resolve({ status: 'aborted' })
+            );
+          });
+        }
+        callbacks.onSeq(3);
+        callbacks.onToolStart('create_project_note', {}, 'c2');
+        callbacks.onSeq(4);
+        callbacks.onToolEnd('create_project_note', noteFor('n2'), false, 'c2');
+        callbacks.onSeq(5);
+        callbacks.onToken('rest');
+        callbacks.onSeq(6);
+        callbacks.onDone({ assistant_message_id: 'a1' });
+        return Promise.resolve({ status: 'resumed' });
+      }
+    );
+
+    let unmount: () => void = () => {};
+    await act(async () => {
+      ({ unmount } = renderHook(() => useChatStreaming(makeParams()), {
+        wrapper,
+      }));
+    });
+    await act(async () => {
+      unmount();
+    });
+
+    // Replaying seq 1-2 must not walk the cursor back below what was seen.
+    const afterUnmount = useAgentActivityStore.getState().runs['thread-A'];
+    expect(afterUnmount.state).toBe('running');
+    expect(afterUnmount.streamSeq).toBe(4);
+
+    const params = makeParams();
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    expect(resumeStreamMock).toHaveBeenCalledTimes(2);
+    // Both mounts rebuild the turn from the start of the ledger.
+    expect(resumeStreamMock.mock.calls.map((call) => call[1])).toEqual([0, 0]);
+    const run = useAgentActivityStore.getState().runs['thread-A'];
+    expect(run.steps.filter((st) => st.callId === 'c1')).toHaveLength(1);
+    expect(run.steps.filter((st) => st.callId === 'c2')).toHaveLength(1);
+    // The earlier mount already ticked the first two items; the replayed tool
+    // ends (seq 2 and 4) must not tick again, so the third stays open.
+    expect(run.plan.map((p) => p.done)).toEqual([true, true, false]);
+    const projectInvalidations = invalidate.mock.calls.filter(
+      ([filters]) =>
+        Array.isArray(filters?.queryKey) && filters.queryKey[0] === 'project'
+    );
+    expect(projectInvalidations).toHaveLength(0);
+    expect(openArtifact).not.toHaveBeenCalled();
+    expect(lastCommittedAssistant(params.setMessages)?.content).toBe('rest');
+  });
+
+  it('pins current behaviour for a confirmation continuation: first frame past seq 1 reads as a gap, commit is suppressed and the thread is marked stale for reconcile', async () => {
+    // A confirm stream continues seq numbering in a NEW buffer (N+1...), and
+    // the client has no state that distinguishes that from a trimmed ring
+    // buffer. Known limitation: needs a backend signal (e.g. a buffer-start
+    // marker on the frame) to be told apart.
+    useAgentActivityStore.getState().startRun('thread-A', 'Agent', 'task');
+    useAgentActivityStore.getState().setStreamSeq('thread-A', 7);
+    const staleSpy = vi.fn();
+    useChatStore.setState({ markMessagesStale: staleSpy });
+    resumeStreamMock.mockImplementation(
+      (
+        _t: string,
+        _after: number,
+        callbacks: {
+          onSeq: (seq: number) => void;
+          onToken: (c: string) => void;
+          onDone: (p?: unknown) => void;
+          onReplayGap?: (first: number, expected: number) => void;
+        }
+      ) => {
+        // agentChatService fires this when first seq (8) > afterSeq (0) + 1.
+        callbacks.onReplayGap?.(8, 1);
+        callbacks.onSeq(8);
+        callbacks.onToken('post-confirm answer');
+        callbacks.onDone({ assistant_message_id: 'a1' });
+        return Promise.resolve({ status: 'resumed' });
+      }
+    );
+    const params = makeParams();
+
+    await act(async () => {
+      renderHook(() => useChatStreaming(params), { wrapper });
+    });
+
+    expect(resumeStreamMock.mock.calls[0][1]).toBe(0);
+    expect(staleSpy).toHaveBeenCalledWith('thread-A');
+    const contents = params.setMessages.mock.calls
+      .flatMap(([arg]) => (Array.isArray(arg) ? arg : []))
+      .filter((m: ChatPageMessage) => m.role === 'assistant')
+      .map((m: ChatPageMessage) => m.content);
+    expect(contents).not.toContain('post-confirm answer');
   });
 
   it('clears the stale run on idle and does not resume twice', async () => {
