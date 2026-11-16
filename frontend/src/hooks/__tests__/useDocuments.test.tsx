@@ -807,6 +807,53 @@ describe('useDocuments', () => {
       expect(mockGet).toHaveBeenCalledTimes(3);
     });
 
+    it('skips poll ticks while the tab is hidden and resumes when visible', async () => {
+      mockGet.mockResolvedValue({
+        documents: [
+          {
+            id: 'doc-1',
+            filename: 'doc-1.pdf',
+            processing_status: 'processing',
+          },
+        ],
+        pagination: {
+          page: 1,
+          page_size: 20,
+          total: 1,
+          has_next: false,
+          has_prev: false,
+        },
+      });
+      const visibility = vi
+        .spyOn(document, 'visibilityState', 'get')
+        .mockReturnValue('hidden');
+      try {
+        const { result } = renderHook(() =>
+          useDocuments({ autoFetch: false })
+        );
+        await act(async () => {
+          await result.current.fetchDocuments();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          vi.advanceTimersByTime(15000);
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(1);
+
+        visibility.mockReturnValue('visible');
+        await act(async () => {
+          vi.advanceTimersByTime(5000);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(2);
+      } finally {
+        visibility.mockRestore();
+      }
+    });
+
     it('stops polling once every document reaches a terminal status', async () => {
       mockGet.mockResolvedValueOnce({
         documents: [

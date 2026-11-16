@@ -26,6 +26,7 @@ import { entityService } from '@/services/entityService';
 import { useEntityPermissions } from '@/hooks/useEntityPermissions';
 import { APIErrorClass } from '@/types/api';
 import toast from 'react-hot-toast';
+import { isTabHidden } from '@/lib/tabVisibility';
 
 interface DuplicateGroup {
   entities: Entity[];
@@ -58,7 +59,10 @@ export const EntityMergeTool: React.FC = () => {
   const [similarityThreshold, setSimilarityThreshold] = useState(0.85);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedGroups, setSelectedGroups] = useState<Set<number>>(new Set());
-  const [error, setError] = useState<{ message: string; context: 'fetch' | 'merge' } | null>(null);
+  const [error, setError] = useState<{
+    message: string;
+    context: 'fetch' | 'merge';
+  } | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [jobProgress, setJobProgress] = useState(0);
   const [jobStep, setJobStep] = useState('');
@@ -189,10 +193,9 @@ export const EntityMergeTool: React.FC = () => {
       } else {
         console.error('Error finding duplicates:', err);
       }
-      const message =
-        isServiceUnavailableError(err)
-          ? 'Knowledge graph is temporarily unavailable. Please try again shortly.'
-          : err instanceof Error
+      const message = isServiceUnavailableError(err)
+        ? 'Knowledge graph is temporarily unavailable. Please try again shortly.'
+        : err instanceof Error
           ? err.message
           : 'Failed to find duplicates';
       setError({ message, context: 'fetch' });
@@ -207,6 +210,7 @@ export const EntityMergeTool: React.FC = () => {
     let consecutivePollFailures = 0;
 
     const poll = setInterval(async () => {
+      if (isTabHidden()) return;
       try {
         const job = await entityService.getProcessingJob(activeJobId);
         consecutivePollFailures = 0;
@@ -238,7 +242,10 @@ export const EntityMergeTool: React.FC = () => {
         }
         clearInterval(poll);
         setActiveJobId(null);
-        setError({ message: 'Failed to fetch merge job status', context: 'merge' });
+        setError({
+          message: 'Failed to fetch merge job status',
+          context: 'merge',
+        });
       }
     }, 2000);
 
@@ -269,7 +276,10 @@ export const EntityMergeTool: React.FC = () => {
   const enqueueMergeJob = async (groups: DuplicateGroup[]) => {
     try {
       const payload = groups.map((group) => ({
-        entities: group.entities.map((entity) => ({ id: entity.id, name: entity.name })),
+        entities: group.entities.map((entity) => ({
+          id: entity.id,
+          name: entity.name,
+        })),
         suggested_primary: group.suggested_primary,
       }));
 
@@ -289,9 +299,7 @@ export const EntityMergeTool: React.FC = () => {
       }
       setError({
         message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to queue merge job',
+          err instanceof Error ? err.message : 'Failed to queue merge job',
         context: 'merge',
       });
       toast.error('Failed to queue merge job');
@@ -506,7 +514,10 @@ export const EntityMergeTool: React.FC = () => {
           </div>
 
           {filteredDuplicates.map(({ group, index }) => (
-            <Card key={index} className="border-(--nous-border-1) bg-(--nous-bg-2)">
+            <Card
+              key={index}
+              className="border-(--nous-border-1) bg-(--nous-bg-2)"
+            >
               <CardContent className="p-4">
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-2">
@@ -520,7 +531,10 @@ export const EntityMergeTool: React.FC = () => {
                     <span className="text-xs font-mono text-(--nous-fg-3)">
                       {group.entities.length} similar entities
                     </span>
-                    <Badge variant="outline" className="font-mono text-[10px] border-(--nous-border-1)">
+                    <Badge
+                      variant="outline"
+                      className="font-mono text-[10px] border-(--nous-border-1)"
+                    >
                       {(group.similarity * 100).toFixed(0)}% match
                     </Badge>
                   </div>
@@ -565,10 +579,13 @@ export const EntityMergeTool: React.FC = () => {
                             <span>{entity.type}</span>
                             <span>•</span>
                             <span>
-                              Confidence: {((entity.confidence || 0) * 100).toFixed(0)}%
+                              Confidence:{' '}
+                              {((entity.confidence || 0) * 100).toFixed(0)}%
                             </span>
                             <span>•</span>
-                            <span>{new Date(entity.created_at).toLocaleDateString()}</span>
+                            <span>
+                              {new Date(entity.created_at).toLocaleDateString()}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -585,7 +602,9 @@ export const EntityMergeTool: React.FC = () => {
         <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
           <CardContent className="p-8 text-center">
             <GitMerge className="w-12 h-12 mx-auto mb-4 text-(--nous-fg-3)" />
-            <p className="text-sm font-mono text-(--nous-fg-1)">No duplicates found</p>
+            <p className="text-sm font-mono text-(--nous-fg-1)">
+              No duplicates found
+            </p>
             <p className="text-xs font-mono text-(--nous-fg-3) mt-2">
               Click FIND_DUPLICATES to scan for similar entities
             </p>

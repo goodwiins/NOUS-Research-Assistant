@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Document, DocumentFilters, APIErrorClass } from '@/types';
 import { api } from '@/services/api-client';
 import { useAuth } from '@/hooks/useAuth';
+import { isTabHidden } from '@/lib/tabVisibility';
 
 // Type for the backend document response (before transformation)
 interface BackendDocument {
@@ -750,6 +751,8 @@ export const useDocuments = (
         clearInterval(intervalId);
         return;
       }
+      // Background tabs skip the request; the cap above still counts.
+      if (isTabHidden()) return;
       fetchDocuments();
     }, DOCUMENT_POLL_INTERVAL_MS);
 

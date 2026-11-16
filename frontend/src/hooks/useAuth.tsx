@@ -15,6 +15,7 @@ import {
   onAccountSessionReset,
 } from '@/lib/account-session';
 import { useAuthStore } from '@/stores/authStore';
+import { useShallow } from 'zustand/react/shallow';
 
 interface AuthContextType {
   user: User | null;
@@ -52,7 +53,25 @@ interface AuthProviderProps {
 }
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
-  const store = useAuthStore();
+  const store = useAuthStore(
+    useShallow((s) => ({
+      clearPendingEmailConfirmation: s.clearPendingEmailConfirmation,
+      error: s.error,
+      fetchProfile: s.fetchProfile,
+      initialize: s.initialize,
+      isAuthenticated: s.isAuthenticated,
+      isLoading: s.isLoading,
+      organization: s.organization,
+      pendingConfirmationEmail: s.pendingConfirmationEmail,
+      pendingEmailConfirmation: s.pendingEmailConfirmation,
+      pendingSignupPossiblyExisting: s.pendingSignupPossiblyExisting,
+      resetPassword: s.resetPassword,
+      signIn: s.signIn,
+      signOut: s.signOut,
+      signUp: s.signUp,
+      user: s.user,
+    }))
+  );
   const accountRevision = useSyncExternalStore(
     onAccountSessionReset,
     getAccountSessionRevision,

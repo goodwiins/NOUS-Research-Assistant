@@ -18,6 +18,7 @@ import { workspaceService } from '@/services/workspaceService';
 import { useChatSessionGuard } from './useChatSessionGuard';
 import { useChatStore, onChatSessionReset } from '@/store/chat-store';
 import { useAuthStore } from '@/stores/authStore';
+import { useShallow } from 'zustand/react/shallow';
 import { getLoginPathWithRedirect } from '@/utils/authRedirect';
 import {
   ChatMessage as DBChatMessage,
@@ -169,7 +170,9 @@ export function useChatSession(): UseChatSessionReturn {
   const unavailableInitialUrlThreadRef = useRef<string | null>(null);
 
   // ---- Auth ----
-  const { isAuthenticated, user } = useAuthStore();
+  const { isAuthenticated, user } = useAuthStore(
+    useShallow((s) => ({ isAuthenticated: s.isAuthenticated, user: s.user }))
+  );
   const userId = user?.id ?? null;
 
   // ---- Store bindings ----
