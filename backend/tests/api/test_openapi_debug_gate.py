@@ -23,11 +23,14 @@ tiktoken.get_encoding = lambda name: MagicMock()
 from src.main import app
 
 client = TestClient(app)
+capabilities = client.get("/api/v1/backend-capabilities")
 print("OPENAPI_DEBUG_GATE=" + json.dumps({
     "schema": client.get("/openapi.json").status_code,
     "docs": client.get("/docs").status_code,
     "redoc": client.get("/redoc").status_code,
     "generated_paths": bool(app.openapi()["paths"]),
+    "capabilities_status": capabilities.status_code,
+    "capabilities": capabilities.json(),
 }))
 """
 
@@ -75,3 +78,5 @@ def test_openapi_http_routes_follow_debug_mode(
     assert probe["docs"] == expected_status
     assert probe["redoc"] == expected_status
     assert probe["generated_paths"] is True
+    assert probe["capabilities_status"] == 200
+    assert probe["capabilities"] == {"draftClaims": True, "draftRelease": True}

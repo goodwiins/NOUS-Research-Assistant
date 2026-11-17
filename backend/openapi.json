@@ -3354,6 +3354,24 @@
         "title": "AuthorIn",
         "type": "object"
       },
+      "BackendCapabilities": {
+        "properties": {
+          "draftClaims": {
+            "title": "Draftclaims",
+            "type": "boolean"
+          },
+          "draftRelease": {
+            "title": "Draftrelease",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "draftClaims",
+          "draftRelease"
+        ],
+        "title": "BackendCapabilities",
+        "type": "object"
+      },
       "BatchEntityRequest": {
         "description": "Request for batch entity operations",
         "properties": {
@@ -40691,6 +40709,28 @@
         "summary": "Update User Role",
         "tags": [
           "authentication"
+        ]
+      }
+    },
+    "/api/v1/backend-capabilities": {
+      "get": {
+        "description": "Expose only whether the deployed API supports the draft panels.",
+        "operationId": "backend_capabilities_api_v1_backend_capabilities_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackendCapabilities"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Backend Capabilities",
+        "tags": [
+          "capabilities"
         ]
       }
     },

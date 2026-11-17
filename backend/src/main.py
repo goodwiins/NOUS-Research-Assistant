@@ -43,6 +43,7 @@ from src.api.arxiv import (
 from src.api.auth import auth_router, cli_auth_router
 from src.api.auth.api_keys import router as api_keys_router
 from src.api.auth_orcid import router as orcid_router
+from src.api.backend_capabilities import router as backend_capabilities_router
 from src.api.compat import router as alphaxiv_compat_router
 from src.api.connectors import connectors_router
 from src.api.diagnostics import diagnostics_router
@@ -757,6 +758,7 @@ app.include_router(
 
 # Include dependency-aware readiness endpoint
 app.include_router(health_router)
+app.include_router(backend_capabilities_router)
 
 
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
