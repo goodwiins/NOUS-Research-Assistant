@@ -210,6 +210,7 @@ class MultimodalProcessingService:
 
             # Update document with processing results
             await self.update_document_with_results(document, processing_results)
+            self._stage_for_bedrock(document, processing_results)
 
             # Finalize the job to MATCH the document outcome.
             self._finalize_job(job, document, processing_results)
@@ -1154,6 +1155,14 @@ class MultimodalProcessingService:
 
             start_time = time.time()
 
+            from src.services.bedrock_sync import bedrock_sync_enabled
+
+            if bedrock_sync_enabled():
+                # This step runs before update_document_with_results stores
+                # the extracted text, so process_document stages afterwards.
+                results["bedrock_kb_stage"] = "deferred"
+                return results
+
             # Phase 5: DO KB owns retrieval. Push the document directly.
             ds_uuid: Optional[str] = None
             if getattr(settings, "DO_KB_ENABLED", False):
@@ -1300,6 +1309,28 @@ class MultimodalProcessingService:
                 f"Document processing failed for {document.id}: "
                 f"{processing_results['errors']}"
             )
+
+    def _stage_for_bedrock(self, document: Document, results: Dict[str, Any]) -> None:
+        """Stage the final text (extraction plus captions) for the Bedrock KB.
+
+        Staged only; the Bedrock queue tick marks the document indexed later.
+        """
+        from src.services.bedrock_sync import (
+            bedrock_sync_enabled,
+            begin_stage_write,
+            finish_stage_write,
+            stage_document_sync,
+        )
+
+        if not (bedrock_sync_enabled() and results.get("success")):
+            return
+        if not document.content_text:
+            return
+        write_token = begin_stage_write(document)
+        self.db.commit()  # durable before the upload starts
+        results["bedrock_kb_stage"] = stage_document_sync(self.db, document).value
+        finish_stage_write(document, write_token)
+        self.db.commit()
 
     async def update_document_with_results(
         self, document: Document, results: Dict[str, Any]

@@ -16,6 +16,7 @@ import {
   triggerExtraction,
   updateMatrix,
 } from '@/services/scispaceService';
+import { APIErrorClass } from '@/types/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -41,6 +42,25 @@ import { CellCitation } from './CellCitation';
 import { CellObservations, MISSINGNESS_LABELS } from './CellObservations';
 
 const CELL_BADGE = 'px-1.5 py-0 text-[10px]';
+
+const POLL_INTERVAL_MS = 3000;
+// Consecutive poll failures tolerated before giving up (~30 s). Covers a task
+// that is not registered yet (404) and transient 5xx/network errors.
+const MAX_CONSECUTIVE_POLL_FAILURES = 10;
+const POLL_FAILED_MESSAGE =
+  'Could not check extraction progress. Refresh the page to see the latest results.';
+
+/**
+ * A client error that will not change on retry: any 4xx except 404 (the task
+ * may not be registered yet), 408 (client timeout) and 429 (rate limit).
+ */
+function isPermanentPollError(err: unknown): boolean {
+  if (!(err instanceof APIErrorClass)) return false;
+  const code = err.error.status_code;
+  return (
+    code >= 400 && code < 500 && code !== 404 && code !== 408 && code !== 429
+  );
+}
 
 interface ExtractionMatrixProps {
   projectId: string;
@@ -76,6 +96,11 @@ export function ExtractionMatrix({
   >(null);
   const [autoExtractionStatus, setAutoExtractionStatus] =
     useState<ExtractionTaskStatus | null>(null);
+  // Set when polling gave up on a permanent or repeated error; shown in the
+  // same alert as a failed run.
+  const [autoExtractionPollError, setAutoExtractionPollError] = useState<
+    string | null
+  >(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchMatrix = useCallback(async (id: string) => {
@@ -118,20 +143,25 @@ export function ExtractionMatrix({
     // recorded (that would hide both the progress banner and the alert).
     let cancelled = false;
     let settled = false;
+    let consecutiveFailures = 0;
     const stale = (): boolean => cancelled || settled;
+    const stopPolling = (): void => {
+      settled = true;
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
 
     const poll = async () => {
       try {
         const status = await getExtractionTaskStatus(autoExtractionTaskId);
         if (stale()) return;
+        consecutiveFailures = 0;
         setAutoExtractionStatus(status);
 
         if (status.status === 'completed' || status.status === 'failed') {
-          settled = true;
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
+          stopPolling();
           // A 'failed' status stays in autoExtractionStatus so the banner
           // below can show its error instead of silently clearing.
           setAutoExtractionTaskId(null);
@@ -140,12 +170,26 @@ export function ExtractionMatrix({
             await fetchMatrix(matrix.id);
           }
         }
-      } catch {
-        // Task may not be registered yet, keep polling
+      } catch (err) {
+        if (stale()) return;
+        // The task may not be registered yet (404) or the backend may be
+        // briefly unavailable, so keep polling for a bounded number of
+        // attempts. A permanent client error (403, 422, ...) never recovers;
+        // polling it forever left the progress banner up with no error.
+        consecutiveFailures += 1;
+        if (
+          isPermanentPollError(err) ||
+          consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES
+        ) {
+          stopPolling();
+          setAutoExtractionTaskId(null);
+          setAutoExtractionStatus(null);
+          setAutoExtractionPollError(POLL_FAILED_MESSAGE);
+        }
       }
     };
 
-    pollRef.current = setInterval(poll, 3000);
+    pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
     poll();
 
     return () => {
@@ -166,6 +210,7 @@ export function ExtractionMatrix({
     // A previous matrix's terminal (failed) status must not outlive it: the
     // new matrix may never poll (no extraction_task_id) to replace it.
     setAutoExtractionStatus(null);
+    setAutoExtractionPollError(null);
     try {
       const result = await createMatrix(projectId, {
         name: createName.trim(),
@@ -190,6 +235,7 @@ export function ExtractionMatrix({
     // A new run replaces whatever the previous run ended with, and its task
     // id becomes the polled task so this run's progress or failure is shown.
     setAutoExtractionStatus(null);
+    setAutoExtractionPollError(null);
     const result = await triggerExtraction(targetMatrixId, {
       document_ids: documents.map((d) => d.id),
     });
@@ -386,16 +432,21 @@ export function ExtractionMatrix({
 
   return (
     <div className="space-y-4">
-      {autoExtractionStatus?.status === 'failed' ? (
+      {autoExtractionPollError || autoExtractionStatus?.status === 'failed' ? (
         <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-2">
           <p role="alert" className="flex-1 text-xs text-destructive">
-            {autoExtractionStatus.error ?? 'Extraction failed'}
+            {autoExtractionPollError ??
+              autoExtractionStatus?.error ??
+              'Extraction failed'}
           </p>
           <Button
             variant="ghost"
             size="icon"
             aria-label="Dismiss extraction error"
-            onClick={() => setAutoExtractionStatus(null)}
+            onClick={() => {
+              setAutoExtractionStatus(null);
+              setAutoExtractionPollError(null);
+            }}
           >
             <X className="h-3.5 w-3.5" />
           </Button>

@@ -2,7 +2,15 @@
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, X } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { useDialogReturnFocus } from '@/hooks/useDialogReturnFocus';
 import { createProject } from '@/services/researchEngineService';
 import { listWorkflowLinkOptions } from '@/services/projectService';
 
@@ -26,6 +34,7 @@ export function CreateProjectModal({
     queryFn: listWorkflowLinkOptions,
     enabled: isOpen,
   });
+  const restoreFocus = useDialogReturnFocus(isOpen);
 
   if (!isOpen) return null;
   const selectedCollection = collections.find(
@@ -63,21 +72,27 @@ export function CreateProjectModal({
     }
   };
 
+  // Radix Dialog owns role="dialog", aria-modal, Escape, the focus trap and
+  // focus restore to the opener (GOO-599).
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="bg-card border border-border rounded-lg w-full max-w-xl p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-mono font-bold text-sol">
+    <Dialog
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!open) handleClose();
+      }}
+    >
+      <DialogContent
+        onCloseAutoFocus={restoreFocus}
+        className="bg-card border-border max-w-xl"
+      >
+        <DialogHeader className="mb-2 pr-6">
+          <DialogTitle className="text-lg font-mono font-bold text-sol">
             Enable Research Workflow
-          </h2>
-          <button
-            onClick={handleClose}
-            className="p-1 text-muted-foreground hover:text-foreground"
-            aria-label="Close modal"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
+          </DialogTitle>
+          <DialogDescription>
+            Pick an existing project to run the research workflow on.
+          </DialogDescription>
+        </DialogHeader>
 
         {error && (
           <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-400 font-mono">
@@ -109,14 +124,16 @@ export function CreateProjectModal({
           </div>
         </div>
 
-        <div className="flex justify-end gap-3 mt-6">
+        <div className="flex justify-end gap-3 mt-4">
           <button
+            type="button"
             onClick={handleClose}
             className="px-4 py-2 text-sm font-mono text-muted-foreground hover:text-foreground transition-colors"
           >
             Cancel
           </button>
           <button
+            type="button"
             onClick={handleSubmit}
             disabled={!selectedCollection || submitting}
             className="flex items-center gap-2 px-4 py-2 bg-sol/10 text-sol border border-sol/30 rounded font-mono text-sm hover:bg-sol/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -125,8 +142,8 @@ export function CreateProjectModal({
             Enable Workflow
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
