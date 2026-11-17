@@ -41,6 +41,7 @@ celery_app = Celery(
         "src.tasks.retention_tasks",
         "src.tasks.reconcile_tasks",
         "src.tasks.reconcile_jobs",
+        "src.tasks.bedrock_sync_tasks",
         "src.tasks.research_run_tasks",
         "src.tasks.artifact_tasks",
         "src.tasks.integration_action_tasks",

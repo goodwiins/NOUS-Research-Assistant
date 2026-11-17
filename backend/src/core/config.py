@@ -385,6 +385,9 @@ class Settings(BaseSettings):
     DO_KB_ENABLED: bool = False
     DO_KB_PRIMARY_READ: bool = False  # Phase 4b: DO KB serves reads
     BEDROCK_KB_ID: str = ""  # Shared AWS KB; every read filters by organization_id
+    # Write path (services/bedrock_sync.py) runs only when both ids are set.
+    BEDROCK_KB_DATA_SOURCE_ID: str = ""
+    BEDROCK_KB_S3_PREFIX: str = "bedrock/nous-dev-knowledge-base/"
     DO_API_TOKEN: Optional[str] = None
     DO_KB_REGION: Optional[str] = None  # e.g. "tor1", "nyc3"
     DO_KB_PROJECT_ID: Optional[str] = None
