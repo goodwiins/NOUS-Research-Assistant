@@ -67,6 +67,8 @@ class AgentState(TypedDict):
     reflection_count: int  # Max 2 per turn, reset per user message
     compaction_count: int  # Increments each compaction, reset per turn
     intent_confidence: float  # LLM classifier confidence 0-1
+    intent_source: str  # ClassificationResult.source, or "error" (GOO-472)
+    intent_fallback_reason: str  # Why the semantic verdict was unused; "" if used
     last_error_info: dict  # {category, message, suggestion}
     user_id: str  # Owner user ID for HITL ownership verification
     current_project_id: str  # UUID of the project the user is currently discussing

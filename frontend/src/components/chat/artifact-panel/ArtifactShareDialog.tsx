@@ -15,6 +15,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   artifactSharesKey,
   artifactShareScope,
@@ -340,14 +341,24 @@ function ScopedShareDialog({
                 >
                   Copy share link
                 </button>
-                <button
-                  type="button"
-                  disabled={pending !== null}
-                  onClick={() => void revoke(share.id)}
-                  className="rounded-md border px-2 py-1"
-                >
-                  {pending === share.id ? 'Revoking…' : 'Revoke share link'}
-                </button>
+                <ConfirmDialog
+                  title="Revoke this share link?"
+                  description="Anyone using this link loses access to the shared version. To share again, create a new link."
+                  confirmLabel="Revoke link"
+                  variant="destructive"
+                  onConfirm={() => void revoke(share.id)}
+                  trigger={
+                    <button
+                      type="button"
+                      disabled={pending !== null}
+                      className="rounded-md border px-2 py-1"
+                    >
+                      {pending === share.id
+                        ? 'Revoking…'
+                        : 'Revoke share link'}
+                    </button>
+                  }
+                />
               </li>
             ))}
           </ul>

@@ -147,16 +147,28 @@ function truncateTitle(text: string, maxLength: number = 150): string {
 }
 
 /**
- * Check if text looks like an author list
+ * Citation snippets are user-supplied and unbounded server-side. Title
+ * extraction only needs the head of the snippet, so cap the text before any
+ * pattern runs (GOO-622).
+ */
+const MAX_TITLE_SOURCE_LENGTH = 1000;
+
+/**
+ * Check if text looks like an author list ("Smith J. K., ..." / "Smith J and").
+ *
+ * Every whitespace run has exactly one owner: `\s+` inside the repeated group
+ * must be followed by an initial, and the single trailing `\s*` sits outside
+ * the group. The old `(?:\s+[A-Z]\.?\s*)+` let adjacent `\s*` / `\s+` split a
+ * whitespace run in many ways, which backtracked exponentially (GOO-622).
  */
 function looksLikeAuthorList(text: string): boolean {
-  return /^[A-Z][a-z]+(?:\s+[A-Z]\.?\s*)+(?:,|and)/.test(text);
+  return /^[A-Z][a-z]+(?:\s+[A-Z]\.?)+\s*(?:,|and)/.test(text);
 }
 
 function extractTitleFromSnippet(snippet?: string): string | null {
   if (!snippet) return null;
 
-  const trimmedSnippet = snippet.trim();
+  const trimmedSnippet = snippet.slice(0, MAX_TITLE_SOURCE_LENGTH).trim();
   if (!trimmedSnippet) return null;
 
   // Try configured patterns
@@ -213,12 +225,11 @@ export function mapDbMessageToUI(dbMsg: ChatMessage): UIMessage {
       // 2. Extracted from snippet content
       // 3. External reference ID (e.g., arXiv ID like "2401.12345")
       // 4. Generic fallback
-      const extractedTitle =
-        extractTitleFromSnippet(c.snippet) ||
-        extractTitleFromSnippet(c.snippet_preview);
+      // Only parse the snippet when there is no usable document_title.
       const title =
         c.document_title ??
-        extractedTitle ??
+        (extractTitleFromSnippet(c.snippet) ||
+          extractTitleFromSnippet(c.snippet_preview)) ??
         (c.external_reference_id
           ? `Reference: ${c.external_reference_id}`
           : null) ??
