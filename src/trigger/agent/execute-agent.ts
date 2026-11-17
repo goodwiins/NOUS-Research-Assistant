@@ -120,6 +120,7 @@ export const executeAgent = task({
     if (ticketUserId !== userId)
       throw new Error("Agent task identity mismatch");
 
+    metadata.set("userId", userId);
     logger.info("Starting durable agent execution", { userId });
     metadata.set("status", "running");
 
@@ -140,7 +141,6 @@ export const executeAgent = task({
     );
 
     metadata.set("backendJobId", job_id);
-    metadata.set("userId", userId);
     logger.info("Backend job created", { jobId: job_id });
 
     const result = await pollUntilDone(job_id, backendToken, userId);

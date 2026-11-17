@@ -191,6 +191,16 @@ def test_service_key_must_be_distinct_from_agent_key(
     assert exc.value.status_code == 401
 
 
+def test_shared_signing_key_cannot_mint_agent_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "TRIGGER_SERVICE_SIGNING_KEY", _AGENT_KEY)
+    token = _token("trigger:agent", _AGENT_KEY, "other-user")
+    with pytest.raises(HTTPException) as exc:
+        _authenticate(token, "POST", "/api/v1/agent/execute")
+    assert exc.value.status_code == 401
+
+
 def test_agent_ticket_requires_configured_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "TRIGGER_AGENT_SIGNING_KEY", "")
     token = _token("trigger:agent", _AGENT_KEY, "user-1")

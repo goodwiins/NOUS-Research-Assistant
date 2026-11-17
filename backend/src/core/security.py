@@ -307,7 +307,7 @@ def verify_trigger_token(token: str, method: str, path: str) -> Optional[TokenDa
         ),
     ):
         if len(key.encode("utf-8")) < 32 or (
-            scope == "trigger:service" and key == settings.TRIGGER_AGENT_SIGNING_KEY
+            settings.TRIGGER_AGENT_SIGNING_KEY == settings.TRIGGER_SERVICE_SIGNING_KEY
         ):
             continue
         if not any(
