@@ -139,6 +139,20 @@ features:
       - "backend/src/api/arxiv/papers.py"
       - "backend/src/services/arxiv/papers.py"
       - "backend/src/services/arxiv/recent.py"
+  - id: draft-capability-discovery
+    status: planned
+    surfaces:
+      web: []
+      api: ["GET /api/v1/backend-capabilities"]
+      cli: []
+    states: [available, unavailable]
+    pass_criteria:
+      - "A production backend hides /openapi.json while reporting the draft features it serves."
+      - "An older backend or failed feature probe leaves the frontend draft controls disabled."
+    scenarios: []
+    owns:
+      - "backend/src/api/backend_capabilities.py"
+      - "frontend/app/api/backend-capabilities/route.ts"
 ignore:
   # Shrink-only. Remove a path when a feature claims it; the checker fails on
   # entries that no longer exist, that a feature also claims, or (with --base)
