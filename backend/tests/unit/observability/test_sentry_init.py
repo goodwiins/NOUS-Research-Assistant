@@ -5,7 +5,7 @@ a transaction, and the quota ran out. Celery never called ``init_sentry``, so
 worker and beat failures never reached Sentry at all.
 
 Mutation check: return ``rate`` for ``/health`` paths in ``_make_traces_sampler``,
-or drop the ``celeryd_init`` receiver in ``celery_app.py``, and this file fails.
+check ``parent_sampled`` before the probe-path exclusion (GOO-619), or drop the ``celeryd_init`` receiver in ``celery_app.py``, and this file fails.
 """
 
 from __future__ import annotations
@@ -44,6 +44,18 @@ def test_continued_traces_keep_the_parent_decision() -> None:
     sampler = sentry._make_traces_sampler(0.1)
     assert sampler({**_asgi("/api/v1/x"), "parent_sampled": True}) == 1.0
     assert sampler({**_asgi("/api/v1/x"), "parent_sampled": False}) == 0.0
+    # Celery tasks continued from a sampled API trace stay sampled.
+    assert sampler({"celery_job": {"task": "x"}, "parent_sampled": True}) == 1.0
+
+
+@pytest.mark.parametrize(
+    "path", ["/health", "/health/readiness", "/metrics", "/favicon.ico"]
+)
+def test_continued_probe_traces_are_still_never_traced(path: str) -> None:
+    # GOO-619: a probe carrying a sampled ``sentry-trace`` header must not
+    # inherit the parent's decision; the exclusion wins.
+    sampler = sentry._make_traces_sampler(0.1)
+    assert sampler({**_asgi(path), "parent_sampled": True}) == 0.0
 
 
 @pytest.fixture
