@@ -2540,6 +2540,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/backend-capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Backend Capabilities
+         * @description Expose only whether the deployed API supports the draft panels.
+         */
+        get: operations["backend_capabilities_api_v1_backend_capabilities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chat/cache/clear": {
         parameters: {
             query?: never;
@@ -12719,6 +12739,13 @@ export interface components {
             order: number;
             /** User Id */
             user_id?: string | null;
+        };
+        /** BackendCapabilities */
+        BackendCapabilities: {
+            /** Draftclaims */
+            draftClaims: boolean;
+            /** Draftrelease */
+            draftRelease: boolean;
         };
         /**
          * BatchEntityRequest
@@ -29873,6 +29900,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    backend_capabilities_api_v1_backend_capabilities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackendCapabilities"];
                 };
             };
         };

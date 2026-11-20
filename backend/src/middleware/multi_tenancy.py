@@ -80,6 +80,8 @@ _SKIP_PATH_REGEXES = (
 # prefix match here would re-open the I7 look-alike bypass for every sibling
 # route.
 _MIDDLEWARE_EXEMPT_PATH_REGEXES = (
+    # GET /api/v1/backend-capabilities — two static, tenant-free feature flags.
+    re.compile(r"^/api/v1/backend-capabilities$"),
     # GET / — static welcome/version metadata served by main.py (no tenant data).
     re.compile(r"^/$"),
     # GET /docs — Swagger UI page served by FastAPI (static HTML).
