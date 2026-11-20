@@ -90,9 +90,6 @@ _MIDDLEWARE_EXEMPT_PATH_REGEXES = (
     re.compile(r"^/redoc$"),
     # GET /openapi.json — generated API schema (service metadata).
     re.compile(r"^/openapi\.json$"),
-    # POST /api/v1/arxiv/search — anonymous arXiv literature discovery
-    # (api/arxiv/core.py:145, no auth dependency by design; external data only).
-    re.compile(r"^/api/v1/arxiv/search$"),
     # GET /api/v1/arxiv/tracking/stats — aggregate change-tracking counts;
     # docstring declares it public and deliberately omits per-tenant detail.
     re.compile(r"^/api/v1/arxiv/tracking/stats$"),

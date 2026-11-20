@@ -1,4 +1,4 @@
-"""Unit tests for the public and protected ArXiv API surface."""
+"""Unit tests for the protected ArXiv API surface."""
 
 import uuid
 from types import SimpleNamespace
@@ -8,8 +8,20 @@ from src.core.dependencies import get_current_user
 from src.services.arxiv.arxiv_service import IngestionError
 
 
-def test_public_arxiv_search_does_not_require_auth(test_client) -> None:
-    """Searching arXiv should remain available on the public discovery page."""
+def test_arxiv_search_requires_auth_before_spending_upstream_quota(test_client) -> None:
+    with patch("src.api.arxiv.core.ArXivIngestionService") as mock_service_cls:
+        response = test_client.post(
+            "/api/v1/arxiv/search",
+            json={"query": "transformer interpretability", "max_results": 5},
+            headers={"Authorization": ""},
+        )
+
+    assert response.status_code == 401
+    mock_service_cls.assert_not_called()
+
+
+def test_authenticated_arxiv_search_returns_papers(test_app, test_client) -> None:
+    """An authenticated caller can still search arXiv."""
     paper = {
         "id": "1706.03762",
         "title": "Attention Is All You Need",
@@ -27,16 +39,22 @@ def test_public_arxiv_search_does_not_require_auth(test_client) -> None:
         },
     }
 
-    with patch("src.api.arxiv.core.ArXivIngestionService") as mock_service_cls:
-        mock_service = AsyncMock()
-        mock_service.search_papers = AsyncMock(return_value=[paper])
-        mock_service_cls.return_value.__aenter__.return_value = mock_service
-        mock_service_cls.return_value.__aexit__.return_value = None
+    test_app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id="user-1"
+    )
+    try:
+        with patch("src.api.arxiv.core.ArXivIngestionService") as mock_service_cls:
+            mock_service = AsyncMock()
+            mock_service.search_papers = AsyncMock(return_value=[paper])
+            mock_service_cls.return_value.__aenter__.return_value = mock_service
+            mock_service_cls.return_value.__aexit__.return_value = None
 
-        response = test_client.post(
-            "/api/v1/arxiv/search",
-            json={"query": "transformer interpretability", "max_results": 5},
-        )
+            response = test_client.post(
+                "/api/v1/arxiv/search",
+                json={"query": "transformer interpretability", "max_results": 5},
+            )
+    finally:
+        test_app.dependency_overrides.pop(get_current_user, None)
 
     assert response.status_code == 200
     body = response.json()
