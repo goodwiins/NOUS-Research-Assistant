@@ -53,6 +53,7 @@ import {
 import { useProjectStore } from '@/store/projectStore';
 import { useAgentChatStore } from '@/store/agentChatStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useShallow } from 'zustand/react/shallow';
 import toast from 'react-hot-toast';
 import { useProjectSkillCatalog } from '@/hooks/useProjectSkills';
 import { APIErrorClass } from '@/types/api';
@@ -114,7 +115,9 @@ export default function ProjectDetailPage() {
       ? (searchParams.get('draftId') ?? '')
       : null;
   const projectId = params.id as string;
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated } = useAuthStore(
+    useShallow((s) => ({ isAuthenticated: s.isAuthenticated }))
+  );
 
   const {
     currentProject,
@@ -136,7 +139,29 @@ export default function ProjectDetailPage() {
     fetchBibliography,
     downloadBibliography,
     clearError,
-  } = useProjectStore();
+  } = useProjectStore(
+    useShallow((s) => ({
+      currentProject: s.currentProject,
+      projectDocuments: s.projectDocuments,
+      projectNotes: s.projectNotes,
+      bibliography: s.bibliography,
+      loading: s.loading,
+      documentsLoading: s.documentsLoading,
+      notesLoading: s.notesLoading,
+      error: s.error,
+      fetchProject: s.fetchProject,
+      fetchProjectDocuments: s.fetchProjectDocuments,
+      fetchProjectNotes: s.fetchProjectNotes,
+      removeDocument: s.removeDocument,
+      createNote: s.createNote,
+      updateNote: s.updateNote,
+      deleteNote: s.deleteNote,
+      toggleNotePin: s.toggleNotePin,
+      fetchBibliography: s.fetchBibliography,
+      downloadBibliography: s.downloadBibliography,
+      clearError: s.clearError,
+    }))
+  );
 
   const [mounted, setMounted] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);

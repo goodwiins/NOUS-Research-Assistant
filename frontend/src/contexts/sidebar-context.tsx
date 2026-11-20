@@ -1,7 +1,13 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, type ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  type ReactNode,
+} from 'react';
 import { useSidebarStore } from '@/store/sidebar-store';
+import { useShallow } from 'zustand/react/shallow';
 import { useIsMobile } from '@/hooks/use-mobile';
 
 type SidebarContextType = {
@@ -33,7 +39,9 @@ const SidebarContext = createContext<SidebarContextType | null>(null);
 export function useSidebar() {
   const context = useContext(SidebarContext);
   if (!context) {
-    throw new Error('useSidebar must be used within an EnhancedSidebarProvider');
+    throw new Error(
+      'useSidebar must be used within an EnhancedSidebarProvider'
+    );
   }
   return context;
 }
@@ -66,7 +74,23 @@ export function EnhancedSidebarProvider({
     getWidth,
     setIsMobile,
     setIsTablet,
-  } = useSidebarStore();
+  } = useSidebarStore(
+    useShallow((s) => ({
+      state: s.state,
+      mobileOpen: s.mobileOpen,
+      isAnimating: s.isAnimating,
+      toggleSidebar: s.toggleSidebar,
+      setMobileOpen: s.setMobileOpen,
+      expandSidebar: s.expandSidebar,
+      collapseSidebar: s.collapseSidebar,
+      setMiniMode: s.setMiniMode,
+      isOpen: s.isOpen,
+      shouldShowTooltips: s.shouldShowTooltips,
+      getWidth: s.getWidth,
+      setIsMobile: s.setIsMobile,
+      setIsTablet: s.setIsTablet,
+    }))
+  );
 
   // Handle responsive state updates
   useEffect(() => {
@@ -91,9 +115,12 @@ export function EnhancedSidebarProvider({
   // Enhanced toggle with animation delay
   const toggleSidebar = () => {
     setMobileOpen(false);
-    setTimeout(() => {
-      storeToggle();
-    }, isMobile ? 300 : 0);
+    setTimeout(
+      () => {
+        storeToggle();
+      },
+      isMobile ? 300 : 0
+    );
   };
 
   const value: SidebarContextType = {
@@ -114,8 +141,6 @@ export function EnhancedSidebarProvider({
   };
 
   return (
-    <SidebarContext.Provider value={value}>
-      {children}
-    </SidebarContext.Provider>
+    <SidebarContext.Provider value={value}>{children}</SidebarContext.Provider>
   );
 }

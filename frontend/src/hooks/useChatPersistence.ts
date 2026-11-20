@@ -312,7 +312,9 @@ onChatSessionReset(resetChatPersistenceInitGuard);
 
 export function useChatPersistence(): UseChatPersistenceReturn {
   const isCurrentSession = useChatSessionGuard();
-  const { isAuthenticated, user } = useAuthStore();
+  const { isAuthenticated, user } = useAuthStore(
+    useShallow((s) => ({ isAuthenticated: s.isAuthenticated, user: s.user }))
+  );
   const userId = user?.id ?? null;
 
   // Per-instance ref is still useful for noting whether *this* consumer has

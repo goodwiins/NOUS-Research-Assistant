@@ -13,12 +13,19 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Progress } from '@/components/ui/progress';
 import toast from 'react-hot-toast';
 import { api } from '@/services/api-client';
 import { entityService } from '@/services/entityService';
 import { APIErrorClass } from '@/types/api';
+import { isTabHidden } from '@/lib/tabVisibility';
 
 interface Document {
   id: string;
@@ -53,14 +60,11 @@ export const DocumentEntityExtractor: React.FC = () => {
   const [jobStep, setJobStep] = useState('');
 
   useEffect(() => {
-    fetchDocuments();
-  }, []);
-
-  useEffect(() => {
     if (!activeJobId) return;
     let consecutivePollFailures = 0;
 
     const poll = setInterval(async () => {
+      if (isTabHidden()) return;
       try {
         const job = await entityService.getProcessingJob(activeJobId);
         consecutivePollFailures = 0;
@@ -100,19 +104,26 @@ export const DocumentEntityExtractor: React.FC = () => {
     return () => clearInterval(poll);
   }, [activeJobId]);
 
-  const fetchDocuments = async () => {
-    try {
-      setLoadingDocs(true);
-      const data = await api.get<{ documents?: Document[] }>('/documents/?page_size=100');
-      setDocuments(data.documents || []);
-    } catch (error) {
-      console.warn('Document fetch failed:', error);
-      toast.error('Failed to fetch documents');
-      setDocuments([]);
-    } finally {
-      setLoadingDocs(false);
-    }
-  };
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<{ documents?: Document[] }>('/documents/?page_size=100')
+      .then((data) => {
+        if (!cancelled) setDocuments(data.documents || []);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.warn('Document fetch failed:', error);
+        toast.error('Failed to fetch documents');
+        setDocuments([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDocs(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const startExtractionJob = async (documentIds: string[]) => {
     try {
@@ -176,7 +187,9 @@ export const DocumentEntityExtractor: React.FC = () => {
             >
               <SelectTrigger className="font-mono text-xs bg-(--nous-bg-1) border-(--nous-border-1) text-(--nous-fg-1)">
                 <SelectValue
-                  placeholder={loadingDocs ? 'Loading documents...' : 'Select a document'}
+                  placeholder={
+                    loadingDocs ? 'Loading documents...' : 'Select a document'
+                  }
                 />
               </SelectTrigger>
               <SelectContent className="bg-(--nous-bg-2) border-(--nous-border-1)">
@@ -200,7 +213,11 @@ export const DocumentEntityExtractor: React.FC = () => {
                 <span>{progress}%</span>
               </div>
               <Progress value={progress} className="h-2" />
-              {activeJobId && <p className="text-[10px] font-mono text-(--nous-fg-3)">JOB: {activeJobId}</p>}
+              {activeJobId && (
+                <p className="text-[10px] font-mono text-(--nous-fg-3)">
+                  JOB: {activeJobId}
+                </p>
+              )}
             </div>
           )}
 
@@ -257,33 +274,49 @@ export const DocumentEntityExtractor: React.FC = () => {
               <div className="p-3 rounded-lg border border-(--nous-border-1) bg-(--nous-bg-1)">
                 <div className="flex items-center gap-2 mb-2">
                   <FileText className="w-4 h-4 text-(--nous-helios)" />
-                  <span className="text-xs font-mono text-(--nous-fg-3)">FOUND</span>
+                  <span className="text-xs font-mono text-(--nous-fg-3)">
+                    FOUND
+                  </span>
                 </div>
-                <p className="text-2xl font-mono font-bold text-(--nous-helios)">{result.entities_found}</p>
+                <p className="text-2xl font-mono font-bold text-(--nous-helios)">
+                  {result.entities_found}
+                </p>
               </div>
 
               <div className="p-3 rounded-lg border border-(--nous-border-1) bg-(--nous-bg-1)">
                 <div className="flex items-center gap-2 mb-2">
                   <CheckCircle className="w-4 h-4 text-(--nous-sol)" />
-                  <span className="text-xs font-mono text-(--nous-fg-3)">CREATED</span>
+                  <span className="text-xs font-mono text-(--nous-fg-3)">
+                    CREATED
+                  </span>
                 </div>
-                <p className="text-2xl font-mono font-bold text-(--nous-sol)">{result.entities_created}</p>
+                <p className="text-2xl font-mono font-bold text-(--nous-sol)">
+                  {result.entities_created}
+                </p>
               </div>
 
               <div className="p-3 rounded-lg border border-(--nous-border-1) bg-(--nous-bg-1)">
                 <div className="flex items-center gap-2 mb-2">
                   <AlertCircle className="w-4 h-4 text-(--nous-helios)" />
-                  <span className="text-xs font-mono text-(--nous-fg-3)">ERRORS</span>
+                  <span className="text-xs font-mono text-(--nous-fg-3)">
+                    ERRORS
+                  </span>
                 </div>
-                <p className="text-2xl font-mono font-bold text-(--nous-helios)">{result.errors}</p>
+                <p className="text-2xl font-mono font-bold text-(--nous-helios)">
+                  {result.errors}
+                </p>
               </div>
 
               <div className="p-3 rounded-lg border border-(--nous-border-1) bg-(--nous-bg-1)">
                 <div className="flex items-center gap-2 mb-2">
                   <Loader2 className="w-4 h-4 text-(--purple)" />
-                  <span className="text-xs font-mono text-(--nous-fg-3)">DOCS</span>
+                  <span className="text-xs font-mono text-(--nous-fg-3)">
+                    DOCS
+                  </span>
                 </div>
-                <p className="text-2xl font-mono font-bold text-(--purple)">{result.document_ids?.length || 0}</p>
+                <p className="text-2xl font-mono font-bold text-(--purple)">
+                  {result.document_ids?.length || 0}
+                </p>
               </div>
             </div>
           </CardContent>

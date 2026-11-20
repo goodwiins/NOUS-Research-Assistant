@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Document, DocumentFilters, APIErrorClass } from '@/types';
 import { api } from '@/services/api-client';
 import { useAuth } from '@/hooks/useAuth';
+import { isTabHidden } from '@/lib/tabVisibility';
 
 // Type for the backend document response (before transformation)
 interface BackendDocument {
@@ -741,15 +742,25 @@ export const useDocuments = (
       return;
     }
 
-    const startedAt = Date.now();
+    // Only visible time counts toward the cap. If hidden ticks counted, a tab
+    // left in the background past the cap would stop polling without ever
+    // fetching, and finished documents would stay "processing" on return.
+    // Count visible ticks, not wall-clock time: browsers throttle hidden-tab
+    // timers (Chrome to ~1/min), so elapsed time can't separate hidden from
+    // visible. The hidden check runs before the cap check.
+    const maxVisibleTicks = Math.ceil(
+      DOCUMENT_POLL_MAX_MS / DOCUMENT_POLL_INTERVAL_MS
+    );
+    let visibleTicks = 0;
     const intervalId = setInterval(() => {
-      if (!mountedRef.current) {
+      if (!mountedRef.current || isTabHidden()) {
         return;
       }
-      if (Date.now() - startedAt >= DOCUMENT_POLL_MAX_MS) {
+      if (visibleTicks >= maxVisibleTicks) {
         clearInterval(intervalId);
         return;
       }
+      visibleTicks += 1;
       fetchDocuments();
     }, DOCUMENT_POLL_INTERVAL_MS);
 

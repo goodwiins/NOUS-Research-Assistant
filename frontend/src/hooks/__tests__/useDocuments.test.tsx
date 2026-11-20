@@ -807,6 +807,150 @@ describe('useDocuments', () => {
       expect(mockGet).toHaveBeenCalledTimes(3);
     });
 
+    it('skips poll ticks while the tab is hidden and resumes when visible', async () => {
+      mockGet.mockResolvedValue({
+        documents: [
+          {
+            id: 'doc-1',
+            filename: 'doc-1.pdf',
+            processing_status: 'processing',
+          },
+        ],
+        pagination: {
+          page: 1,
+          page_size: 20,
+          total: 1,
+          has_next: false,
+          has_prev: false,
+        },
+      });
+      const visibility = vi
+        .spyOn(document, 'visibilityState', 'get')
+        .mockReturnValue('hidden');
+      try {
+        const { result } = renderHook(() =>
+          useDocuments({ autoFetch: false })
+        );
+        await act(async () => {
+          await result.current.fetchDocuments();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(1);
+
+        // Hidden for longer than the 10-minute cap.
+        await act(async () => {
+          vi.advanceTimersByTime(11 * 60 * 1000);
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(1);
+
+        visibility.mockReturnValue('visible');
+        await act(async () => {
+          vi.advanceTimersByTime(5000);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(2);
+      } finally {
+        visibility.mockRestore();
+      }
+    });
+
+    it('keeps the last visible poll when the tab hides near the cap', async () => {
+      mockGet.mockResolvedValue({
+        documents: [
+          { id: 'doc-1', filename: 'doc-1.pdf', processing_status: 'processing' },
+        ],
+        pagination: {
+          page: 1,
+          page_size: 20,
+          total: 1,
+          has_next: false,
+          has_prev: false,
+        },
+      });
+      const visibility = vi
+        .spyOn(document, 'visibilityState', 'get')
+        .mockReturnValue('visible');
+      try {
+        const { result } = renderHook(() =>
+          useDocuments({ autoFetch: false })
+        );
+        await act(async () => {
+          await result.current.fetchDocuments();
+        });
+
+        // 595s visible: one tick of budget left.
+        await act(async () => {
+          vi.advanceTimersByTime(595 * 1000);
+          await Promise.resolve();
+        });
+        const callsBeforeHide = mockGet.mock.calls.length;
+
+        // Hidden well past the cap (as if throttled), then visible again.
+        visibility.mockReturnValue('hidden');
+        await act(async () => {
+          vi.advanceTimersByTime(5 * 60 * 1000);
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(callsBeforeHide);
+
+        visibility.mockReturnValue('visible');
+        await act(async () => {
+          vi.advanceTimersByTime(5000);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(callsBeforeHide + 1);
+      } finally {
+        visibility.mockRestore();
+      }
+    });
+
+    it('resumes after a throttled hidden period where timers barely fired', async () => {
+      mockGet.mockResolvedValue({
+        documents: [
+          { id: 'doc-1', filename: 'doc-1.pdf', processing_status: 'processing' },
+        ],
+        pagination: {
+          page: 1,
+          page_size: 20,
+          total: 1,
+          has_next: false,
+          has_prev: false,
+        },
+      });
+      const visibility = vi
+        .spyOn(document, 'visibilityState', 'get')
+        .mockReturnValue('hidden');
+      try {
+        const { result } = renderHook(() =>
+          useDocuments({ autoFetch: false })
+        );
+        await act(async () => {
+          await result.current.fetchDocuments();
+        });
+
+        // The clock jumps 20 minutes while hidden, but only one throttled
+        // callback runs (no per-interval ticks).
+        vi.setSystemTime(Date.now() + 20 * 60 * 1000);
+        await act(async () => {
+          vi.advanceTimersByTime(5000);
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(1);
+
+        visibility.mockReturnValue('visible');
+        await act(async () => {
+          vi.advanceTimersByTime(5000);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(mockGet).toHaveBeenCalledTimes(2);
+      } finally {
+        visibility.mockRestore();
+      }
+    });
+
     it('stops polling once every document reaches a terminal status', async () => {
       mockGet.mockResolvedValueOnce({
         documents: [
