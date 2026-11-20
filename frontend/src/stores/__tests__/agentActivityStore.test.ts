@@ -478,3 +478,51 @@ describe('agentActivityStore — setStreamSeq cursor', () => {
     expect(run().streamSeq).toBe(1);
   });
 });
+
+describe('agentActivityStore — setRunId and the cursor', () => {
+  beforeEach(() => {
+    useAgentActivityStore.setState({ runs: {}, currentThreadId: null });
+  });
+
+  const run = (): ReturnType<
+    typeof useAgentActivityStore.getState
+  >['runs'][string] => useAgentActivityStore.getState().runs.t1;
+
+  it('keeps the cursor when a run learns its first id', () => {
+    const { startRun, setStreamSeq, setRunId } =
+      useAgentActivityStore.getState();
+    startRun('t1', 'Local Codex', 'task');
+    setStreamSeq('t1', 3, 's1');
+    setRunId('t1', 'run-1');
+    expect(run()).toMatchObject({
+      runId: 'run-1',
+      streamSeq: 3,
+      streamId: 's1',
+    });
+  });
+
+  it('keeps the cursor when the same run id is set again', () => {
+    const { startRun, setStreamSeq, setRunId } =
+      useAgentActivityStore.getState();
+    startRun('t1', 'Local Codex', 'task');
+    setRunId('t1', 'run-1');
+    setStreamSeq('t1', 8);
+    setRunId('t1', 'run-1');
+    expect(run().streamSeq).toBe(8);
+  });
+
+  it('drops the cursor when a different run takes over the thread', () => {
+    const { startRun, setStreamSeq, setRunId } =
+      useAgentActivityStore.getState();
+    startRun('t1', 'Local Codex', 'task');
+    setRunId('t1', 'run-1');
+    setStreamSeq('t1', 8, 's1');
+    setRunId('t1', 'run-2');
+    expect(run().runId).toBe('run-2');
+    expect(run().streamSeq).toBeUndefined();
+    expect(run().streamId).toBeUndefined();
+    // The new run's own seqs are taken as-is, not maxed against run-1's 8.
+    setStreamSeq('t1', 2);
+    expect(run().streamSeq).toBe(2);
+  });
+});
