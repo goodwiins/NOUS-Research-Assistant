@@ -1,11 +1,11 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import Link from 'next/link';
-import { useId, useState, type ReactElement } from 'react';
+import { useId, useRef, useState, type ReactElement } from 'react';
 
 import { getSelectedThreadUrl } from '@/components/chat/shared/chatNavigation';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useAuth } from '@/hooks/useAuth';
 import { scopeSummary } from '@/lib/integrations/scopeLabels';
 import { harnessService } from '@/services/harnessService';
@@ -133,6 +133,7 @@ export function ConnectedDevices(): ReactElement {
       queryClient.invalidateQueries({ queryKey: ['harness'] }),
     ]);
   };
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const revokeConsent = useMutation({
     mutationFn: (requestId: string) =>
       integrationConnectionsService.revokeConsent(requestId),
@@ -148,7 +149,9 @@ export function ConnectedDevices(): ReactElement {
 
   return (
     <section className="mx-auto max-w-2xl space-y-6 p-6">
-      <h1 className="text-2xl font-semibold">Connected devices</h1>
+      <h1 ref={headingRef} tabIndex={-1} className="text-2xl font-semibold">
+        Connected devices
+      </h1>
       <p>
         Devices you paired with nous-harness connect. Revoking access stops the
         device on its next request.
@@ -265,6 +268,7 @@ export function ConnectedDevices(): ReactElement {
                       confirmLabel="Revoke access"
                       variant="destructive"
                       onConfirm={() => revokeConsent.mutate(consent.request_id)}
+                      focusAfterConfirmRef={headingRef}
                       trigger={
                         <button
                           type="button"

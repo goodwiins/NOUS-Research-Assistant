@@ -282,6 +282,12 @@ describe('ProjectWorkflow', () => {
         'reviewer'
       )
     );
+    // The disabled trigger can't take focus back; the roles heading does.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('heading', { name: 'Workflow role assignments' })
+      ).toHaveFocus()
+    );
   });
 
   it('keeps blueprint and role reads on the canonical collection id', async () => {

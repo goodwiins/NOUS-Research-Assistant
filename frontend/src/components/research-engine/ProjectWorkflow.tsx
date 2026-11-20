@@ -2,14 +2,15 @@
 
 import {
   useCallback,
+  useRef,
   useState,
   type ReactElement,
   type ReactNode,
 } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Loader2, Trash2, Workflow } from 'lucide-react';
 import { DraftClaimsPanel } from '@/components/research/DraftClaimsPanel';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useAuth } from '@/hooks/useAuth';
 import { projectService, type Project } from '@/services/projectService';
 import { useProjectStore } from '@/store/projectStore';
@@ -340,6 +341,7 @@ function ProjectRoles({
       void queryClient.invalidateQueries({ queryKey });
     },
   });
+  const rolesHeadingRef = useRef<HTMLHeadingElement>(null);
   const remove = useMutation({
     mutationFn: (assignment: { user_id: string; role: ResearchProjectRole }) =>
       removeProjectRole(projectId, assignment.user_id, assignment.role),
@@ -348,7 +350,13 @@ function ProjectRoles({
 
   return (
     <section className="rounded-xl border border-border bg-card p-5">
-      <h2 className="font-medium text-foreground">Workflow role assignments</h2>
+      <h2
+        ref={rolesHeadingRef}
+        tabIndex={-1}
+        className="font-medium text-foreground"
+      >
+        Workflow role assignments
+      </h2>
       <p className="mt-1 text-sm text-muted-foreground">
         Reviewer, adjudicator, and supervisor are explicit independent roles.
       </p>
@@ -380,6 +388,7 @@ function ProjectRoles({
                   confirmLabel="Remove role"
                   variant="destructive"
                   onConfirm={() => remove.mutate(assignment)}
+                  focusAfterConfirmRef={rolesHeadingRef}
                   trigger={
                     <button
                       type="button"
