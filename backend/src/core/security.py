@@ -9,9 +9,12 @@ The backend accepts two JWT shapes:
    ``/cli-auth/approve`` time so the device-flow CLI doesn't have to
    re-authenticate every Supabase access-token refresh (~1h). CLI tokens
    carry ``scope=cli`` so they can be revoked / rate-limited separately.
+3. Trigger.dev task tickets and service credentials, accepted only by the HTTP
+   auth boundary on the task's allowlisted method and path.
 """
 
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -51,6 +54,8 @@ class TokenData(BaseModel):
     # can reject CLI tokens minted before a per-user "revoked before" cutoff.
     issued_at: Optional[datetime] = None
     is_cli: bool = False
+    is_trigger: bool = False
+    is_trigger_service: bool = False
     # Sign-up profile from Supabase ``user_metadata`` (see
     # ``_extract_signup_metadata``). DISPLAY TEXT ONLY — client-controlled, so
     # it must never influence role, permissions, org membership or tenant scope.
@@ -264,6 +269,93 @@ _CLI_TOKEN_ISSUER = "nous-backend"
 # check jose did make. `exp`, `nbf`, `aud` and `iss` stay fully verified.
 _DECODE_OPTIONS: Dict[str, Any] = {"require": ["exp"], "verify_iat": False}
 
+_TRIGGER_ISSUER = "nous-trigger"
+_TRIGGER_AUDIENCE = "nous-backend"
+_TRIGGER_AGENT_ROUTES = (
+    ("POST", re.compile(r"^/api/v1/agent/execute$")),
+    ("GET", re.compile(r"^/api/v1/agent/jobs/[0-9a-fA-F-]{36}$")),
+    ("POST", re.compile(r"^/api/v1/agent/confirm/[0-9a-fA-F-]{36}$")),
+)
+_TRIGGER_SERVICE_ROUTES = (
+    ("POST", re.compile(r"^/api/v2/documents/upload/single$")),
+    ("POST", re.compile(r"^/api/v1/arxiv/ingest$")),
+    ("POST", re.compile(r"^/api/v1/arxiv/search$")),
+    ("GET", re.compile(r"^/api/v1/processing/jobs/[0-9a-fA-F-]{36}$")),
+    ("POST", re.compile(r"^/api/v1/processing/documents/process$")),
+    ("POST", re.compile(r"^/api/v1/search$")),
+    ("GET", re.compile(r"^/api/v1/search/vectors/model-info$")),
+    ("POST", re.compile(r"^/api/v1/search/vectors/regenerate$")),
+    ("GET", re.compile(r"^/api/v1/infrastructure/workers/health$")),
+    ("GET", re.compile(r"^/api/v1/infrastructure/workers/status$")),
+)
+
+
+def verify_trigger_token(token: str, method: str, path: str) -> Optional[TokenData]:
+    """Accept only a bounded Trigger credential on its intended HTTP route."""
+    for scope, key, routes, max_age in (
+        (
+            "trigger:agent",
+            settings.TRIGGER_AGENT_SIGNING_KEY,
+            _TRIGGER_AGENT_ROUTES,
+            7200,
+        ),
+        (
+            "trigger:service",
+            settings.TRIGGER_SERVICE_SIGNING_KEY,
+            _TRIGGER_SERVICE_ROUTES,
+            300,
+        ),
+    ):
+        if len(key.encode("utf-8")) < 32 or (
+            settings.TRIGGER_AGENT_SIGNING_KEY == settings.TRIGGER_SERVICE_SIGNING_KEY
+        ):
+            continue
+        if not any(
+            allowed_method == method and pattern.fullmatch(path)
+            for allowed_method, pattern in routes
+        ):
+            continue
+        try:
+            payload = jwt.decode(
+                token,
+                key,
+                algorithms=["HS256"],
+                issuer=_TRIGGER_ISSUER,
+                audience=_TRIGGER_AUDIENCE,
+                options={"require": ["sub", "scope", "iss", "aud", "iat", "exp"]},
+                leeway=30,
+            )
+            now = int(time.time())
+            issued_at, expires_at = payload["iat"], payload["exp"]
+            if (
+                payload["scope"] != scope
+                or type(issued_at) is not int
+                or type(expires_at) is not int
+                or issued_at > now + 30
+                or expires_at <= now
+                or expires_at <= issued_at
+                or expires_at - issued_at > max_age
+                or not isinstance(payload["sub"], str)
+                or not payload["sub"]
+            ):
+                continue
+            if scope == "trigger:service" and (
+                not settings.TRIGGER_SERVICE_USER_ID
+                or payload["sub"] != settings.TRIGGER_SERVICE_USER_ID
+                or payload.get("method") != method
+                or payload.get("path") != path
+            ):
+                continue
+            return TokenData(
+                user_id=payload["sub"],
+                exp=datetime.utcfromtimestamp(expires_at),
+                is_trigger=True,
+                is_trigger_service=scope == "trigger:service",
+            )
+        except (jwt.PyJWTError, ValueError, TypeError):
+            continue
+    return None
+
 
 def check_iat_is_numeric(payload: Dict[str, Any]) -> None:
     """Reject a non-numeric ``iat`` the way python-jose did.
@@ -448,6 +540,7 @@ def verify_token(token: str) -> Optional[TokenData]:
 
 def get_current_user_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request = None,
 ) -> TokenData:
     """Get current user from JWT token"""
     credentials_exception = HTTPException(
@@ -459,6 +552,10 @@ def get_current_user_token(
     try:
         token = credentials.credentials
         token_data = verify_token(token)
+        if token_data is None and request is not None:
+            token_data = verify_trigger_token(
+                token, request.method, request.scope["path"]
+            )
 
         if token_data is None:
             raise credentials_exception

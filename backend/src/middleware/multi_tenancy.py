@@ -35,7 +35,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.core.database import AsyncSessionLocal
 from src.core.probes import PROBE_EXEMPT_PATHS
-from src.core.security import TokenData, verify_token
+from src.core.security import TokenData, verify_token, verify_trigger_token
 from src.core.user_provisioning import SupabaseEmailLookupError, ensure_user_and_org
 from src.exceptions.analytics_exceptions import PermissionDeniedException
 from src.middleware.responses import error_response
@@ -157,7 +157,9 @@ def _verified_token_data(request: Request) -> Optional[TokenData]:
     if token is None:
         return None
     try:
-        token_data = verify_token(token)
+        token_data = verify_token(token) or verify_trigger_token(
+            token, request.method, request.scope["path"]
+        )
     except Exception:
         return None
     if not token_data or not token_data.user_id:
@@ -361,7 +363,7 @@ class MultiTenancyMiddleware(BaseHTTPMiddleware):
         # lookup failures propagate (-> 500), never collapse into None (-> 401).
         result = await db.execute(select(User).where(*active_user))
         user = result.scalars().first()
-        if not user:
+        if not user and not token_data.is_trigger_service:
             # User doesn't exist yet — JIT-provision, then re-query.
             try:
                 async with AsyncSessionLocal() as prov_db:

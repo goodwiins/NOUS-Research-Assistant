@@ -37,7 +37,9 @@ def _request():
 def _token(role: str = "admin"):
     # organization_id=None -> exercises the DB fallback path (not the CLI
     # fast-path, which needs a real AsyncSessionLocal).
-    return SimpleNamespace(user_id="user-1", organization_id=None, role=role)
+    return SimpleNamespace(
+        user_id="user-1", organization_id=None, role=role, is_trigger_service=False
+    )
 
 
 @pytest.mark.unit
@@ -45,9 +47,7 @@ def _token(role: str = "admin"):
 async def test_role_comes_from_db_not_token() -> None:
     mw = _mw()
     db = AsyncMock()
-    db_user = SimpleNamespace(
-        id="user-1", organization_id="org-1", role=UserRole.USER
-    )
+    db_user = SimpleNamespace(id="user-1", organization_id="org-1", role=UserRole.USER)
     db.execute = AsyncMock(return_value=_Result(db_user))
 
     with patch(
@@ -70,12 +70,15 @@ async def test_inactive_or_deleted_user_gets_no_context() -> None:
     # None on both the initial select and the post-JIT re-query.
     db.execute = AsyncMock(return_value=_Result(None))
 
-    with patch(
-        "src.middleware.multi_tenancy.verify_token",
-        return_value=_token(role="admin"),
-    ), patch(
-        "src.middleware.multi_tenancy.ensure_user_and_org",
-        new=AsyncMock(return_value=None),
+    with (
+        patch(
+            "src.middleware.multi_tenancy.verify_token",
+            return_value=_token(role="admin"),
+        ),
+        patch(
+            "src.middleware.multi_tenancy.ensure_user_and_org",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         ctx = await mw._extract_tenant_info(_request(), db)
 
