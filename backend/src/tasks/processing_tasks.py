@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from celery import Task, current_app
+from celery import Task, current_app, group
 from celery.exceptions import MaxRetriesExceededError, Retry
 from sqlalchemy import and_, or_, select, tuple_
 
@@ -1180,9 +1180,15 @@ def _skip_if_terminal_under_lock(db: Any, job: Any, job_id: str) -> dict | None:
     }
 
 
-@current_app.task(base=ProcessingTask, bind=True, name="kg_extract_entities_job")
-def kg_extract_entities_job(self, job_id: str):
-    """Extract entities from a document and index them into knowledge graph."""
+@current_app.task(
+    base=ProcessingTask,
+    bind=True,
+    name="kg_extract_entities_job",
+    soft_time_limit=420,
+    time_limit=600,
+)
+def kg_extract_entities_job(self, job_id: str, document_index: int | None = None):
+    """Dispatch a batch or extract one document into the knowledge graph."""
     db = SessionLocal()
     try:
         job = db.query(ProcessingJob).filter(ProcessingJob.id == job_id).first()
@@ -1208,8 +1214,24 @@ def kg_extract_entities_job(self, job_id: str):
         skipped = _skip_if_terminal_under_lock(db, job, job_id)
         if skipped is not None:
             return skipped
-        job.start_job(worker_id=self.request.id, celery_task_id=self.request.id)
-        db.commit()
+        if document_index is None:
+            # The dispatcher has already published its document tasks. A late
+            # broker ack must not publish a second copy of the batch.
+            if (
+                job.status == JobStatus.RUNNING
+                and len((job.parameters or {}).get("document_ids", [])) > 1
+            ):
+                return {
+                    "status": "running",
+                    "job_id": job_id,
+                    "skipped": "duplicate_delivery",
+                }
+            # retry_job() leaves result intact. Its per-document checkpoints
+            # belong to the previous attempt and must not skip this one.
+            if job.status == JobStatus.RETRYING:
+                job.result = None
+            job.start_job(worker_id=self.request.id, celery_task_id=self.request.id)
+            db.commit()
 
         document_ids = []
         if job.parameters:
@@ -1222,6 +1244,38 @@ def kg_extract_entities_job(self, job_id: str):
         if not document_ids:
             raise ValueError("Missing document_id(s) in job parameters")
 
+        all_document_ids = document_ids
+        batch_total_docs = len(document_ids)
+        if document_index is None and batch_total_docs > 1:
+            # Each document gets its own Celery time budget. A single task
+            # looping here could spend its entire 300s soft limit on doc one.
+            group(
+                [
+                    kg_extract_entities_job.s(job_id, index).set(
+                        queue="entity_processing"
+                    )
+                    for index in range(batch_total_docs)
+                ]
+            ).apply_async()
+            return {"status": "running", "job_id": job_id}
+
+        if document_index is not None:
+            if not 0 <= document_index < batch_total_docs:
+                raise ValueError("Invalid document index for KG extraction job")
+            prior = (
+                (job.result or {})
+                .get("_kg_document_results", {})
+                .get(str(document_index))
+            )
+            if prior is not None:
+                return {
+                    "status": "running",
+                    "job_id": job_id,
+                    "result": prior,
+                    "skipped": "duplicate_delivery",
+                }
+            document_ids = [all_document_ids[document_index]]
+
         entities_found_total = 0
         entities_created_total = 0
         relationships_found_total = 0
@@ -1231,6 +1285,7 @@ def kg_extract_entities_job(self, job_id: str):
 
         total_docs = len(document_ids)
         for index, document_id in enumerate(document_ids):
+            progress_index = document_index if document_index is not None else index
             document = db.query(Document).filter(Document.id == document_id).first()
             if not document:
                 errors_total += 1
@@ -1242,8 +1297,8 @@ def kg_extract_entities_job(self, job_id: str):
                 continue
 
             job.update_progress(
-                f"Extracting entities ({index + 1}/{total_docs})",
-                min(80.0, ((index + 1) / max(total_docs, 1)) * 70.0),
+                f"Extracting entities ({progress_index + 1}/{batch_total_docs})",
+                min(80.0, ((progress_index + 1) / batch_total_docs) * 70.0),
             )
             db.commit()
 
@@ -1394,8 +1449,6 @@ def kg_extract_entities_job(self, job_id: str):
                         reconcile_error,
                     )
 
-        job.update_progress("Finalizing extraction job", 90)
-
         result = {
             "document_ids": document_ids,
             "entities_found": entities_found_total,
@@ -1406,6 +1459,51 @@ def kg_extract_entities_job(self, job_id: str):
             "extraction_errors": extraction_errors_total,
         }
 
+        if document_index is not None:
+            # The row lock makes parallel children add their counts without a
+            # lost JSON update. A redelivered child can reuse this result and
+            # avoid repeating its paid LLM and graph writes.
+            db.refresh(job, with_for_update=True)
+            if job.status in _TERMINAL_PROCESSING_STATUSES:
+                return {
+                    "status": job.status.value,
+                    "job_id": job_id,
+                    "skipped": "duplicate_delivery",
+                }
+            partial_state = dict(job.result or {})
+            per_document = dict(partial_state.get("_kg_document_results", {}))
+            per_document[str(document_index)] = result
+            partial_state["_kg_document_results"] = per_document
+            job.result = partial_state
+            if len(per_document) < batch_total_docs:
+                db.commit()
+                return {"status": "running", "job_id": job_id, "result": result}
+
+            result = {
+                "document_ids": all_document_ids,
+                **{
+                    field: sum(
+                        per_document[str(index)][field]
+                        for index in range(batch_total_docs)
+                    )
+                    for field in (
+                        "entities_found",
+                        "entities_created",
+                        "relationships_found",
+                        "relationships_created",
+                        "errors",
+                        "extraction_errors",
+                    )
+                },
+            }
+            entities_created_total = result["entities_created"]
+            relationships_created_total = result["relationships_created"]
+            errors_total = result["errors"]
+            extraction_errors_total = result["extraction_errors"]
+            total_docs = batch_total_docs
+
+        job.update_progress("Finalizing extraction job", 90)
+
         # Honest outcome: if NOTHING was created and something errored (all
         # documents missing/empty, or every KG write failed), completing the job
         # reports a false success to anything polling job status. Fail it so the
@@ -1414,6 +1512,8 @@ def kg_extract_entities_job(self, job_id: str):
         total_created = entities_created_total + relationships_created_total
         total_errors = errors_total + extraction_errors_total
         if total_created == 0 and total_errors > 0:
+            if document_index is not None:
+                job.result = None
             job.fail_job(
                 f"KG extraction created no entities or relationships "
                 f"({total_errors} errors across {total_docs} documents)",
@@ -1429,6 +1529,8 @@ def kg_extract_entities_job(self, job_id: str):
         # Roll back a possibly-poisoned session before writing fail state.
         db.rollback()
         if "job" in locals() and job:
+            if document_index is not None:
+                job.result = None
             job.fail_job(str(e), error_type=type(e).__name__)
             db.commit()
         raise
