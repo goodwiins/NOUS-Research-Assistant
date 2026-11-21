@@ -27,14 +27,20 @@ from src.models.graph import EntityType as GraphEntityType
 from src.models.graph import ExtractionMethod as GraphExtractionMethod
 from src.models.graph import RelationshipType as GraphRelationshipType
 from src.models.processing import JobStatus, JobType, ProcessingJob
+from src.services.bedrock_sync import (
+    STAGE_WRITE_COLUMNS,
+)
 from src.services.bedrock_sync import WRITE_SATELLITE as BEDROCK_WRITE_SATELLITE
+from src.services.bedrock_sync import StageOutcome as BedrockStageOutcome
 from src.services.bedrock_sync import (
     bedrock_sync_enabled,
     begin_stage_write,
     finish_stage_write,
 )
 from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
-from src.services.bedrock_sync import stage_document_sync
+from src.services.bedrock_sync import (
+    stage_document_sync,
+)
 from src.services.documents.satellite_state import begin_write, finish_write
 from src.services.knowledge_graph.knowledge_graph_service import (
     GraphExtractor,
@@ -680,6 +686,9 @@ def process_document_ingestion(self, job_id: str):
             # Recorded durably first: if the document is deleted while the
             # upload is in flight, the stopped handler re-queues its removal,
             # and if this worker dies instead the queue tick does.
+            db.refresh(
+                document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
+            )
             bedrock_token = begin_stage_write(document)
             commit_if_active()
             remote_writes.add("bedrock_kb")
@@ -1037,11 +1046,16 @@ def generate_embeddings(self, job_id: str):
 
         if bedrock_sync_enabled():
             # Staged, not indexed: the Bedrock queue tick owns completion.
-            write_token = begin_stage_write(document)
-            db.commit()  # durable before the upload starts
-            outcome = stage_document_sync(db, document)
-            finish_stage_write(document, write_token)
-            db.commit()
+            db.refresh(
+                document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
+            )
+            outcome = BedrockStageOutcome.SKIPPED
+            if not document.is_deleted:
+                write_token = begin_stage_write(document)
+                db.commit()  # durable before the upload starts
+                outcome = stage_document_sync(db, document)
+                finish_stage_write(document, write_token)
+                db.commit()
             result = {"status": outcome.value, "backend": "bedrock_kb"}
             job.complete_job(result=result)
             db.commit()

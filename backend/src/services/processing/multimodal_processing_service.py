@@ -1316,6 +1316,7 @@ class MultimodalProcessingService:
         Staged only; the Bedrock queue tick marks the document indexed later.
         """
         from src.services.bedrock_sync import (
+            STAGE_WRITE_COLUMNS,
             bedrock_sync_enabled,
             begin_stage_write,
             finish_stage_write,
@@ -1325,6 +1326,11 @@ class MultimodalProcessingService:
         if not (bedrock_sync_enabled() and results.get("success")):
             return
         if not document.content_text:
+            return
+        self.db.refresh(
+            document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
+        )
+        if document.is_deleted:
             return
         write_token = begin_stage_write(document)
         self.db.commit()  # durable before the upload starts

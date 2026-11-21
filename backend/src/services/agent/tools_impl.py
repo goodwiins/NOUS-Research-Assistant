@@ -4046,11 +4046,9 @@ async def _tool_do_kb_retrieve(
         }
         if scoped_intent:
             resolve_kwargs["allowed_document_ids"] = set(requested_document_ids)
-        title_by_key, chunks_to_emit = await resolve_and_filter_chunks(**resolve_kwargs)
         if bedrock_enabled:
-            chunks_to_emit = [
-                chunk for chunk in chunks_to_emit if chunk.document_id in title_by_key
-            ]
+            resolve_kwargs["canonical_ids_only"] = True
+        title_by_key, chunks_to_emit = await resolve_and_filter_chunks(**resolve_kwargs)
 
     from src.services.do_kb.postprocess import sanitize_and_deduplicate_chunks
 

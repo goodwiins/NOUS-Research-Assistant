@@ -684,6 +684,7 @@ async def persist_arxiv_documents(
     kb_sync_failed = False
     from src.core.config import settings
     from src.services.bedrock_sync import (
+        STAGE_WRITE_COLUMNS,
         StageOutcome,
         bedrock_sync_enabled,
         begin_stage_write,
@@ -702,6 +703,14 @@ async def persist_arxiv_documents(
                     Document.is_deleted.is_(False),
                 )
                 for document in (await kb_db.execute(stmt)).scalars().all():
+                    await kb_db.refresh(
+                        document,
+                        attribute_names=STAGE_WRITE_COLUMNS,
+                        with_for_update=True,
+                    )
+                    if document.is_deleted:
+                        await kb_db.rollback()
+                        continue
                     write_token = begin_stage_write(document)
                     await kb_db.commit()  # durable before the upload starts
                     outcome = await stage_document(kb_db, document)
