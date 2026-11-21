@@ -5,6 +5,7 @@ ArXiv Paper Feature Extraction API endpoints
 import asyncio
 import inspect
 import logging
+import threading
 import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,30 @@ from src.services.processing.entity_extraction_service import EntityExtractionSe
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# GOO-642 / API2A-2: one EntityExtractionService (spaCy model) per process,
+# loaded on first use in a worker thread. spaCy runs are serialised by
+# ``_entity_nlp_lock`` and happen off the event loop.
+_entity_service: Optional[EntityExtractionService] = None
+_entity_service_init_lock = threading.Lock()
+_entity_nlp_lock = threading.Lock()
+
+
+def _get_entity_service() -> EntityExtractionService:
+    """Return the process-wide EntityExtractionService (blocking on first call)."""
+    global _entity_service
+    if _entity_service is None:
+        with _entity_service_init_lock:
+            if _entity_service is None:
+                _entity_service = EntityExtractionService()
+    return _entity_service
+
+
+def _extract_entities_blocking(
+    service: EntityExtractionService, document: Any, text: str
+) -> List[Any]:
+    with _entity_nlp_lock:
+        return service.extract_entities_from_text(document=document, text=text)
 
 
 class ExtractionRequest(BaseModel):
@@ -134,7 +159,7 @@ async def _extract_paper_features(
 
         if request.extract_entities:
             try:
-                entity_service = EntityExtractionService()
+                entity_service = await asyncio.to_thread(_get_entity_service)
             except Exception as entity_error:
                 entity_service_error = str(entity_error)
                 logger.error(
@@ -197,8 +222,11 @@ async def _extract_paper_features(
                                     organization_id=organization_id,
                                 )
 
-                                entities = entity_service.extract_entities_from_text(
-                                    document=document_stub, text=text_content
+                                entities = await asyncio.to_thread(
+                                    _extract_entities_blocking,
+                                    entity_service,
+                                    document_stub,
+                                    text_content,
                                 )
                                 extraction_result["features"]["entities"] = (
                                     _serialize_entities(entities)
