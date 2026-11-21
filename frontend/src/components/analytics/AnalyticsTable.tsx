@@ -541,6 +541,10 @@ export const createDocumentAnalyticsTable = () => {
   return { columns };
 };
 
+// Shown for per-query fields the backend does not report, instead of an
+// invented value (FL2C-2).
+const NOT_REPORTED = '—';
+
 export const createSearchAnalyticsTable = () => {
   const columns = [
     {
@@ -557,24 +561,28 @@ export const createSearchAnalyticsTable = () => {
       key: 'type',
       title: 'Type',
       sortable: true,
-      render: (value: string) => <Badge variant="outline">{value}</Badge>,
+      render: (value: string | null) =>
+        value ? <Badge variant="outline">{value}</Badge> : NOT_REPORTED,
     },
     {
       key: 'results',
       title: 'Results',
       sortable: true,
+      render: (value: number | null) => (value == null ? NOT_REPORTED : value),
     },
     {
       key: 'clickRate',
       title: 'Click rate',
       sortable: true,
-      render: (value: number) => `${(value * 100).toFixed(1)}%`,
+      render: (value: number | null) =>
+        value == null ? NOT_REPORTED : `${(value * 100).toFixed(1)}%`,
     },
     {
       key: 'lastSearched',
       title: 'Last searched',
       sortable: true,
-      render: (value: string) => formatDate(value),
+      render: (value: string | null) =>
+        value ? formatDate(value) : NOT_REPORTED,
     },
   ];
 

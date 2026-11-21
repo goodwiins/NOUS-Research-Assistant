@@ -371,7 +371,7 @@ export default function DashboardPage() {
                     className="flex flex-col items-start gap-3 p-4 rounded-xl border border-border bg-muted/20"
                   >
                     <p className="text-sm text-foreground">
-                      Couldn&apos;t reach the service health endpoint.
+                      Service health is unavailable right now.
                     </p>
                     <button
                       type="button"

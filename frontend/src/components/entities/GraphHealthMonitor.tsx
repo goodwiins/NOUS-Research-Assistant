@@ -1,6 +1,11 @@
 /**
  * GraphHealthMonitor Component
- * Monitors and displays the health status of the knowledge graph
+ * Monitors and displays the health status of the knowledge graph.
+ *
+ * Renders only what `GET /knowledge-graph/health` returns (`GraphHealthStatus`
+ * in the generated API types). It used to invent a health score (defaulting
+ * to 100), quality metrics and a `last_check` the backend never sends, so a
+ * degraded graph looked healthy (FR-3).
  */
 
 import React, { useEffect, useState } from 'react';
@@ -11,130 +16,78 @@ import {
   CheckCircle2,
   XCircle,
   RefreshCw,
-  TrendingUp,
-  TrendingDown,
   Database,
   Zap,
+  HelpCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
-import { Badge } from '@/components/ui/badge';
+import { Card, CardContent } from '@/components/ui/card';
 import { api } from '@/services/api-client';
+import type { components } from '@/types/generated/api';
 import toast from 'react-hot-toast';
 
-interface HealthIssue {
-  type: 'warning' | 'error' | 'info';
-  category: string;
-  message: string;
-  count?: number;
-  action?: string;
-}
+type BackendGraphHealthStatus = components['schemas']['GraphHealthStatus'];
 
-interface GraphHealthStatus {
-  overall_status: 'healthy' | 'degraded' | 'critical';
-  health_score: number;
-  total_entities: number;
-  total_relationships: number;
-  issues: HealthIssue[];
-  metrics: {
-    isolated_entities: number;
-    entities_without_confidence: number;
-    low_confidence_entities: number;
-    orphaned_relationships: number;
-    duplicate_relationships: number;
-    avg_relationship_strength: number;
-    weakly_connected_components: number;
-  };
-  database_size?: number;
-  uptime?: number;
-  last_check: string;
-}
+type GraphStatus = 'healthy' | 'degraded' | 'critical' | 'unknown';
 
-interface BackendGraphHealthStatus {
-  status?: 'healthy' | 'degraded' | 'unhealthy' | 'critical';
-  node_count?: number;
-  relationship_count?: number;
-  database_size?: string | number;
-  uptime?: string | number;
-}
-
-const toNumber = (value: unknown, fallback: number = 0): number => {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
+// Map the backend's free-form status string. Anything unrecognised is shown
+// as "unknown", never as healthy.
+export const toGraphStatus = (status: string | null | undefined): GraphStatus => {
+  switch (status) {
+    case 'healthy':
+      return 'healthy';
+    case 'degraded':
+      return 'degraded';
+    case 'unhealthy':
+    case 'critical':
+      return 'critical';
+    default:
+      return 'unknown';
   }
-  if (typeof value === 'string') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-  return fallback;
 };
 
-const normalizeHealthStatus = (
-  raw: Partial<GraphHealthStatus & BackendGraphHealthStatus>
-): GraphHealthStatus => {
-  const normalizedStatus = raw.overall_status
-    ? raw.overall_status
-    : raw.status === 'unhealthy'
-      ? 'critical'
-      : raw.status === 'critical'
-        ? 'critical'
-        : raw.status === 'degraded'
-          ? 'degraded'
-          : 'healthy';
+const NOT_REPORTED = '—';
 
-  const totalEntities = toNumber(raw.total_entities, toNumber(raw.node_count, 0));
-  const totalRelationships = toNumber(
-    raw.total_relationships,
-    toNumber(raw.relationship_count, 0)
-  );
+const getStatusColor = (status: GraphStatus): string => {
+  switch (status) {
+    case 'healthy':
+      return 'var(--nous-sol)';
+    case 'degraded':
+      return 'var(--nous-helios)';
+    case 'critical':
+      return 'var(--nous-mars)';
+    default:
+      return 'var(--nous-fg-3)';
+  }
+};
 
-  return {
-    overall_status: normalizedStatus,
-    health_score: toNumber(raw.health_score, normalizedStatus === 'healthy' ? 100 : 50),
-    total_entities: totalEntities,
-    total_relationships: totalRelationships,
-    issues: Array.isArray(raw.issues) ? raw.issues : [],
-    metrics: {
-      isolated_entities: toNumber(raw.metrics?.isolated_entities, 0),
-      entities_without_confidence: toNumber(
-        raw.metrics?.entities_without_confidence,
-        0
-      ),
-      low_confidence_entities: toNumber(raw.metrics?.low_confidence_entities, 0),
-      orphaned_relationships: toNumber(raw.metrics?.orphaned_relationships, 0),
-      duplicate_relationships: toNumber(raw.metrics?.duplicate_relationships, 0),
-      avg_relationship_strength: toNumber(raw.metrics?.avg_relationship_strength, 0),
-      weakly_connected_components: toNumber(
-        raw.metrics?.weakly_connected_components,
-        0
-      ),
-    },
-    database_size: toNumber(raw.database_size, 0),
-    uptime: toNumber(raw.uptime, 0),
-    last_check: raw.last_check ?? new Date().toISOString(),
-  };
+const getStatusIcon = (status: GraphStatus): React.ReactNode => {
+  switch (status) {
+    case 'healthy':
+      return <CheckCircle2 className="w-6 h-6" />;
+    case 'degraded':
+      return <AlertTriangle className="w-6 h-6" />;
+    case 'critical':
+      return <XCircle className="w-6 h-6" />;
+    default:
+      return <HelpCircle className="w-6 h-6" />;
+  }
 };
 
 export const GraphHealthMonitor: React.FC = () => {
   const [autoRefresh, setAutoRefresh] = useState(false);
 
   // TanStack Query owns this request-backed state (one cache owner per server
-  // entity); it replaces a hand-rolled fetch whose mount effect referenced the
-  // fetcher before its declaration and set state synchronously.
+  // entity).
   const {
     data: health = null,
     error,
     isFetching: loading,
+    dataUpdatedAt,
     refetch,
   } = useQuery({
     queryKey: ['knowledge-graph', 'health'],
-    queryFn: async () =>
-      normalizeHealthStatus(
-        await api.get<Partial<GraphHealthStatus & BackendGraphHealthStatus>>(
-          '/knowledge-graph/health'
-        )
-      ),
+    queryFn: () => api.get<BackendGraphHealthStatus>('/knowledge-graph/health'),
     refetchInterval: autoRefresh ? 30000 : false, // Refresh every 30s
     // A health monitor reports current state: fetch on every mount (the app
     // default caches for 5 min) and surface a failure at once instead of
@@ -149,45 +102,6 @@ export const GraphHealthMonitor: React.FC = () => {
       toast.error('Failed to fetch graph health');
     }
   }, [error]);
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'healthy':
-        return 'var(--nous-sol)';
-      case 'degraded':
-        return 'var(--nous-helios)';
-      case 'critical':
-        return '#ff6b6b';
-      default:
-        return 'var(--nous-fg-3)';
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'healthy':
-        return <CheckCircle2 className="w-6 h-6" />;
-      case 'degraded':
-        return <AlertTriangle className="w-6 h-6" />;
-      case 'critical':
-        return <XCircle className="w-6 h-6" />;
-      default:
-        return <Activity className="w-6 h-6" />;
-    }
-  };
-
-  const getIssueIcon = (type: string) => {
-    switch (type) {
-      case 'error':
-        return <XCircle className="w-4 h-4 text-[#ff6b6b]" />;
-      case 'warning':
-        return <AlertTriangle className="w-4 h-4 text-(--nous-helios)" />;
-      case 'info':
-        return <Activity className="w-4 h-4 text-(--nous-helios)" />;
-      default:
-        return <Activity className="w-4 h-4" />;
-    }
-  };
 
   if (loading && !health) {
     return (
@@ -204,18 +118,40 @@ export const GraphHealthMonitor: React.FC = () => {
 
   if (!health) {
     return (
-      <div className="flex items-center justify-center h-96">
-        <p className="font-mono text-sm text-(--nous-fg-3)">
-          No health data available
+      <div className="flex flex-col items-center justify-center gap-3 h-96">
+        <p
+          role={error ? 'alert' : 'status'}
+          className="font-mono text-sm text-(--nous-fg-3)"
+        >
+          {error ? 'Graph health is unavailable' : 'No health data available'}
         </p>
+        {error && (
+          <Button
+            onClick={() => void refetch()}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+            className="font-mono text-xs"
+          >
+            RETRY
+          </Button>
+        )}
       </div>
     );
   }
 
-  const connectivityScore =
-    health.total_entities > 0
-      ? Math.max(0, 100 - (health.metrics.isolated_entities / health.total_entities) * 100)
-      : 0;
+  const status = toGraphStatus(health.status);
+  const details: Array<{ label: string; value: string }> = [
+    { label: 'Neo4j Version', value: health.neo4j_version || NOT_REPORTED },
+    {
+      label: 'Response Time',
+      value: `${Math.round(health.response_time_ms)} ms`,
+    },
+    { label: 'Indexes', value: health.index_count.toLocaleString() },
+    { label: 'Constraints', value: health.constraint_count.toLocaleString() },
+    { label: 'Database Size', value: health.database_size || NOT_REPORTED },
+    { label: 'Uptime', value: health.uptime || NOT_REPORTED },
+  ];
 
   return (
     <div className="space-y-6">
@@ -225,9 +161,16 @@ export const GraphHealthMonitor: React.FC = () => {
           <h2 className="text-lg font-mono font-bold text-(--nous-fg-1) uppercase tracking-wider">
             Graph Health Monitor
           </h2>
-          <p className="text-xs font-mono text-(--nous-fg-3) mt-1">
-            Last check: {new Date(health.last_check).toLocaleString()}
-          </p>
+          {dataUpdatedAt > 0 && (
+            <p className="text-xs font-mono text-(--nous-fg-3) mt-1">
+              Fetched: {new Date(dataUpdatedAt).toLocaleString()}
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="text-xs font-mono text-(--nous-mars) mt-1">
+              Latest refresh failed; showing the last successful check.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -256,48 +199,40 @@ export const GraphHealthMonitor: React.FC = () => {
       {/* Overall Status */}
       <Card className="border-(--nous-border-1) bg-(--nous-bg-2) shadow-lg">
         <CardContent className="p-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div
-                className="p-4 rounded-lg"
-                style={{
-                  backgroundColor: `${getStatusColor(health.overall_status)}20`,
-                }}
-              >
-                <div style={{ color: getStatusColor(health.overall_status) }}>
-                  {getStatusIcon(health.overall_status)}
-                </div>
-              </div>
-              <div>
-                <p className="text-xs font-mono text-(--nous-fg-3) uppercase tracking-widest">
-                  Overall Status
-                </p>
-                <p
-                  className="text-3xl font-mono font-bold uppercase mt-1"
-                  style={{ color: getStatusColor(health.overall_status) }}
-                >
-                  {health.overall_status}
-                </p>
+          <div className="flex items-center gap-4">
+            <div
+              className="p-4 rounded-lg"
+              style={{ backgroundColor: `color-mix(in srgb, ${getStatusColor(status)} 12%, transparent)` }}
+            >
+              <div style={{ color: getStatusColor(status) }}>
+                {getStatusIcon(status)}
               </div>
             </div>
-            <div className="text-right">
+            <div>
               <p className="text-xs font-mono text-(--nous-fg-3) uppercase tracking-widest">
-                Health Score
+                Overall Status
               </p>
-              <p className="text-5xl font-mono font-bold text-(--nous-fg-1) mt-1">
-                {health.health_score}
-                <span className="text-2xl text-(--nous-fg-3)">
-                  /100
-                </span>
+              <p
+                className="text-3xl font-mono font-bold uppercase mt-1"
+                style={{ color: getStatusColor(status) }}
+              >
+                {status}
               </p>
-              <Progress value={health.health_score} className="w-32 h-2 mt-2" />
             </div>
           </div>
+          {health.last_error && (
+            <div className="flex items-start gap-2 mt-4 p-3 rounded-lg border border-(--nous-border-1) bg-(--nous-bg-1)">
+              <AlertTriangle className="w-4 h-4 text-(--nous-helios) shrink-0" />
+              <p className="text-xs font-mono text-(--nous-fg-1)">
+                Last error: {health.last_error}
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 
-      {/* Metrics Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Counts */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
           <CardContent className="p-4">
             <div className="flex items-center gap-2 mb-2">
@@ -307,7 +242,7 @@ export const GraphHealthMonitor: React.FC = () => {
               </span>
             </div>
             <p className="text-2xl font-mono font-bold text-(--nous-fg-1)">
-              {health.total_entities.toLocaleString()}
+              {health.node_count.toLocaleString()}
             </p>
           </CardContent>
         </Card>
@@ -321,211 +256,30 @@ export const GraphHealthMonitor: React.FC = () => {
               </span>
             </div>
             <p className="text-2xl font-mono font-bold text-(--nous-fg-1)">
-              {health.total_relationships.toLocaleString()}
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <AlertTriangle className="w-4 h-4 text-(--nous-helios)" />
-              <span className="text-xs font-mono text-(--nous-fg-3)">
-                ISOLATED
-              </span>
-            </div>
-            <p className="text-2xl font-mono font-bold text-(--nous-helios)">
-              {health.metrics.isolated_entities.toLocaleString()}
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingUp className="w-4 h-4 text-(--purple)" />
-              <span className="text-xs font-mono text-(--nous-fg-3)">
-                AVG STRENGTH
-              </span>
-            </div>
-            <p className="text-2xl font-mono font-bold text-(--nous-fg-1)">
-              {(health.metrics.avg_relationship_strength * 100).toFixed(0)}%
+              {health.relationship_count.toLocaleString()}
             </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Detailed Metrics */}
+      {/* Database details */}
       <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
-        <CardHeader className="border-b border-(--nous-border-1)">
-          <CardTitle className="text-sm font-mono font-bold uppercase tracking-wider text-(--nous-fg-1)">
-            Detailed Metrics
-          </CardTitle>
-        </CardHeader>
         <CardContent className="p-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-3">
-              <div className="flex items-center justify-between p-2 rounded bg-(--nous-bg-1)">
-                <span className="text-xs font-mono text-(--nous-fg-3)">
-                  Low Confidence Entities
-                </span>
-                <span className="text-sm font-mono font-bold text-(--nous-fg-1)">
-                  {health.metrics.low_confidence_entities}
-                </span>
+          <dl className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {details.map((item) => (
+              <div
+                key={item.label}
+                className="flex items-center justify-between p-2 rounded bg-(--nous-bg-1)"
+              >
+                <dt className="text-xs font-mono text-(--nous-fg-3)">
+                  {item.label}
+                </dt>
+                <dd className="text-sm font-mono font-bold text-(--nous-fg-1)">
+                  {item.value}
+                </dd>
               </div>
-              <div className="flex items-center justify-between p-2 rounded bg-(--nous-bg-1)">
-                <span className="text-xs font-mono text-(--nous-fg-3)">
-                  Missing Confidence Scores
-                </span>
-                <span className="text-sm font-mono font-bold text-(--nous-fg-1)">
-                  {health.metrics.entities_without_confidence}
-                </span>
-              </div>
-              <div className="flex items-center justify-between p-2 rounded bg-(--nous-bg-1)">
-                <span className="text-xs font-mono text-(--nous-fg-3)">
-                  Weakly Connected Components
-                </span>
-                <span className="text-sm font-mono font-bold text-(--nous-fg-1)">
-                  {health.metrics.weakly_connected_components}
-                </span>
-              </div>
-            </div>
-            <div className="space-y-3">
-              <div className="flex items-center justify-between p-2 rounded bg-(--nous-bg-1)">
-                <span className="text-xs font-mono text-(--nous-fg-3)">
-                  Orphaned Relationships
-                </span>
-                <span className="text-sm font-mono font-bold text-(--nous-fg-1)">
-                  {health.metrics.orphaned_relationships}
-                </span>
-              </div>
-              <div className="flex items-center justify-between p-2 rounded bg-(--nous-bg-1)">
-                <span className="text-xs font-mono text-(--nous-fg-3)">
-                  Duplicate Relationships
-                </span>
-                <span className="text-sm font-mono font-bold text-(--nous-fg-1)">
-                  {health.metrics.duplicate_relationships}
-                </span>
-              </div>
-              <div className="flex items-center justify-between p-2 rounded bg-(--nous-bg-1)">
-                <span className="text-xs font-mono text-(--nous-fg-3)">
-                  Isolated Entities
-                </span>
-                <span className="text-sm font-mono font-bold text-(--nous-fg-1)">
-                  {health.metrics.isolated_entities}
-                </span>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Issues */}
-      {health.issues.length > 0 && (
-        <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
-          <CardHeader className="border-b border-(--nous-border-1)">
-            <CardTitle className="text-sm font-mono font-bold uppercase tracking-wider text-(--nous-fg-1)">
-              Health Issues ({health.issues.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-4">
-            <div className="space-y-2">
-              {health.issues.map((issue, index) => (
-                <div
-                  key={index}
-                  className="flex items-start gap-3 p-3 rounded-lg border border-(--nous-border-1) bg-(--nous-bg-1)"
-                >
-                  {getIssueIcon(issue.type)}
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <Badge
-                        variant="outline"
-                        className="font-mono text-[10px] border-(--nous-border-1)"
-                      >
-                        {issue.category}
-                      </Badge>
-                      {issue.count && (
-                        <span className="text-xs font-mono text-(--nous-fg-3)">
-                          ({issue.count})
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs font-mono text-(--nous-fg-1)">
-                      {issue.message}
-                    </p>
-                    {issue.action && (
-                      <p className="text-xs font-mono text-(--nous-fg-3) mt-1">
-                        → {issue.action}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Health Score Breakdown */}
-      <Card className="border-(--nous-border-1) bg-(--nous-bg-2)">
-        <CardHeader className="border-b border-(--nous-border-1)">
-          <CardTitle className="text-sm font-mono font-bold uppercase tracking-wider text-(--nous-fg-1)">
-            Health Score Breakdown
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-4">
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs font-mono">
-                <span className="text-(--nous-fg-1)">
-                  Data Quality
-                </span>
-                <span className="text-(--nous-fg-3)">
-                  {Math.max(
-                    0,
-                    100 - health.metrics.entities_without_confidence * 2
-                  )}
-                  %
-                </span>
-              </div>
-              <Progress
-                value={Math.max(
-                  0,
-                  100 - health.metrics.entities_without_confidence * 2
-                )}
-                className="h-2"
-              />
-            </div>
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs font-mono">
-                <span className="text-(--nous-fg-1)">
-                  Connectivity
-                </span>
-                <span className="text-(--nous-fg-3)">
-                  {connectivityScore.toFixed(0)}
-                  %
-                </span>
-              </div>
-              <Progress
-                value={connectivityScore}
-                className="h-2"
-              />
-            </div>
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs font-mono">
-                <span className="text-(--nous-fg-1)">
-                  Relationship Quality
-                </span>
-                <span className="text-(--nous-fg-3)">
-                  {(health.metrics.avg_relationship_strength * 100).toFixed(0)}%
-                </span>
-              </div>
-              <Progress
-                value={health.metrics.avg_relationship_strength * 100}
-                className="h-2"
-              />
-            </div>
-          </div>
+            ))}
+          </dl>
         </CardContent>
       </Card>
     </div>

@@ -302,83 +302,71 @@ class SearchAnalyticsApiService {
   }
 
   /**
-   * Get combined search analytics - tries multiple endpoints with fallbacks
+   * Get combined search analytics: the performance endpoint first, then the
+   * search analytics endpoint. Rejects when both fail so callers can show the
+   * source as unavailable instead of a fabricated "0 searches" (FL2C-2).
+   * Per-query fields the backend does not send are `null`, never invented.
    */
-  async getCombinedSearchAnalytics(): Promise<{
-    topQueries: Array<{
-      id: string;
-      query: string;
-      type: string;
-      results: number;
-      clickRate: number;
-      lastSearched: string;
-    }>;
-    searchTypes: Array<{ name: string; value: number }>;
-    totalSearches: number;
-    avgResponseTime: number;
-  }> {
+  async getCombinedSearchAnalytics(): Promise<CombinedSearchAnalytics> {
+    const toRows = (queries: TopQuery[] | undefined): CombinedSearchQueryRow[] =>
+      (queries || []).map((q, idx) => ({
+        id: `search_${idx + 1}`,
+        query: q.query,
+        type: null,
+        results: q.avg_results ?? null,
+        clickRate: q.click_rate ?? null,
+        lastSearched: null,
+      }));
+    const toTypes = (types: SearchTypeDistribution[] | undefined) =>
+      (types || []).map((t) => ({
+        name: t.type.charAt(0).toUpperCase() + t.type.slice(1),
+        value: t.count,
+      }));
+
+    let performanceError: unknown;
     try {
-      // Try performance endpoint first (more detailed)
-      const performance = await this.getSearchPerformance().catch(() => null);
-
-      if (performance) {
-        return {
-          topQueries: (performance.top_queries || []).map((q, idx) => ({
-            id: `search_${idx + 1}`,
-            query: q.query,
-            type: 'hybrid', // Default type
-            results: q.avg_results || Math.floor(Math.random() * 20) + 1,
-            clickRate: q.click_rate || Math.random(),
-            lastSearched: new Date().toISOString(),
-          })),
-          searchTypes: (performance.search_types || []).map((s) => ({
-            name: s.type.charAt(0).toUpperCase() + s.type.slice(1),
-            value: s.count,
-          })),
-          totalSearches: performance.total_searches || 0,
-          avgResponseTime: performance.avg_response_time || 0,
-        };
-      }
-
-      // Fallback to search analytics endpoint
-      const analytics = await this.getSearchAnalytics().catch(() => null);
-
-      if (analytics) {
-        return {
-          topQueries: (analytics.top_queries || []).map((q, idx) => ({
-            id: `search_${idx + 1}`,
-            query: q.query,
-            type: 'hybrid',
-            results: q.avg_results || Math.floor(Math.random() * 20) + 1,
-            clickRate: q.click_rate || Math.random(),
-            lastSearched: new Date().toISOString(),
-          })),
-          searchTypes: (analytics.search_types || []).map((s) => ({
-            name: s.type.charAt(0).toUpperCase() + s.type.slice(1),
-            value: s.count,
-          })),
-          totalSearches: analytics.total_searches || 0,
-          avgResponseTime: analytics.avg_response_time_ms || 0,
-        };
-      }
-
-      // Return empty if all endpoints fail
+      const performance = await this.getSearchPerformance();
       return {
-        topQueries: [],
-        searchTypes: [],
-        totalSearches: 0,
-        avgResponseTime: 0,
+        topQueries: toRows(performance.top_queries),
+        searchTypes: toTypes(performance.search_types),
+        totalSearches: performance.total_searches ?? 0,
+        avgResponseTime: performance.avg_response_time ?? 0,
       };
     } catch (error) {
-      console.error('Failed to fetch search analytics:', error);
+      performanceError = error;
+    }
+
+    try {
+      const analytics = await this.getSearchAnalytics();
       return {
-        topQueries: [],
-        searchTypes: [],
-        totalSearches: 0,
-        avgResponseTime: 0,
+        topQueries: toRows(analytics.top_queries),
+        searchTypes: toTypes(analytics.search_types),
+        totalSearches: analytics.total_searches ?? 0,
+        avgResponseTime: analytics.avg_response_time_ms ?? 0,
       };
+    } catch (error) {
+      console.error('Failed to fetch search analytics:', performanceError, error);
+      throw error;
     }
   }
+}
+
+export interface CombinedSearchQueryRow {
+  id: string;
+  query: string;
+  /** Not reported per query by the backend. */
+  type: string | null;
+  results: number | null;
+  clickRate: number | null;
+  /** Not reported per query by the backend. */
+  lastSearched: string | null;
+}
+
+export interface CombinedSearchAnalytics {
+  topQueries: CombinedSearchQueryRow[];
+  searchTypes: Array<{ name: string; value: number }>;
+  totalSearches: number;
+  avgResponseTime: number;
 }
 
 // User Behavior Analytics Types
@@ -432,6 +420,9 @@ export interface SystemHealthMetrics {
 /**
  * User Behavior Analytics API Service
  */
+// The behaviour and performance getters below reject on failure instead of
+// returning zeros, so an outage is never shown as genuine zero activity
+// (FL2C-2). Callers record the failed source and say so.
 class UserBehaviorApiService {
   private readonly basePath = '/analytics/behavior';
 
@@ -442,47 +433,26 @@ class UserBehaviorApiService {
     stats: UserBehaviorStats;
     trendData: TrendDataPoint[];
   }> {
-    try {
-      const response = await api.get<any>(
-        `${this.basePath}/organization/trends?days=${days}`
-      );
+    const response = await api.get<any>(
+      `${this.basePath}/organization/trends?days=${days}`
+    );
 
-      return {
-        stats: {
-          total_users: response.total_users || 0,
-          active_users_today: response.active_users_today || 0,
-          active_users_week: response.active_users_week || 0,
-          active_users_month: response.active_users_month || 0,
-          total_sessions: response.total_sessions || 0,
-          avg_session_duration: response.avg_session_duration || 0,
-          bounce_rate: response.bounce_rate || 0,
-          search_volume_today: response.search_volume_today || 0,
-          search_volume_week: response.search_volume_week || 0,
-          new_users: response.new_users || 0,
-          returning_users: response.returning_users || 0,
-        },
-        trendData: response.trend_data || [],
-      };
-    } catch (error) {
-      console.error('Failed to fetch user behavior trends:', error);
-      // Return empty stats on error
-      return {
-        stats: {
-          total_users: 0,
-          active_users_today: 0,
-          active_users_week: 0,
-          active_users_month: 0,
-          total_sessions: 0,
-          avg_session_duration: 0,
-          bounce_rate: 0,
-          search_volume_today: 0,
-          search_volume_week: 0,
-          new_users: 0,
-          returning_users: 0,
-        },
-        trendData: [],
-      };
-    }
+    return {
+      stats: {
+        total_users: response.total_users || 0,
+        active_users_today: response.active_users_today || 0,
+        active_users_week: response.active_users_week || 0,
+        active_users_month: response.active_users_month || 0,
+        total_sessions: response.total_sessions || 0,
+        avg_session_duration: response.avg_session_duration || 0,
+        bounce_rate: response.bounce_rate || 0,
+        search_volume_today: response.search_volume_today || 0,
+        search_volume_week: response.search_volume_week || 0,
+        new_users: response.new_users || 0,
+        returning_users: response.returning_users || 0,
+      },
+      trendData: response.trend_data || [],
+    };
   }
 
   /**
@@ -493,19 +463,14 @@ class UserBehaviorApiService {
     activeUsers: number;
     newUsersThisWeek: number;
   }> {
-    try {
-      const response = await api.get<any>(
-        `${this.basePath}/organization/users`
-      );
-      return {
-        totalUsers: response.total_users || response.total || 0,
-        activeUsers: response.active_users || 0,
-        newUsersThisWeek: response.new_users_week || 0,
-      };
-    } catch (error) {
-      console.error('Failed to fetch organization user summary:', error);
-      return { totalUsers: 0, activeUsers: 0, newUsersThisWeek: 0 };
-    }
+    const response = await api.get<any>(
+      `${this.basePath}/organization/users`
+    );
+    return {
+      totalUsers: response.total_users || response.total || 0,
+      activeUsers: response.active_users || 0,
+      newUsersThisWeek: response.new_users_week || 0,
+    };
   }
 }
 
@@ -526,61 +491,31 @@ class PerformanceApiService {
     avgResponseTime: number;
     errorRate: number;
   }> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/overview`);
-      return {
-        totalUsers: response.total_users || 0,
-        activeUsers: response.active_users || 0,
-        totalSessions: response.total_sessions || 0,
-        totalSearches: response.total_searches || 0,
-        avgResponseTime: response.avg_response_time || 0,
-        errorRate: response.error_rate || 0,
-      };
-    } catch (error: any) {
-      // Only log non-silent errors (404s from optional endpoints are silent)
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch dashboard overview:', error);
-      }
-      return {
-        totalUsers: 0,
-        activeUsers: 0,
-        totalSessions: 0,
-        totalSearches: 0,
-        avgResponseTime: 0,
-        errorRate: 0,
-      };
-    }
+    const response = await api.get<any>(`${this.basePath}/overview`);
+    return {
+      totalUsers: response.total_users || 0,
+      activeUsers: response.active_users || 0,
+      totalSessions: response.total_sessions || 0,
+      totalSearches: response.total_searches || 0,
+      avgResponseTime: response.avg_response_time || 0,
+      errorRate: response.error_rate || 0,
+    };
   }
 
   /**
    * Get system health metrics
    */
   async getSystemHealth(): Promise<SystemHealthMetrics> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/system-health`);
-      return {
-        cpu_usage: response.cpu_usage || 0,
-        memory_usage: response.memory_usage || 0,
-        disk_usage: response.disk_usage || 0,
-        active_connections: response.active_connections || 0,
-        request_rate: response.request_rate || 0,
-        error_rate: response.error_rate || 0,
-        response_time: response.response_time || 0,
-      };
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch system health:', error);
-      }
-      return {
-        cpu_usage: 0,
-        memory_usage: 0,
-        disk_usage: 0,
-        active_connections: 0,
-        request_rate: 0,
-        error_rate: 0,
-        response_time: 0,
-      };
-    }
+    const response = await api.get<any>(`${this.basePath}/system-health`);
+    return {
+      cpu_usage: response.cpu_usage || 0,
+      memory_usage: response.memory_usage || 0,
+      disk_usage: response.disk_usage || 0,
+      active_connections: response.active_connections || 0,
+      request_rate: response.request_rate || 0,
+      error_rate: response.error_rate || 0,
+      response_time: response.response_time || 0,
+    };
   }
 
   /**
@@ -593,27 +528,14 @@ class PerformanceApiService {
     bounceRate: number;
     pageViews: number;
   }> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/user-engagement`);
-      return {
-        dailyActiveUsers: response.daily_active_users || 0,
-        weeklyActiveUsers: response.weekly_active_users || 0,
-        avgSessionDuration: response.avg_session_duration || 0,
-        bounceRate: response.bounce_rate || 0,
-        pageViews: response.page_views || 0,
-      };
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch user engagement:', error);
-      }
-      return {
-        dailyActiveUsers: 0,
-        weeklyActiveUsers: 0,
-        avgSessionDuration: 0,
-        bounceRate: 0,
-        pageViews: 0,
-      };
-    }
+    const response = await api.get<any>(`${this.basePath}/user-engagement`);
+    return {
+      dailyActiveUsers: response.daily_active_users || 0,
+      weeklyActiveUsers: response.weekly_active_users || 0,
+      avgSessionDuration: response.avg_session_duration || 0,
+      bounceRate: response.bounce_rate || 0,
+      pageViews: response.page_views || 0,
+    };
   }
 
   /**
@@ -625,63 +547,44 @@ class PerformanceApiService {
     processingFiles: number;
     requestsPerMinute: number;
   }> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/dashboard`);
-      return {
-        activeUsers:
-          response.active_users || response.realtime?.active_users || 0,
-        currentSearches:
-          response.current_searches || response.realtime?.current_searches || 0,
-        processingFiles:
-          response.processing_files || response.realtime?.processing_files || 0,
-        requestsPerMinute:
-          response.requests_per_minute ||
-          response.realtime?.requests_per_minute ||
-          0,
-      };
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch realtime metrics:', error);
-      }
-      return {
-        activeUsers: 0,
-        currentSearches: 0,
-        processingFiles: 0,
-        requestsPerMinute: 0,
-      };
-    }
+    const response = await api.get<any>(`${this.basePath}/dashboard`);
+    return {
+      activeUsers:
+        response.active_users || response.realtime?.active_users || 0,
+      currentSearches:
+        response.current_searches || response.realtime?.current_searches || 0,
+      processingFiles:
+        response.processing_files || response.realtime?.processing_files || 0,
+      requestsPerMinute:
+        response.requests_per_minute ||
+        response.realtime?.requests_per_minute ||
+        0,
+    };
   }
 
   /**
    * Get trend data for charts
    */
   async getTrendData(days: number = 30): Promise<TrendDataPoint[]> {
-    try {
-      const response = await api.get<any>(
-        `${this.basePath}/charts/overview?days=${days}`
-      );
+    const response = await api.get<any>(
+      `${this.basePath}/charts/overview?days=${days}`
+    );
 
-      if (Array.isArray(response)) {
-        return response.map((point: any) => ({
-          date: point.date || point.timestamp,
-          name: point.date || point.timestamp,
-          pageViews: point.page_views || point.pageViews || 0,
-          uniqueVisitors: point.unique_visitors || point.uniqueVisitors || 0,
-          documentsUploaded:
-            point.documents_uploaded || point.documentsUploaded || 0,
-          searchesPerformed:
-            point.searches_performed || point.searchesPerformed || 0,
-          chatsInitiated: point.chats_initiated || point.chatsInitiated || 0,
-        }));
-      }
-
-      return [];
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch trend data:', error);
-      }
-      return [];
+    if (Array.isArray(response)) {
+      return response.map((point: any) => ({
+        date: point.date || point.timestamp,
+        name: point.date || point.timestamp,
+        pageViews: point.page_views || point.pageViews || 0,
+        uniqueVisitors: point.unique_visitors || point.uniqueVisitors || 0,
+        documentsUploaded:
+          point.documents_uploaded || point.documentsUploaded || 0,
+        searchesPerformed:
+          point.searches_performed || point.searchesPerformed || 0,
+        chatsInitiated: point.chats_initiated || point.chatsInitiated || 0,
+      }));
     }
+
+    return [];
   }
 }
 
