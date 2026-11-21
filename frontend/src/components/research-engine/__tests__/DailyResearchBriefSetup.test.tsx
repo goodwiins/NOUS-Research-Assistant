@@ -211,4 +211,28 @@ describe('DailyResearchBriefSetup', () => {
       null
     );
   });
+
+  it('keeps spaces and newlines while typing criteria and emits trimmed lines (FR-5)', () => {
+    const onChange = vi.fn();
+    renderSetup(onChange);
+    const include = screen.getByLabelText('What to include');
+
+    fireEvent.change(include, { target: { value: 'Peer reviewed ' } });
+    expect(include).toHaveValue('Peer reviewed ');
+
+    fireEvent.change(include, { target: { value: 'Peer reviewed \n' } });
+    expect(include).toHaveValue('Peer reviewed \n');
+
+    fireEvent.change(include, { target: { value: 'Peer reviewed \n  RCTs ' } });
+    expect(include).toHaveValue('Peer reviewed \n  RCTs ');
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ inclusion_criteria: ['Peer reviewed', 'RCTs'] }),
+      null
+    );
+
+    const exclude = screen.getByLabelText('What to exclude');
+    fireEvent.change(exclude, { target: { value: 'Preprints\n' } });
+    expect(exclude).toHaveValue('Preprints\n');
+  });
 });
+
