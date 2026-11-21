@@ -1,9 +1,11 @@
 """Table and math extraction service for PDF documents."""
 
+import asyncio
 import csv
 import io
 import os
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import structlog
 
@@ -11,6 +13,47 @@ from src.core.config import settings
 from src.services.documents.storage_utils import local_file_for_document
 
 logger = structlog.get_logger()
+
+# GOO-642 (IS2B-2 / API2A-3): extraction downloads the PDF and runs PyMuPDF /
+# Camelot (+ Ghostscript), all blocking. It now runs in a worker thread,
+# bounded in size, pages and concurrency.
+MAX_EXTRACTION_PDF_BYTES = 50 * 1024 * 1024
+MAX_TABLE_PAGES = 30
+MAX_CONCURRENT_EXTRACTIONS = 2
+_extraction_slots = threading.BoundedSemaphore(MAX_CONCURRENT_EXTRACTIONS)
+
+_T = TypeVar("_T")
+
+
+class ExtractionBusyError(Exception):
+    """Every extraction slot in this process is in use; retry later."""
+
+
+class DocumentTooLargeError(Exception):
+    """The PDF is over ``MAX_EXTRACTION_PDF_BYTES``."""
+
+
+def _check_size(document) -> None:
+    size = getattr(document, "file_size_bytes", None)
+    if isinstance(size, int) and size > MAX_EXTRACTION_PDF_BYTES:
+        raise DocumentTooLargeError(
+            f"Document is {size} bytes; extraction is limited to "
+            f"{MAX_EXTRACTION_PDF_BYTES} bytes"
+        )
+
+
+async def _run_bounded(fn: Callable[..., _T], *args: Any) -> _T:
+    """Run blocking ``fn`` in a thread, holding one of the process's slots.
+
+    Rejects instead of queueing when the slots are full, so a burst cannot
+    pile up threads (and Ghostscript processes) behind a slow PDF.
+    """
+    if not _extraction_slots.acquire(blocking=False):
+        raise ExtractionBusyError("table extraction is busy")
+    try:
+        return await asyncio.to_thread(fn, *args)
+    finally:
+        _extraction_slots.release()
 
 
 class TableExtractionService:
@@ -79,21 +122,40 @@ class TableExtractionService:
                 f"Invalid coordinates: page={page}, ({x1},{y1})-({x2},{y2})"
             )
 
+        _check_size(document)
+        return await _run_bounded(
+            self._extract_region_sync, document, page, x1, y1, x2, y2
+        )
+
+    def _extract_region_sync(
+        self,
+        document,
+        page: int,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+    ) -> Dict[str, Any]:
+        """Blocking body of ``extract_region``: download, open, crop."""
         import fitz  # PyMuPDF - lazy import
 
         with local_file_for_document(document) as pdf_path:
             if getattr(document, "storage_backend", "local") == "local":
                 pdf_path = self._safe_pdf_path(pdf_path)
             doc = fitz.open(pdf_path)
-            if page > len(doc):
-                raise ValueError(f"Page {page} exceeds document length ({len(doc)})")
+            try:
+                if page > len(doc):
+                    raise ValueError(
+                        f"Page {page} exceeds document length ({len(doc)})"
+                    )
 
-            pdf_page = doc[page - 1]  # 0-indexed
-            rect = fitz.Rect(x1, y1, x2, y2)
+                pdf_page = doc[page - 1]  # 0-indexed
+                rect = fitz.Rect(x1, y1, x2, y2)
 
-            # Try text extraction first
-            text = pdf_page.get_text("text", clip=rect).strip()
-            doc.close()
+                # Try text extraction first
+                text = pdf_page.get_text("text", clip=rect).strip()
+            finally:
+                doc.close()
 
         if text:
             return {
@@ -110,24 +172,41 @@ class TableExtractionService:
         }
 
     async def extract_tables_from_pdf(self, document) -> List[Dict[str, Any]]:
-        """Extract all tables from a PDF using Camelot."""
+        """Extract tables from the first ``MAX_TABLE_PAGES`` pages with Camelot."""
         try:
-            import camelot
+            import camelot  # noqa: F401
         except ImportError:
             logger.warning("camelot_not_installed")
             return []
+
+        _check_size(document)
+        return await _run_bounded(self._extract_tables_sync, document)
+
+    @staticmethod
+    def _page_range(pdf_path: str) -> str:
+        """Camelot page spec covering at most ``MAX_TABLE_PAGES`` pages."""
+        import fitz  # PyMuPDF - lazy import
+
+        with fitz.open(pdf_path) as doc:
+            page_count = len(doc)
+        return f"1-{max(1, min(page_count, MAX_TABLE_PAGES))}"
+
+    def _extract_tables_sync(self, document) -> List[Dict[str, Any]]:
+        """Blocking body of ``extract_tables_from_pdf``."""
+        import camelot
 
         with local_file_for_document(document) as pdf_path:
             if getattr(document, "storage_backend", "local") == "local":
                 pdf_path = self._safe_pdf_path(pdf_path)
 
+            pages = self._page_range(pdf_path)
             try:
-                tables = camelot.read_pdf(pdf_path, flavor="lattice", pages="all")
+                tables = camelot.read_pdf(pdf_path, flavor="lattice", pages=pages)
             except Exception as e:
                 logger.warning("camelot_extraction_failed", error=str(e))
                 # Fallback to stream mode
                 try:
-                    tables = camelot.read_pdf(pdf_path, flavor="stream", pages="all")
+                    tables = camelot.read_pdf(pdf_path, flavor="stream", pages=pages)
                 except Exception as e2:
                     logger.error("table_extraction_failed", error=str(e2))
                     return []

@@ -13,7 +13,11 @@ from src.core.dependencies import get_current_organization, get_current_user
 from src.models.document import Document
 from src.models.organization import Organization
 from src.models.user import User
-from src.services.processing.table_extraction_service import TableExtractionService
+from src.services.processing.table_extraction_service import (
+    DocumentTooLargeError,
+    ExtractionBusyError,
+    TableExtractionService,
+)
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v1/documents", tags=["table-extraction"])
@@ -75,6 +79,17 @@ async def extract_tables(
 
     try:
         tables = await _service.extract_tables_from_pdf(document)
+    except ExtractionBusyError:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Extraction is busy; retry shortly",
+            headers={"Retry-After": "5"},
+        )
+    except DocumentTooLargeError:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Document is too large for extraction",
+        )
     except Exception as exc:
         logger.error(
             "table_extraction_failed",
@@ -141,6 +156,17 @@ async def extract_region(
             y1=body.y1,
             x2=body.x2,
             y2=body.y2,
+        )
+    except ExtractionBusyError:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Extraction is busy; retry shortly",
+            headers={"Retry-After": "5"},
+        )
+    except DocumentTooLargeError:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Document is too large for extraction",
         )
     except ValueError:
         logger.warning("Invalid extraction region", exc_info=True)
