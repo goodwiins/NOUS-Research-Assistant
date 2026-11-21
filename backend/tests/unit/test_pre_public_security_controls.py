@@ -15,8 +15,11 @@ def test_ci_workflow_generates_supabase_jwts_instead_of_committing_tokens():
     text = (_REPO / ".github/workflows/test-pipeline.yml").read_text()
 
     assert "Generate CI Supabase JWTs" in text
-    assert "SERVICE_ROLE_JWT=$SERVICE_ROLE_JWT" in text
-    assert "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ steps.supabase-jwts.outputs.anon }}" in text
+    assert 'env.write(f"SERVICE_ROLE_JWT={service_role}' in text
+    assert "-e SERVICE_ROLE_JWT \\" in text
+    assert (
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ steps.supabase-jwts.outputs.anon }}" in text
+    )
     assert "eyJhbGci" not in text
 
 
