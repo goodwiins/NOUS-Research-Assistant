@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean
 
 # Copy requirements files first
-COPY requirements.txt requirements.dev.txt ./
+COPY requirements.txt requirements-ci.txt requirements.dev.txt ./
 
 # Upgrade pip and keep setuptools on a pybtex-compatible version.
 RUN pip install --no-cache-dir --upgrade pip wheel "setuptools<72"

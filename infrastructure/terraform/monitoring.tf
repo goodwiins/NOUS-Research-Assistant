@@ -175,6 +175,10 @@ resource "aws_cloudwatch_metric_alarm" "cluster_cpu_high" {
   alarm_description   = "This metric monitors cluster CPU utilization"
   alarm_actions       = [aws_sns_topic.alerts.arn]
 
+  dimensions = {
+    ClusterName = module.eks.cluster_name
+  }
+
   tags = {
     Name = "${var.project_name}-cluster-cpu-high"
   }
@@ -191,6 +195,10 @@ resource "aws_cloudwatch_metric_alarm" "cluster_memory_high" {
   threshold           = "80"
   alarm_description   = "This metric monitors cluster memory utilization"
   alarm_actions       = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    ClusterName = module.eks.cluster_name
+  }
 
   tags = {
     Name = "${var.project_name}-cluster-memory-high"
@@ -241,25 +249,85 @@ resource "aws_cloudwatch_metric_alarm" "database_storage_low" {
   }
 }
 
+moved {
+  from = aws_cloudwatch_metric_alarm.redis_memory_high
+  to   = aws_cloudwatch_metric_alarm.redis_memory_high[0]
+}
+
 resource "aws_cloudwatch_metric_alarm" "redis_memory_high" {
-  alarm_name          = "${var.project_name}-redis-memory-high"
+  count               = var.redis_number_nodes
+  alarm_name          = count.index == 0 ? "${var.project_name}-redis-memory-high" : "${var.project_name}-redis-memory-high-${count.index + 1}"
   comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = "2"
-  metric_name         = "BytesUsedForCache"
+  evaluation_periods  = 2
+  metric_name         = "DatabaseMemoryUsagePercentage"
   namespace           = "AWS/ElastiCache"
-  period              = "300"
-  statistic           = "Average"
-  threshold           = "4294967296" # 4GB in bytes
-  alarm_description   = "This metric monitors Redis memory usage"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 80
+  alarm_description   = "Redis memory is above 80 percent of the configured maxmemory"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    ReplicationGroupId = module.elasticache.replication_group_id
+    CacheClusterId = sort(tolist(module.elasticache.replication_group_member_clusters))[count.index]
+    CacheNodeId    = "0001"
   }
+}
 
-  alarm_actions = [aws_sns_topic.alerts.arn]
+resource "aws_cloudwatch_metric_alarm" "database_connections_high" {
+  alarm_name          = "${var.project_name}-database-connections-high"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 2
+  metric_name         = "DatabaseConnections"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = var.database_connections_alarm_threshold
+  alarm_description   = "RDS client connections are approaching the budget"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
 
-  tags = {
-    Name = "${var.project_name}-redis-memory-high"
+  dimensions = {
+    DBInstanceIdentifier = module.rds.db_instance_identifier
+  }
+}
+
+# The Kubernetes AWS Load Balancer Controller owns the ALB and target groups.
+# Supply their CloudWatch dimension suffixes after the controller creates them.
+resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
+  count               = var.alb_alarm_dimensions == null ? 0 : 1
+  alarm_name          = "${var.project_name}-alb-5xx"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 2
+  metric_name         = "HTTPCode_ELB_5XX_Count"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 5
+  treat_missing_data  = "notBreaching"
+  alarm_description   = "The load balancer returned at least five 5xx responses per minute"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    LoadBalancer = var.alb_alarm_dimensions.load_balancer
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "alb_unhealthy_targets" {
+  for_each            = var.alb_alarm_dimensions == null ? {} : var.alb_alarm_dimensions.target_groups
+  alarm_name          = "${var.project_name}-alb-${each.key}-unhealthy-targets"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 2
+  metric_name         = "UnHealthyHostCount"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = 1
+  treat_missing_data  = "breaching"
+  alarm_description   = "At least one target is unhealthy across load balancer nodes, or target health is missing"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    LoadBalancer = var.alb_alarm_dimensions.load_balancer
+    TargetGroup  = each.value
   }
 }
 

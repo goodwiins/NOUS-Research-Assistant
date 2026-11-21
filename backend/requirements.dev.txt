@@ -1,9 +1,7 @@
 -r requirements.txt
 
 # Testing
-pytest>=9.2.0
-pytest-asyncio==1.4.0
-pytest-cov==7.1.0
+-r requirements-ci.txt
 pytest-mock==3.17.0
 faker==20.1.0
 

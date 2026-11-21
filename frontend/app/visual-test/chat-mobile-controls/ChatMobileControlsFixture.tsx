@@ -140,6 +140,14 @@ function FixtureShell(): ReactElement {
     useChatStore.setState({
       currentWorkspaceId: WORKSPACE_ID,
       currentThreadId: THREAD_ID,
+      messagePagination: {
+        [THREAD_ID]: {
+          hasMore: false,
+          loadingOlder: false,
+          loadedCount: completedMessages.length,
+          message_branching: false,
+        },
+      },
       workspaces: [visualWorkspace],
     });
 
@@ -161,6 +169,7 @@ function FixtureShell(): ReactElement {
       useAgentActivityStore.setState({ runs: {}, currentThreadId: null });
       useChatStore.setState({
         currentThreadId: null,
+        messagePagination: {},
         currentWorkspaceId: null,
       });
     };

@@ -3,9 +3,14 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "knowledge-graph-analytics.fullname" . }}-backend
-  {{- if .Values.backend.migrations.enabled }}
+  {{- if or .Values.backend.migrations.enabled .Values.awsRdsSecret.enabled }}
   annotations:
+    {{- if .Values.backend.migrations.enabled }}
     argocd.argoproj.io/sync-wave: "2"
+    {{- end }}
+    {{- if .Values.awsRdsSecret.enabled }}
+    secret.reloader.stakater.com/reload: aws-database-credentials
+    {{- end }}
   {{- end }}
   labels:
     {{- include "knowledge-graph-analytics.labels" . | nindent 4 }}
@@ -28,9 +33,6 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/backend-configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/backend-secret.yaml") . | sha256sum }}
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "{{ .Values.backend.service.targetPort }}"
-        prometheus.io/path: "/metrics"
         {{- include "knowledge-graph-analytics.backendSourceAnnotation" . | nindent 8 }}
       labels:
         {{- include "knowledge-graph-analytics.selectorLabels" . | nindent 8 }}

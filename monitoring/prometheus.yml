@@ -32,22 +32,6 @@ scrape_configs:
     static_configs:
       - targets: ['cadvisor:8080']
 
-  # Backend Application Metrics
-  - job_name: 'rag-backend'
-    static_configs:
-      - targets: ['backend:8000']
-    metrics_path: '/metrics'
-    scrape_interval: 30s
-    scrape_timeout: 25s
-
-  # Backend Metrics (Prometheus specific)
-  - job_name: 'rag-backend-metrics'
-    static_configs:
-      - targets: ['backend:8002']
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-    scrape_timeout: 10s
-
   # Frontend Application Metrics
   - job_name: 'rag-frontend'
     static_configs:

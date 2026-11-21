@@ -85,7 +85,7 @@ jobs:
           path: |
             ~/.cache/pip
             backend/.venv
-          key: ${{ runner.os }}-pip-eval-${{ hashFiles('backend/requirements.txt') }}
+          key: ${{ runner.os }}-pip-eval-${{ hashFiles('backend/requirements.txt', 'backend/requirements-ci.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-eval-
             ${{ runner.os }}-pip-
@@ -94,7 +94,7 @@ jobs:
           if [ ! -d .venv ]; then
             python3 -m venv .venv
           fi
-          .venv/bin/pip install -q -r requirements.txt
+          .venv/bin/pip install -q -r requirements.txt -r requirements-ci.txt
           # Same pins as requirements-test.txt (not installed here).
           # rerunfailures: the sweep reruns live cases once. timeout: enforces
           # pytest.ini's `timeout = 300`, which is inert without the plugin, so

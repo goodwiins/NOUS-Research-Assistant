@@ -40,6 +40,7 @@ spec:
       - PrunePropagationPolicy=foreground
       - PruneLast=true
       - ApplyOutOfSyncOnly=true
+      - RespectIgnoreDifferences=true
       # EKS does not have KEDA or cert-manager CRDs yet (Task 3 addon gap):
       # without this, their absence invalidates the WHOLE sync (ArgoCD
       # dry-run fails on undiscoverable GVKs and applies nothing). Skipped
@@ -54,6 +55,11 @@ spec:
 
   # Health checks / drift tolerances
   ignoreDifferences:
+    # The namespace-local Reloader owns only its rollout marker.
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
     - group: apps
       kind: Deployment
       # Only the worker HPA owns replicas. Backend and beat must follow Git.

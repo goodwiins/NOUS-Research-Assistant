@@ -1,17 +1,17 @@
 'use client';
 
-import { type ReactElement } from 'react';
+import type { ReactElement } from 'react';
 import {
-  makeAssistantToolUI,
+  useAssistantToolUI,
   type ToolCallMessagePartProps,
 } from '@assistant-ui/react';
 import { FileSearch } from 'lucide-react';
 
-import { HitlApprovalToolUI } from './HitlApprovalToolUI';
+import { HitlApprovalRenderer, HITL_APPROVAL_TOOL } from './HitlApprovalToolUI';
 
 /**
  * Declarative per-tool renderers (P2). Each is registered by
- * `toolName` via `makeAssistantToolUI`; a matching tool-call part then routes
+ * `toolName` via `useAssistantToolUI`; a matching tool-call part then routes
  * to it instead of the generic `ToolFallback`. Renderers branch on
  * `status.type` (running → skeleton, incomplete → error, complete → result)
  * and read the structured (backend-redacted) `args` threaded through
@@ -89,21 +89,20 @@ export function SearchDocumentsToolRenderer({
   );
 }
 
-const SearchDocumentsUI = makeAssistantToolUI<{ query?: string }, unknown>({
+const searchDocumentsUI = {
   toolName: 'search_documents',
   render: SearchDocumentsToolRenderer,
-});
+};
 
-/**
- * Mounts every registered tool UI (each renders null — registration is the
- * side effect). Render inside `AssistantRuntimeProvider`. Kept as a single
- * component so `ChatRuntimeProvider` adds one child behind the flag.
- */
-export function NousToolUIs(): ReactElement {
-  return (
-    <>
-      <SearchDocumentsUI />
-      <HitlApprovalToolUI />
-    </>
-  );
+const hitlApprovalUI = {
+  toolName: HITL_APPROVAL_TOOL,
+  display: 'standalone' as const,
+  render: HitlApprovalRenderer,
+};
+
+/** Registers the web renderers for backend-owned tools. */
+export function NousToolUIs(): null {
+  useAssistantToolUI(searchDocumentsUI);
+  useAssistantToolUI(hitlApprovalUI);
+  return null;
 }

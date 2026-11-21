@@ -56,7 +56,7 @@ COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 
 # Install additional development dependencies
-COPY backend/requirements.dev.txt ./
+COPY backend/requirements.txt backend/requirements-ci.txt backend/requirements.dev.txt ./
 RUN pip install -r requirements.dev.txt
 
 # Copy source code

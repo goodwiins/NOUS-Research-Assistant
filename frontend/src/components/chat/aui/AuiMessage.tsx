@@ -19,7 +19,6 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   useAuiState,
-  useThread,
 } from '@assistant-ui/react';
 import {
   AlertTriangle,
@@ -1022,12 +1021,8 @@ export class MessageByIndexBoundary extends React.Component<
   render(): ReactNode {
     const { error } = this.state;
     if (error) {
-      // Version-coupled: this matches @assistant-ui/react@0.14.29's transient
-      // out-of-bounds message. If a version bump rewords it, the classifier
-      // stops matching and the boundary rethrows (crash returns) — but the
-      // direct boundary regression in AuiMessage.test.tsx drives the exact
-      // known OOB wording, so a wording change trips it red in CI. On a bump,
-      // re-run that test and update this pattern if it fails.
+      // Retry only the SDK's transient client index lookup error. Other
+      // errors go to the surrounding error boundary.
       if (MessageByIndexBoundary.isTransientIndexError(error)) {
         return this.retriedResetKey === this.props.resetKey ? null : (
           <MessageByIndexRetry
@@ -1131,25 +1126,25 @@ export function AuiMessageByIndex({
   // error boundary can catch. Unstable_MessageById renders null while its
   // id is absent from the runtime thread, so the stale frame renders
   // nothing and the effect-driven runtime sync re-renders this row in place.
-  const runtimeMessageCount = useThread((t) => t.messages.length);
-  const runtimeMessageId = useThread((t) => t.messages[index]?.id);
+  const runtimeMessageCount = useAuiState((s) => s.thread.messages.length);
+  const runtimeMessageId = useAuiState((s) => s.thread.messages[index]?.id);
   // The page row's runtimeId IS the runtime message id (convertMessage).
   // Fall back to the runtime's own id at this index only when the caller
   // did not thread a page message through (e.g. a post-edit rerun).
   const rowMessageId = message?.runtimeId ?? runtimeMessageId;
-  // Synchronous blanking on the legacy external-store read: when the id has
+  // Synchronous blanking on the runtime thread read: when the id has
   // left the runtime thread (empty store, thread switch, reconciliation),
   // render nothing THIS frame. Unstable_MessageById enforces the same
   // invariant on the tap store it reads, whose notification settles a tick
   // later — belt and suspenders, and neither path resolves an index.
-  const runtimeHasRowId = useThread(
-    (t) =>
+  const runtimeHasRowId = useAuiState(
+    (s) =>
       rowMessageId !== undefined &&
-      t.messages.some((m) => m.id === rowMessageId)
+      s.thread.messages.some((m) => m.id === rowMessageId)
   );
-  const isLatestAssistant = useThread((t) => {
-    for (let i = t.messages.length - 1; i >= 0; i -= 1) {
-      const row = t.messages[i];
+  const isLatestAssistant = useAuiState(({ thread }) => {
+    for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
+      const row = thread.messages[i];
       if (row?.role === 'assistant') return row.id === rowMessageId;
     }
     return false;

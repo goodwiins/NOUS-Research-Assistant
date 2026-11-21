@@ -45,7 +45,7 @@ export function toPartStatus(
 const noopHandlers = {
   addResult: () => undefined,
   resume: () => undefined,
-  respondToApproval: () => undefined,
+  respondToApproval: async () => undefined,
 };
 
 export const AuiToolParts = memo(function AuiToolParts({

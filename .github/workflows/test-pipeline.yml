@@ -359,7 +359,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements.txt
+          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
           rc=$?
           set -e
           if [ "$rc" -eq 0 ]; then
@@ -480,7 +480,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pytest pytest-asyncio pytest-cov pytest-xdist 'respx>=0.22.0,<0.23' hypothesis==6.112.2
-          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements.txt
+          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
       - name: Run unit tests
         run: |
           mkdir -p test-results
@@ -579,7 +579,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pytest pytest-asyncio pytest-cov pytest-xdist 'respx>=0.22.0,<0.23' hypothesis==6.112.2
-          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements.txt
+          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
       - name: Run golden replay (deterministic, no creds)
         # AGENT_GOLDEN_REPLAY swaps the real model for the cassette-seeded fake
         # at every LLM seam, so this runs offline with no Azure creds and no
@@ -658,7 +658,7 @@ jobs:
             ${{ runner.os }}-pip-test-
             ${{ runner.os }}-pip-
       - name: Install backend dependencies
-        run: pip install --build-constraint backend/constraints-ci.txt -r backend/requirements.txt
+        run: pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
       - name: Verify OpenAPI snapshot is in sync with the app
         # Rebuilds app.openapi() offline (in-memory SQLite + placeholder Azure
         # creds — no DB/Redis/network) and diffs it against the committed
@@ -804,7 +804,7 @@ jobs:
         # -o backend/.bandit-baseline.json) — burn it down, never grow it.
         run: bandit -r backend/src -ll -ii -x tests -b backend/.bandit-baseline.json
       - name: Run Safety (dependency vulnerabilities)
-        run: safety check -r backend/requirements.txt
+        run: safety check -r backend/requirements-cpu-lock.txt
         continue-on-error: true # Advisory only: flags unmaintained upstream packages we can't fix here
   # ==========================================================================
   # Frontend Tests
@@ -852,6 +852,21 @@ jobs:
         # tests/e2e/qa (pnpm qa:nous) and its nous-verify selection/evidence
         # code have no other CI coverage; the suites need no browser.
         run: node --test ../tests/unit/scripts/nous-qa.test.mjs ../tests/unit/scripts/nous-verify.test.mjs
+      - name: Run credential-free chat and artifact browser checks
+        if: github.event_name == 'pull_request'
+        run: |
+          sudo python3 ../scripts/ci/quarantine_apt_sources.py
+          pnpm exec playwright install --with-deps chromium
+          pnpm exec playwright test --config=playwright.chat-mobile-controls.config.ts --project=chromium-375
+          pnpm exec playwright test --config=playwright.artifact-isolation.config.ts
+      - name: Upload frontend browser failures
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: frontend-browser-test-results
+          path: frontend/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
       # Blocking ratchet: global coverage may never fall below the floors
       # committed in frontend/quality-baseline.json ("coverage" key).
       # Raising or lowering a floor is an intentional, reviewed JSON edit.
@@ -961,7 +976,7 @@ jobs:
             libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-dejavu-core
       - name: Install dependencies
         run: |
-          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements.txt
+          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
       - name: Verify the PDF renderer
         run: |
           python -c 'from weasyprint import HTML; pdf = HTML(string="<h1>PDF smoke</h1>").write_pdf(); assert pdf.startswith(b"%PDF-"), pdf[:8]; print("weasyprint pdf_bytes=%d" % len(pdf))'
@@ -1180,7 +1195,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pytest pytest-asyncio pytest-cov
-          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements.txt
+          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
       - name: Run resilience tests
         run: |
           mkdir -p test-results
@@ -1479,7 +1494,7 @@ jobs:
         run: |
           docker exec \
             -e PYTHONPATH=/app \
-            -e SERVICE_ROLE_JWT=$SERVICE_ROLE_JWT \
+            -e SERVICE_ROLE_JWT \
             backend-e2e \
             python -c "
           import os, httpx
@@ -1669,7 +1684,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pytest pytest-asyncio pytest-benchmark locust
-          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements.txt
+          pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
       - name: Run performance tests
         run: |
           pytest backend/tests/ \

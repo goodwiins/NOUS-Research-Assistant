@@ -3,7 +3,7 @@ groups:
   - name: rag-system-application
     rules:
       - alert: ApplicationDown
-        expr: up{job=~"rag-backend|rag-frontend"} == 0
+        expr: up{job="rag-frontend"} == 0
         for: 1m
         labels:
           severity: critical
@@ -11,26 +11,6 @@ groups:
         annotations:
           summary: "RAG System application is down"
           description: "{{ $labels.job }} has been down for more than 1 minute."
-
-      - alert: HighErrorRate
-        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
-        for: 5m
-        labels:
-          severity: warning
-          service: application
-        annotations:
-          summary: "High error rate detected"
-          description: "Error rate is {{ $value | humanizePercentage }} for {{ $labels.job }}."
-
-      - alert: HighLatency
-        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
-        for: 5m
-        labels:
-          severity: warning
-          service: application
-        annotations:
-          summary: "High latency detected"
-          description: "95th percentile latency is {{ $value }}s for {{ $labels.job }}."
 
       - alert: MemoryUsageHigh
         expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) * 100 > 80
@@ -242,7 +222,7 @@ groups:
           service: application
         annotations:
           summary: "Large file upload detected"
-          description: "99th percentile file upload size is {{ $value | humanizeBytes }}."
+          description: "99th percentile file upload size is {{ $value | humanize1024 }}B."
 
   # Business Metrics Alerts
   - name: rag-system-business

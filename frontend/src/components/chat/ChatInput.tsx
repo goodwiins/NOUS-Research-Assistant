@@ -337,8 +337,8 @@ export function ChatInput({
   // Mirror programmatic changes into assistant-ui; direct typing is already
   // synchronized by ComposerPrimitive.Input.
   useEffect(() => {
-    if (aui.composer().getState().text !== value) {
-      aui.composer().setText(value);
+    if (aui.composer.getState().text !== value) {
+      aui.composer.setText(value);
     }
   }, [aui, value]);
 
@@ -455,12 +455,12 @@ export function ChatInput({
     const attachmentIds = attachedDocumentIds();
     if (onSubmit(attachmentIds) === false) {
       e.preventDefault();
-      aui.composer().setText('');
+      aui.composer.setText('');
       clearAttachments();
       return false;
     }
 
-    aui.composer().setRunConfig({ custom: { attachmentIds } });
+    aui.composer.setRunConfig({ custom: { attachmentIds } });
     if (attachments.length > 0) setSubmittedDraft(value.trim());
     onChange('');
     return true;

@@ -296,3 +296,32 @@ variable "slack_webhook_url" {
   default     = ""
   sensitive   = true
 }
+
+variable "database_connections_alarm_threshold" {
+  description = "RDS client connection budget. Set below the instance's effective max_connections."
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.database_connections_alarm_threshold > 0
+    error_message = "The RDS connection budget must be positive."
+  }
+}
+
+variable "alb_alarm_dimensions" {
+  description = "CloudWatch dimension suffixes for the controller-managed ALB and its target groups."
+  type = object({
+    load_balancer = string
+    target_groups = map(string)
+  })
+  default = null
+
+  validation {
+    condition = var.alb_alarm_dimensions == null ? true : (
+      startswith(var.alb_alarm_dimensions.load_balancer, "app/") &&
+      length(var.alb_alarm_dimensions.target_groups) > 0 &&
+      alltrue([for suffix in values(var.alb_alarm_dimensions.target_groups) : startswith(suffix, "targetgroup/")])
+    )
+    error_message = "Use an app/ ALB suffix and at least one targetgroup/ suffix."
+  }
+}
