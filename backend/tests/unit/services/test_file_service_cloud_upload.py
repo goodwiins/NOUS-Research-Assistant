@@ -3,6 +3,7 @@
 import io
 import sys
 import tempfile
+import threading
 import types
 import uuid
 from pathlib import Path
@@ -75,10 +76,12 @@ class _S3Recorder:
 
     def __init__(self) -> None:
         self.uploads: list[Any] = []
+        self.threads: list[threading.Thread] = []
         _S3Recorder.instances.append(self)
 
     def upload_fileobj(self, fileobj: Any, key: str, content_type: str) -> str:
         self.uploads.append((fileobj.read(), key, content_type))
+        self.threads.append(threading.current_thread())
         return key
 
 
@@ -87,12 +90,14 @@ class _SupabaseRecorder:
 
     def __init__(self) -> None:
         self.uploads: list[Any] = []
+        self.threads: list[threading.Thread] = []
         _SupabaseRecorder.instances.append(self)
 
     def upload_fileobj(
         self, fileobj: Any, bucket: str, key: str, content_type: str
     ) -> str:
         self.uploads.append((fileobj.read(), bucket, key, content_type))
+        self.threads.append(threading.current_thread())
         return f"{bucket}/{key}"
 
 
@@ -172,6 +177,8 @@ async def test_cloud_upload_lazily_constructs_helper_and_streams_bytes(
     )
     assert document.storage_backend == backend
     assert not list(tmp_path.glob("upload_*.bin"))
+    # GOO-643 IS-1: the blocking SDK upload runs off the event-loop thread.
+    assert helper.threads and helper.threads[0] is not threading.current_thread()
 
 
 @pytest.mark.asyncio

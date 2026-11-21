@@ -524,8 +524,14 @@ class FileService:
                 spool_path, file_hash = await self._spool_and_hash(file)
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
-                    with open(spool_path, "rb") as fh:
-                        self.s3_helper.upload_fileobj(fh, s3_key, mime_type)
+                    # boto3 is blocking: upload from a worker thread (GOO-643).
+                    await asyncio.to_thread(
+                        self._upload_spool,
+                        spool_path,
+                        self.s3_helper.upload_fileobj,
+                        s3_key,
+                        mime_type,
+                    )
                 finally:
                     try:
                         os.unlink(spool_path)
@@ -563,10 +569,14 @@ class FileService:
                 spool_path, file_hash = await self._spool_and_hash(file)
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
-                    with open(spool_path, "rb") as fh:
-                        storage_key = self.storage_helper.upload_fileobj(
-                            fh, bucket, key, mime_type
-                        )
+                    storage_key = await asyncio.to_thread(
+                        self._upload_spool,
+                        spool_path,
+                        self.storage_helper.upload_fileobj,
+                        bucket,
+                        key,
+                        mime_type,
+                    )
                 finally:
                     try:
                         os.unlink(spool_path)
@@ -597,7 +607,7 @@ class FileService:
                 )
                 file_path_with_ext = f"{file_path}{original_ext}"
                 saved_path = await self.save_file(file, file_path_with_ext)
-                file_hash = self.calculate_file_hash(saved_path)
+                file_hash = await asyncio.to_thread(self.calculate_file_hash, saved_path)
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
                 except Exception:
@@ -771,7 +781,9 @@ class FileService:
             if reversal_ok and stored_object is not None:
                 backend, storage_path, obj_file_path = stored_object
                 try:
-                    self._delete_stored_object(backend, storage_path, obj_file_path)
+                    await asyncio.to_thread(
+                        self._delete_stored_object, backend, storage_path, obj_file_path
+                    )
                 except Exception:
                     logger.warning(
                         "upload rollback: orphaned storage object %s (recoverable "
@@ -989,6 +1001,12 @@ class FileService:
             self.storage_helper.delete_file(bucket, key)
         elif file_path and os.path.exists(file_path):
             os.remove(file_path)
+
+    @staticmethod
+    def _upload_spool(spool_path: str, upload: Any, *args: Any) -> Any:
+        """Open the spooled upload and hand it to a blocking ``upload_fileobj``."""
+        with open(spool_path, "rb") as fh:
+            return upload(fh, *args)
 
     def delete_physical_file(self, document: Document) -> None:
         """Delete every stored object a document owns.
@@ -1386,7 +1404,8 @@ class FileService:
         # Best-effort physical delete AFTER the commit. A failure here must NOT
         # roll back the committed soft-delete — log it as a recoverable orphan.
         try:
-            self.delete_physical_file(document)
+            # Blocking boto3/disk calls: worker thread (GOO-643 IS-1).
+            await asyncio.to_thread(self.delete_physical_file, document)
         except Exception as delete_error:
             logger.warning(
                 "Soft-deleted document %s but failed to remove its storage "
