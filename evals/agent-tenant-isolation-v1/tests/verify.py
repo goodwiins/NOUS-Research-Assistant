@@ -76,6 +76,16 @@ _UUID_RE = re.compile(
 # seeded/human-readable string, never per-word tokenization.
 MIN_LEAK_TOKEN_LENGTH = 6
 
+# An org-B error is isolation evidence only when it is the tool's denial
+# ("Document not found or access denied", "Project not found or access
+# denied", ...). Any other error -- a model error, a failed text extraction,
+# a database fault -- means the probe never reached the access check, and an
+# empty org_b_rows from it proves nothing about isolation.
+_ISOLATION_DENIAL_RE = re.compile(
+    r"\b(not found|access denied|permission denied|forbidden|not authori[sz]ed)\b",
+    re.IGNORECASE,
+)
+
 
 # --------------------------------------------------------------------------
 # live state (in-container only; psycopg is absent on the calibration host)
@@ -268,6 +278,16 @@ def check_no_leaked_identifiers(evidence: dict[str, Any], failures: list[str]) -
                 )
 
 
+def org_b_faults(evidence: dict[str, Any]) -> list[str]:
+    """Probes whose org-B call failed with something other than a denial."""
+    faults = []
+    for probe in evidence["probes"]:
+        error = probe.get("org_b_error")
+        if error and not _ISOLATION_DENIAL_RE.search(str(error)):
+            faults.append(f"{probe.get('probe_id')}: {str(error)[:200]!r}")
+    return faults
+
+
 def objective_failures(evidence: dict[str, Any], state: dict[str, Any]) -> list[str]:
     require_keys(evidence)  # raises InfrastructureFailure on structural defects
     check_org_a_nonempty(
@@ -280,6 +300,15 @@ def objective_failures(evidence: dict[str, Any], state: dict[str, Any]) -> list[
     check_probe_coverage(evidence, failures)
     check_no_leaked_rows(evidence, failures)
     check_no_leaked_identifiers(evidence, failures)
+    # A leak anywhere is a definitive, scoreable failure. Without one, a probe
+    # whose org-B call faulted cannot count as isolated: that is an
+    # infrastructure failure, never a pass.
+    faults = org_b_faults(evidence)
+    if faults and not failures:
+        raise InfrastructureFailure(
+            "org-B call(s) failed with a non-isolation error, so empty "
+            f"org_b_rows prove nothing: {faults}"
+        )
     return failures
 
 
