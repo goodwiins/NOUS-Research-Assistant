@@ -1,16 +1,21 @@
 """
 Rebuild Neo4j knowledge graph using Azure OpenAI gpt-4o extraction.
 
-Wipes Neo4j, then for each document:
+DESTRUCTIVE. Loads and validates the source documents first; only with
+--yes does it wipe Neo4j (every organization's nodes), then for each document:
   - Chunks text (3K tokens with 200-token overlap)
   - Calls gpt-4o to extract research-focused entities and relationships
   - Batch-inserts into Neo4j via knowledge_graph_service
 
 Usage:
   docker exec -e PYTHONPATH=/app rag_system-backend-1 \
-    python scripts/maintenance/rebuild_kg_llm.py
+    python scripts/maintenance/rebuild_kg_llm.py          # dry run
+  (same) python scripts/maintenance/rebuild_kg_llm.py --yes   # wipe + rebuild
+
+Requires KG_DATABASE_URL; there is no default database.
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -18,6 +23,7 @@ import os
 import re
 import sys
 import time
+from typing import Callable, Optional
 
 # Configure logging BEFORE imports (imports set up their own handlers)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -29,17 +35,16 @@ logger = logging.getLogger(__name__)
 # Add backend root to sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
+from src.core.circuit_breaker import get_circuit_breaker
+
 # Import base models first to ensure registry is populated
 from src.models import *  # noqa: F401, F403
-
 from src.models.ab_testing import (  # noqa: F401
     Experiment,
     ExperimentAssignment,
     ExperimentMetric,
     Variant,
 )
-
-from src.core.circuit_breaker import get_circuit_breaker
 from src.models.graph import (
     BatchEntityRequest,
     CreateEntityRequest,
@@ -117,7 +122,9 @@ Text:
 # ── Text Chunking ──────────────────────────────────────────────────────────
 
 
-def chunk_text(text: str, max_tokens: int = 3000, overlap_tokens: int = 200) -> list[str]:
+def chunk_text(
+    text: str, max_tokens: int = 3000, overlap_tokens: int = 200
+) -> list[str]:
     """Split text into chunks of ~max_tokens with overlap. Approximates 1 token ~ 4 chars."""
     max_chars = max_tokens * 4
     overlap_chars = overlap_tokens * 4
@@ -167,7 +174,9 @@ def parse_llm_json(raw: str) -> dict:
             array_start = match.end()
             last_complete = repaired.rfind("}", array_start)
             if last_complete > array_start:
-                next_array = re.search(r',\s*"(entities|relationships)"', repaired[last_complete:])
+                next_array = re.search(
+                    r',\s*"(entities|relationships)"', repaired[last_complete:]
+                )
                 if not next_array:
                     repaired = repaired[: last_complete + 1] + "]}"
                     break
@@ -213,14 +222,20 @@ def call_llm(messages: list[dict], doc_title: str) -> dict:
                 "usage": result.get("usage", {}),
             }
         except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error on attempt {attempt + 1} for '{doc_title}': {e}")
+            logger.warning(
+                f"JSON parse error on attempt {attempt + 1} for '{doc_title}': {e}"
+            )
             if attempt == 2:
-                logger.error(f"Failed to parse LLM output for '{doc_title}' after 3 attempts")
+                logger.error(
+                    f"Failed to parse LLM output for '{doc_title}' after 3 attempts"
+                )
                 return {"entities": [], "relationships": [], "usage": {}}
         except Exception as e:
             err_str = str(e)
             if "content_filter" in err_str or "ContentFilter" in err_str:
-                logger.warning(f"Content filter triggered for '{doc_title}' chunk, skipping")
+                logger.warning(
+                    f"Content filter triggered for '{doc_title}' chunk, skipping"
+                )
                 return {"entities": [], "relationships": [], "usage": {}}
             if "429" in err_str or "rate" in err_str.lower():
                 wait = 2 ** (attempt + 1)
@@ -306,7 +321,9 @@ def insert_entities_batch(
     create_requests = []
 
     for ent in entities:
-        ent_type = LLM_ENTITY_TYPE_MAP.get(ent.get("type", "").lower(), EntityType.OTHER)
+        ent_type = LLM_ENTITY_TYPE_MAP.get(
+            ent.get("type", "").lower(), EntityType.OTHER
+        )
         confidence = float(ent.get("confidence", 0.85))
 
         create_requests.append(
@@ -342,7 +359,11 @@ def insert_entities_batch(
                         for e in response.errors
                         if any(
                             kw in str(e.get("error", ""))
-                            for kw in ("Connection refused", "defunct", "circuit breaker")
+                            for kw in (
+                                "Connection refused",
+                                "defunct",
+                                "circuit breaker",
+                            )
                         )
                     ]
                     if conn_errors and attempt < 2:
@@ -387,7 +408,9 @@ def insert_relationships(
             skipped += 1
             continue
 
-        mapped_type = LLM_RELATIONSHIP_TYPE_MAP.get(rel_type_str, RelationshipType.RELATED_TO)
+        mapped_type = LLM_RELATIONSHIP_TYPE_MAP.get(
+            rel_type_str, RelationshipType.RELATED_TO
+        )
 
         req = CreateRelationshipRequest(
             source_entity_id=source_id,
@@ -406,12 +429,15 @@ def insert_relationships(
                 break
             except Exception as e:
                 if attempt < 2 and any(
-                    kw in str(e) for kw in ("Connection refused", "defunct", "circuit breaker")
+                    kw in str(e)
+                    for kw in ("Connection refused", "defunct", "circuit breaker")
                 ):
                     time.sleep(15)
                     reconnect_neo4j()
                 else:
-                    logger.warning(f"  Relationship error ({source_name} -> {target_name}): {e}")
+                    logger.warning(
+                        f"  Relationship error ({source_name} -> {target_name}): {e}"
+                    )
                     skipped += 1
                     break
 
@@ -421,37 +447,13 @@ def insert_relationships(
 # ── Main ──────────────────────────────────────────────────────────────────
 
 
-def main():
-    logger.info("=" * 60)
-    logger.info("Knowledge Graph Rebuild with Azure OpenAI gpt-4o")
-    logger.info("=" * 60)
-
-    # Check Azure OpenAI availability
-    if not azure_openai_service.is_chat_available():
-        logger.error(
-            "Azure OpenAI chat not available. Check env vars:\n"
-            "  AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT,\n"
-            "  AZURE_OPENAI_CHAT_DEPLOYMENT_NAME, AZURE_OPENAI_CHAT_API_VERSION"
-        )
-        sys.exit(1)
-
-    deployment = azure_openai_service.get_chat_deployment()
-    logger.info(f"Using deployment: {deployment}")
-
-    # Connect to Neo4j
-    knowledge_graph_service._connect()
-
-    # Step 1: Wipe Neo4j
-    wipe_neo4j()
-
-    # Step 2: Query documents from PostgreSQL
+def load_documents(pg_url: str) -> list[dict]:
+    """Return every document with extracted text from the source database."""
     from sqlalchemy import create_engine, text
 
-    pg_url = os.environ.get(
-        "KG_DATABASE_URL",
-        "postgresql://postgres:postgres@postgres:5432/multimodal_rag_dev",
+    logger.info(
+        f"Connecting to PostgreSQL: {pg_url.split('@')[1] if '@' in pg_url else pg_url}"
     )
-    logger.info(f"Connecting to PostgreSQL: {pg_url.split('@')[1] if '@' in pg_url else pg_url}")
     pg_engine = create_engine(pg_url)
     try:
         with pg_engine.connect() as conn:
@@ -461,18 +463,72 @@ def main():
                     "WHERE content_text IS NOT NULL AND content_text != ''"
                 )
             ).fetchall()
-        documents = [
-            {"id": str(row[0]), "title": row[1], "filename": row[2], "content_text": row[3]}
-            for row in rows
-        ]
-        logger.info(f"Found {len(documents)} documents with content")
     finally:
         pg_engine.dispose()
+    return [
+        {"id": str(row[0]), "title": row[1], "filename": row[2], "content_text": row[3]}
+        for row in rows
+    ]
 
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Rebuild the Neo4j knowledge graph with LLM extraction. DESTRUCTIVE: "
+            "with --yes it deletes EVERY node in Neo4j, for every organization. "
+            "Without --yes it only reports what it would do."
+        )
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually wipe Neo4j and rebuild. Default is a dry run.",
+    )
+    return parser.parse_args(argv)
+
+
+def run(
+    argv: Optional[list[str]] = None,
+    *,
+    load: Optional[Callable[[str], list[dict]]] = None,
+    wipe: Optional[Callable[[], None]] = None,
+    rebuild: Optional[Callable[[list[dict]], None]] = None,
+) -> int:
+    """Validate the source, then (only with --yes) wipe and rebuild. Returns an exit code."""
+    load = load or load_documents
+    wipe = wipe or wipe_neo4j
+    rebuild = rebuild or rebuild_documents
+    args = parse_args(argv)
+
+    pg_url = os.environ.get("KG_DATABASE_URL")
+    if not pg_url:
+        logger.error("KG_DATABASE_URL is required (no default database is assumed).")
+        return 2
+
+    # Load and validate the source BEFORE anything destructive happens.
+    try:
+        documents = load(pg_url)
+    except Exception as e:
+        logger.error(f"Could not load documents; Neo4j untouched: {e}")
+        return 1
+    logger.info(f"Found {len(documents)} documents with content")
     if not documents:
-        logger.warning("No documents found. Exiting.")
-        sys.exit(0)
+        logger.error("No documents with content found; refusing to wipe Neo4j.")
+        return 1
 
+    if not args.yes:
+        logger.info(
+            "DRY RUN: would delete every Neo4j node and re-extract "
+            f"{len(documents)} documents. Re-run with --yes to do it."
+        )
+        return 0
+
+    wipe()
+    rebuild(documents)
+    return 0
+
+
+def rebuild_documents(documents: list[dict]) -> None:
     # Step 3: Process each document
     total_entities = 0
     total_relationships = 0
@@ -486,7 +542,9 @@ def main():
         text_content = doc["content_text"].strip()
 
         logger.info(f"\n[{i}/{len(documents)}] Processing: {doc_title}")
-        logger.info(f"  Text length: {len(text_content):,} chars (~{len(text_content)//4:,} tokens)")
+        logger.info(
+            f"  Text length: {len(text_content):,} chars (~{len(text_content)//4:,} tokens)"
+        )
 
         chunks = chunk_text(text_content)
         logger.info(f"  Chunks: {len(chunks)}")
@@ -517,7 +575,9 @@ def main():
         total_entities += len(name_to_id)
 
         # Insert relationships
-        rel_created, rel_skipped = insert_relationships(all_relationships, name_to_id, doc_id)
+        rel_created, rel_skipped = insert_relationships(
+            all_relationships, name_to_id, doc_id
+        )
         total_relationships += rel_created
         logger.info(
             f"  Inserted: {len(name_to_id)} entities, "
@@ -549,7 +609,31 @@ def main():
     )
     logger.info("=" * 60)
 
-    knowledge_graph_service.close()
+
+def main() -> None:
+    logger.info("=" * 60)
+    logger.info("Knowledge Graph Rebuild with Azure OpenAI gpt-4o")
+    logger.info("=" * 60)
+
+    # Check Azure OpenAI availability
+    if not azure_openai_service.is_chat_available():
+        logger.error(
+            "Azure OpenAI chat not available. Check env vars:\n"
+            "  AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT,\n"
+            "  AZURE_OPENAI_CHAT_DEPLOYMENT_NAME, AZURE_OPENAI_CHAT_API_VERSION"
+        )
+        sys.exit(1)
+
+    deployment = azure_openai_service.get_chat_deployment()
+    logger.info(f"Using deployment: {deployment}")
+
+    # Connect to Neo4j
+    knowledge_graph_service._connect()
+    try:
+        code = run()
+    finally:
+        knowledge_graph_service.close()
+    sys.exit(code)
 
 
 if __name__ == "__main__":
