@@ -7,6 +7,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -97,10 +98,27 @@ class ProcessingPipeline:
 
         self.db = db
         self.file_service = FileService(db)
-        self.entity_extractor = EntityExtractionService()
-        self.image_processor = ImageProcessingService()
-        self.audio_processor = AudioProcessingService()
-        self.video_processor = VideoProcessingService()
+
+    # The extractors are built on first use, not in __init__. Building
+    # EntityExtractionService loads spaCy and AudioProcessingService tries to
+    # load Whisper; the API routes (process/status/retry, via
+    # get_processing_service) never call an extractor, so eager construction
+    # loaded both models on the event loop for every request (GOO-642/IS2B-1).
+    @cached_property
+    def entity_extractor(self) -> EntityExtractionService:
+        return EntityExtractionService()
+
+    @cached_property
+    def image_processor(self) -> ImageProcessingService:
+        return ImageProcessingService()
+
+    @cached_property
+    def audio_processor(self) -> AudioProcessingService:
+        return AudioProcessingService()
+
+    @cached_property
+    def video_processor(self) -> VideoProcessingService:
+        return VideoProcessingService()
 
     async def process_document(
         self,
