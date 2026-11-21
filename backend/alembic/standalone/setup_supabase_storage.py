@@ -20,6 +20,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import structlog
+
 from src.core.config import settings
 from src.core.supabase_client import get_supabase_client
 
@@ -32,7 +33,9 @@ def create_buckets():
     """Create private storage buckets."""
     client = get_supabase_client()
     if not client:
-        print("ERROR: Supabase client not configured. Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.")
+        print(
+            "ERROR: Supabase client not configured. Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+        )
         sys.exit(1)
 
     existing = {b.name for b in client.storage.list_buckets()}
@@ -86,58 +89,7 @@ def apply_rls_policies():
         trans = conn.begin()
         try:
             for bucket_name in BUCKETS:
-                select_policy = f"storage_select_{bucket_name}"
-                conn.execute(text(f"""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_policies
-                            WHERE policyname = '{select_policy}'
-                            AND tablename = 'objects'
-                            AND schemaname = 'storage'
-                        ) THEN
-                            CREATE POLICY "{select_policy}"
-                            ON storage.objects
-                            FOR SELECT
-                            TO authenticated
-                            USING (
-                                bucket_id = '{bucket_name}'
-                                AND (storage.foldername(name))[1] = (
-                                    SELECT CAST(raw_user_meta_data->>'organization_id' AS TEXT)
-                                    FROM auth.users
-                                    WHERE id = auth.uid()
-                                )
-                            );
-                        END IF;
-                    END $$;
-                """))
-
-                insert_policy = f"storage_insert_{bucket_name}"
-                conn.execute(text(f"""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_policies
-                            WHERE policyname = '{insert_policy}'
-                            AND tablename = 'objects'
-                            AND schemaname = 'storage'
-                        ) THEN
-                            CREATE POLICY "{insert_policy}"
-                            ON storage.objects
-                            FOR INSERT
-                            TO authenticated
-                            WITH CHECK (
-                                bucket_id = '{bucket_name}'
-                                AND (storage.foldername(name))[1] = (
-                                    SELECT CAST(raw_user_meta_data->>'organization_id' AS TEXT)
-                                    FROM auth.users
-                                    WHERE id = auth.uid()
-                                )
-                            );
-                        END IF;
-                    END $$;
-                """))
-
+                conn.execute(text(_bucket_policies_sql(bucket_name)))
                 print(f"  RLS policies for '{bucket_name}' applied.")
 
             trans.commit()
@@ -152,36 +104,53 @@ def apply_rls_policies():
     admin_engine.dispose()
 
 
+# The caller's organization comes from ``raw_app_meta_data`` (server-set; the
+# backend reads authorization only from ``app_metadata``, see
+# ``src/core/security.py``). Never ``raw_user_meta_data``: a signed-in user can
+# rewrite their own user metadata and so pick any organization prefix
+# (GOO-632, finding MS-2).
+_CALLER_ORG_PREFIX_SQL = """(
+        SELECT CAST(raw_app_meta_data->>'organization_id' AS TEXT)
+        FROM auth.users WHERE id = auth.uid()
+    )"""
+
+
+def _bucket_policies_sql(bucket_name: str) -> str:
+    """Return the SELECT + INSERT policy DDL for one bucket.
+
+    Drops and recreates each policy, so re-running the script also replaces a
+    policy created by an older version that trusted ``raw_user_meta_data``.
+    """
+    org_check = f"""bucket_id = '{bucket_name}'
+    AND (storage.foldername(name))[1] = {_CALLER_ORG_PREFIX_SQL}"""
+    return f"""
+DROP POLICY IF EXISTS "storage_select_{bucket_name}" ON storage.objects;
+CREATE POLICY "storage_select_{bucket_name}"
+ON storage.objects FOR SELECT TO authenticated
+USING (
+    {org_check}
+);
+
+DROP POLICY IF EXISTS "storage_insert_{bucket_name}" ON storage.objects;
+CREATE POLICY "storage_insert_{bucket_name}"
+ON storage.objects FOR INSERT TO authenticated
+WITH CHECK (
+    {org_check}
+);
+"""
+
+
 def _print_rls_sql():
     """Print the RLS SQL statements for manual execution."""
     print("\n-- Copy and paste into Supabase Studio SQL Editor:\n")
     for bucket_name in BUCKETS:
-        print(f"""
-CREATE POLICY "storage_select_{bucket_name}"
-ON storage.objects FOR SELECT TO authenticated
-USING (
-    bucket_id = '{bucket_name}'
-    AND (storage.foldername(name))[1] = (
-        SELECT CAST(raw_user_meta_data->>'organization_id' AS TEXT)
-        FROM auth.users WHERE id = auth.uid()
-    )
-);
-
-CREATE POLICY "storage_insert_{bucket_name}"
-ON storage.objects FOR INSERT TO authenticated
-WITH CHECK (
-    bucket_id = '{bucket_name}'
-    AND (storage.foldername(name))[1] = (
-        SELECT CAST(raw_user_meta_data->>'organization_id' AS TEXT)
-        FROM auth.users WHERE id = auth.uid()
-    )
-);
-""")
+        print(_bucket_policies_sql(bucket_name))
 
 
 def rollback():
     """Remove buckets and RLS policies."""
     from sqlalchemy import text
+
     from src.core.database import engine
 
     client = get_supabase_client()
