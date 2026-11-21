@@ -21,7 +21,10 @@ export function ChatRuntimeProvider({
   ...props
 }: ChatRuntimeProviderProps): ReactElement {
   const runtime = useExternalStoreRuntime(
-    useChatRuntimeAdapter(props, createMessageQueue)
+    useChatRuntimeAdapter(props, createMessageQueue, {
+      // Preserve web Stop behavior after the SDK began parking queued turns.
+      clearQueueOnCancel: true,
+    })
   );
   return (
     <AssistantRuntimeProvider runtime={runtime}>

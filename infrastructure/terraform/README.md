@@ -43,7 +43,7 @@ For how the application reaches the cluster see
 | `app-s3-irsa.tf` | IRSA role for the backend service account (`nous-dev-aws-knowledge-graph-analytics`) to reach the application S3 bucket. The bucket is referenced by name and was created outside this stack. |
 | `admin.tf` | Cluster admin IAM role. |
 | `backup.tf` | Backup S3 bucket with versioning, encryption and public-access block; AWS Backup vault, KMS key, and RDS plan (daily kept 30 days, weekly kept 90 days) and EKS plan; Velero IAM role; backup-failure alarm; verification Lambda role. The cross-region bucket, replication and RDS automated-backup replication only exist when `enable_cross_region_backup` is true. Whether restores have ever been tested is **not verified**. |
-| `monitoring.tf` | CloudWatch log groups, a CloudWatch dashboard, alarms (cluster CPU and memory, database CPU and storage, Redis memory), an SNS topic `<project>-alerts` with optional email and Slack subscriptions, and an X-Ray sampling rule. |
+| `monitoring.tf` | CloudWatch log groups, a CloudWatch dashboard, alarms for Container Insights, RDS, Redis and the controller-managed ALB, an SNS topic `<project>-alerts` with optional email and Slack subscriptions, and an X-Ray sampling rule. |
 
 ## Alerting scope
 
@@ -53,6 +53,16 @@ Prometheus, Alertmanager and Grafana files under
 [../../deployment/monitoring/](../../deployment/monitoring/README.md) holds
 unconsumed legacy manifests. Whether `ContainerInsights` metrics actually
 exist for the cluster-level alarms is **not verified**.
+
+Set `database_connections_alarm_threshold` below the database's effective
+`max_connections` after accounting for reserved connections. For the ALB
+alarms, set `alb_alarm_dimensions` to the controller-managed ALB's CloudWatch
+dimension and the target group dimensions for the frontend and backend.
+Update those suffixes if the controller replaces the resources.
+
+When enabling email alerts, the recipient must confirm the SNS subscription.
+Use a read-only subscription check to verify the ARN is present and the
+subscription has left `PendingConfirmation`.
 
 ## Safe read-only checks
 

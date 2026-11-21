@@ -12,6 +12,7 @@ spec:
   sourceRepos:
     - "https://github.com/goodwiins/NOUS-Research-Assistant.git"
     - "https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts"
+    - "https://stakater.github.io/stakater-charts"
 
   # Allow deploying to dev, staging, production, argocd, and operator namespaces
   destinations:

@@ -64,8 +64,8 @@ stage_unit_tests() {
         pip install --quiet pytest pytest-asyncio pytest-cov pytest-xdist 2>/dev/null
 
     echo "Installing backend requirements..."
-    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null || \
-        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null
+    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null || \
+        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null
 
     echo ""
     echo "Running unit tests..."
@@ -133,8 +133,8 @@ stage_resilience_tests() {
         pip install --quiet pytest pytest-asyncio pytest-cov 2>/dev/null
 
     echo "Installing backend requirements..."
-    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null || \
-        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null
+    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null || \
+        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null
 
     echo ""
     echo "Running resilience tests..."
@@ -178,8 +178,8 @@ stage_integration_tests() {
     fi
 
     echo "Installing backend requirements..."
-    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null || \
-        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null
+    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null || \
+        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null
 
     echo ""
     echo "Running integration tests..."
@@ -225,8 +225,8 @@ stage_api_contract_tests() {
     fi
 
     echo "Installing backend requirements..."
-    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null || \
-        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt 2>/dev/null
+    pip3 install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null || \
+        pip install --quiet --build-constraint backend/constraints-ci.txt -r backend/requirements.txt -r backend/requirements-ci.txt 2>/dev/null
 
     echo "Installing schemathesis..."
     pip3 install --quiet schemathesis 2>/dev/null || \

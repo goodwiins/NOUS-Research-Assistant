@@ -41,6 +41,7 @@ interface QueueController {
   subscribe(callback: () => void): () => void;
   notifyBusy(): void;
   notifyIdle(): void;
+  clear?(): void;
 }
 function useLatestSend(
   callback: ChatRuntimeProps["onSend"],
@@ -85,6 +86,7 @@ export function useChatRuntimeAdapter<Queue extends QueueController>(
   createMessageQueue: (driver: {
     run: (message: AppendMessage) => void;
   }) => Queue,
+  { clearQueueOnCancel = false } = {},
 ) {
   const send = useLatestSend(onSend);
 
@@ -137,8 +139,9 @@ export function useChatRuntimeAdapter<Queue extends QueueController>(
   );
 
   const handleCancel = useCallback(async () => {
+    if (clearQueueOnCancel) queue.clear?.();
     onCancel();
-  }, [onCancel]);
+  }, [clearQueueOnCancel, onCancel, queue]);
 
   // Route the runtime's approval resolution to the existing confirm handler.
   // The renderer's respondToApproval → runtime → this adapter callback; opts

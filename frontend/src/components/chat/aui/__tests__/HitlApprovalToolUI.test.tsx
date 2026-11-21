@@ -2,17 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { createElement } from 'react';
 
-import { HitlApprovalToolUI } from '../HitlApprovalToolUI';
+import { HitlApprovalRenderer as Renderer } from '../HitlApprovalToolUI';
 
-// makeAssistantToolUI attaches the raw tool (incl. the render component) as
-// `.unstable_tool`, so we can drive the renderer without a full runtime.
-const Renderer = (
-  HitlApprovalToolUI as unknown as {
-    unstable_tool: { render: React.ComponentType<Record<string, unknown>> };
-  }
-).unstable_tool.render;
-
-function renderGate(props: Record<string, unknown>) {
+function renderGate(props: React.ComponentProps<typeof Renderer>) {
   return render(createElement(Renderer, props));
 }
 

@@ -8,13 +8,11 @@ import {
   useState,
   type ReactElement,
 } from 'react';
-import { makeAssistantToolUI } from '@assistant-ui/react';
 import { ShieldCheck } from 'lucide-react';
 
-import { HITL_APPROVAL_TOOL } from './hitlConstants';
 import { toolLabel } from '@/components/context-rail/toolLabels';
 
-export { HITL_APPROVAL_TOOL };
+export { HITL_APPROVAL_TOOL } from './hitlConstants';
 
 interface HitlApprovalRendererProps {
   args?: {
@@ -52,7 +50,7 @@ function formatArgValue(value: unknown, max = 140): string {
  * side-channel bridge. Accessibility (alertdialog role, Approve autofocus,
  * Escape=deny, disabled after submit) mirrors the banner it replaces.
  */
-function HitlApprovalRenderer({
+export function HitlApprovalRenderer({
   args,
   approval,
   respondToApproval,
@@ -190,16 +188,3 @@ function HitlApprovalRenderer({
     </div>
   );
 }
-
-export const HitlApprovalToolUI = makeAssistantToolUI<
-  {
-    tools?: Array<{ name: string; args: Record<string, unknown> }>;
-    toolName?: string;
-    toolArgs?: Record<string, unknown>;
-  },
-  unknown
->({
-  toolName: HITL_APPROVAL_TOOL,
-  display: 'standalone',
-  render: HitlApprovalRenderer,
-});

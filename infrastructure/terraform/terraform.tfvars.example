@@ -46,4 +46,13 @@ log_retention_days = 30
 enable_cross_region_backup = false # lean dev: skip DR bucket
 enable_alerts = false
 alert_email = "" # fill before apply if enable_alerts = true
+database_connections_alarm_threshold = 80 # Review against the live max_connections.
+# Fill with the CloudWatch dimension suffixes from the controller-managed ALB.
+# alb_alarm_dimensions = {
+#   load_balancer = "app/<alb-name>/<id>"
+#   target_groups = {
+#     backend  = "targetgroup/<backend-target-group>/<id>"
+#     frontend = "targetgroup/<frontend-target-group>/<id>"
+#   }
+# }
 slack_webhook_url = ""

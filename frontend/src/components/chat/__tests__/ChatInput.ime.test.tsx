@@ -87,11 +87,11 @@ vi.mock('@assistant-ui/react', async () => {
       ),
     },
     useAui: () => ({
-      composer: () => ({
+      composer: {
         getState: () => ({ text: '' }),
         setText: vi.fn(),
         setRunConfig: vi.fn(),
-      }),
+      },
     }),
   };
 });

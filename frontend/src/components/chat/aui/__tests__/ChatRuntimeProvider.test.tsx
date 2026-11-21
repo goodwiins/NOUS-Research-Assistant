@@ -5,8 +5,7 @@ import userEvent from '@testing-library/user-event';
 import {
   ComposerPrimitive,
   useAui,
-  useThread,
-  useThreadRuntime,
+  useAuiState,
 } from '@assistant-ui/react';
 
 import type { ChatPageMessage } from '@/components/chat/shared/cloudMessageView';
@@ -24,8 +23,8 @@ const messages: ChatPageMessage[] = [
 ];
 
 function Probe() {
-  const msgCount = useThread((t) => t.messages.length);
-  const running = useThread((t) => t.isRunning);
+  const msgCount = useAuiState((s) => s.thread.messages.length);
+  const running = useAuiState((s) => s.thread.isRunning);
   return (
     <div data-testid="probe">
       {msgCount}:{String(running)}
@@ -34,16 +33,16 @@ function Probe() {
 }
 
 function IdentityProbe() {
-  const ids = useThread((thread) =>
+  const ids = useAuiState(({ thread }) =>
     thread.messages.map((message) => message.id).join(',')
   );
   return <div data-testid="identity-probe">{ids}</div>;
 }
 
 function CancelProbe() {
-  const runtime = useThreadRuntime();
+  const { thread } = useAui();
   return (
-    <button type="button" onClick={() => runtime.cancelRun()}>
+    <button type="button" onClick={() => thread.cancelRun()}>
       cancel
     </button>
   );
@@ -54,7 +53,7 @@ function QueueProbe(): React.JSX.Element {
   return (
     <ComposerPrimitive.Root
       onSubmit={() =>
-        aui.composer().setRunConfig({
+        aui.composer.setRunConfig({
           custom: { attachmentIds: ['doc-1'] },
         })
       }

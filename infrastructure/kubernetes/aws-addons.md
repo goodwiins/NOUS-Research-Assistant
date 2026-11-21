@@ -154,11 +154,16 @@ master secret (`external-secrets-rds-irsa.tf`). The resulting
 `aws-database-credentials` Secret is staged separately from Infisical's live
 `database-credentials`, so DO rollback credentials are unchanged.
 
-The ExternalSecret refreshes every 5 minutes. Kubernetes does not update
-environment variables in already-running pods when a Secret rotates: once the
-backend is switched to this Secret, restart backend/worker/beat after each
-rotation (or install a Secret-change rollout controller). Do not treat a Ready
-ExternalSecret alone as rotation-safe for the application.
+The ExternalSecret refreshes every five minutes. Kubernetes leaves existing
+container environment variables unchanged when a Secret rotates. The AWS dev
+Argo CD root installs the namespace-scoped Reloader, which rolls the API,
+Celery worker and beat Deployments when `aws-database-credentials` changes.
+New migration and scheduled Jobs read the current Secret at startup.
+
+Existing installations need the updated `nous-platform` AppProject source
+allowlist before Argo CD can fetch the Reloader chart. Check the Reloader
+Application is healthy, then verify the three Deployment revision changes
+and database connectivity after an authorized rotation.
 
 ## external-dns (chart 1.22.0 / app v0.22.0)
 

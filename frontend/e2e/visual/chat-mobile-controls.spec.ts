@@ -136,8 +136,7 @@ test('long chat controls remain reachable by pointer and keyboard', async ({
 
   const title = page
     .getByTestId('chat-mobile-header')
-    .locator('span[title]')
-    .first();
+    .getByRole('heading', { level: 1 });
   const titleLayout = await title.evaluate((element) => {
     const style = getComputedStyle(element);
     return {
