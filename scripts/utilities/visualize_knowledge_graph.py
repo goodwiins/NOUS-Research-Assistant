@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 import sys
-sys.path.append('/Users/goodwiinz/development/RAG_system/backend')
 
-from neo4j import GraphDatabase
+sys.path.append("/Users/goodwiinz/development/RAG_system/backend")
+
 import os
+
 from dotenv import load_dotenv
+from neo4j import GraphDatabase
 
 load_dotenv()
 
 # Get Neo4j connection details
-URI = os.getenv('NEO4J_URI', 'bolt://127.0.0.1:7687')
-USER = os.getenv('NEO4J_USER', 'neo4j')
-PASSWORD = os.getenv('NEO4J_PASSWORD', 'neo4j_password')
+URI = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
+USER = os.getenv("NEO4J_USER", "neo4j")
+PASSWORD = os.getenv("NEO4J_PASSWORD", "neo4j_password")
 
 try:
     driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
@@ -35,9 +37,9 @@ try:
         print(f"📄 Found {len(papers)} documents with topics\n")
 
         for paper in papers:
-            paper_name = paper['Paper']
-            topics = paper['Topics']
-            topic_count = paper['TopicCount']
+            paper_name = paper["Paper"]
+            topics = paper["Topics"]
+            topic_count = paper["TopicCount"]
 
             print(f"📄 {paper_name}")
             print(f"   ID: {paper['ID']}")
@@ -48,9 +50,15 @@ try:
             print()
 
         # Summary statistics
-        doc_count = session.run("MATCH (n:Entity:DOCUMENT) RETURN count(n) as count").single()["count"]
-        concept_count = session.run("MATCH (n:Entity:CONCEPT) RETURN count(n) as count").single()["count"]
-        rel_count = session.run("MATCH ()-[r:RELATED_TO]->() RETURN count(r) as count").single()["count"]
+        doc_count = session.run(
+            "MATCH (n:Entity:DOCUMENT) RETURN count(n) as count"
+        ).single()["count"]
+        concept_count = session.run(
+            "MATCH (n:Entity:CONCEPT) RETURN count(n) as count"
+        ).single()["count"]
+        rel_count = session.run(
+            "MATCH ()-[r:RELATED_TO]->() RETURN count(r) as count"
+        ).single()["count"]
 
         print("=" * 60)
         print(f"📊 Knowledge Graph Statistics:")
@@ -83,14 +91,14 @@ try:
     driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
 
     with driver.session() as session:
-            papers = session.run("""
-                MATCH (doc:Entity:DOCUMENT)
-                OPTIONAL MATCH (doc)-[r:RELATED_TO]->(c:Entity:CONCEPT)
-                WITH doc, collect(c.name) as topics
-                RETURN doc.name as name, doc.id as id, topics, doc.created_at
-                ORDER BY doc.created_at DESC
-                LIMIT 20
-            """)
+        papers = session.run("""
+            MATCH (doc:Entity:DOCUMENT)
+            OPTIONAL MATCH (doc)-[r:RELATED_TO]->(c:Entity:CONCEPT)
+            WITH doc, collect(c.name) as topics
+            RETURN doc.name as name, doc.id as id, topics, doc.created_at
+            ORDER BY doc.created_at DESC
+            LIMIT 20
+        """)
 
         html = """<!DOCTYPE html>
 <html>
@@ -160,8 +168,8 @@ try:
 """
 
         for record in papers:
-            paper_name = record['name']
-            topics = record['topics']
+            paper_name = record["name"]
+            topics = record["topics"]
 
             html += f"""
             <div class="paper">
@@ -180,9 +188,15 @@ try:
             html += "</div></div>"
 
         # Get counts again
-        doc_count = session.run("MATCH (n:Entity:DOCUMENT) RETURN count(n)").single()["count"]
-        concept_count = session.run("MATCH (n:Entity:CONCEPT) RETURN count(n)").single()["count"]
-        rel_count = session.run("MATCH ()-[r:RELATED_TO]->() RETURN count(r)").single()["count"]
+        doc_count = session.run("MATCH (n:Entity:DOCUMENT) RETURN count(n)").single()[
+            "count"
+        ]
+        concept_count = session.run(
+            "MATCH (n:Entity:CONCEPT) RETURN count(n)"
+        ).single()["count"]
+        rel_count = session.run("MATCH ()-[r:RELATED_TO]->() RETURN count(r)").single()[
+            "count"
+        ]
 
         html = html.replace('<span id="docCount">0</span>', str(doc_count))
         html = html.replace('<span id="conceptCount">0</span>', str(concept_count))
@@ -207,11 +221,15 @@ try:
     </html>
         """
 
-        with open('/Users/goodwiinz/development/RAG_system/knowledge_tree.html', 'w') as f:
+        with open(
+            "/Users/goodwiinz/development/RAG_system/knowledge_tree.html", "w"
+        ) as f:
             f.write(html)
 
         print(f"✅ HTML visualization saved to: knowledge_tree.html")
-        print(f"📂 Open: file:///Users/goodwiinz/development/RAG_system/knowledge_tree.html")
+        print(
+            f"📂 Open: file:///Users/goodwiinz/development/RAG_system/knowledge_tree.html"
+        )
         print("\n💡 Features:")
         print("   - Interactive hover effects")
         print("   - Gradient background")
@@ -223,4 +241,5 @@ try:
 except Exception as e:
     print(f"Error: {e}")
     import traceback
+
     traceback.print_exc()
