@@ -266,6 +266,7 @@ async def _parse_pdf_off_loop(pdf_content: bytes) -> Dict[str, Any]:
 
     return await run_in_subprocess(_extract_pdf_content_sync, pdf_content)
 
+
 _pdf_semaphore: Optional[asyncio.Semaphore] = None
 _pdf_semaphore_loop: Any = None
 

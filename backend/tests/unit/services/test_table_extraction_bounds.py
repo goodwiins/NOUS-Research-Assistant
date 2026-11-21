@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, List
+from typing import Any, Iterator, List
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -47,13 +48,15 @@ def _local_file(monkeypatch: pytest.MonkeyPatch) -> None:
     from contextlib import contextmanager
 
     @contextmanager
-    def _yield_path(document: Any):
+    def _yield_path(document: Any) -> Iterator[str]:
         yield document.file_path
 
     monkeypatch.setattr(mod, "local_file_for_document", _yield_path)
 
 
-async def test_region_extraction_runs_off_the_loop(tmp_path, monkeypatch) -> None:
+async def test_region_extraction_runs_off_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = str(tmp_path / "a.pdf")
     _pdf(path)
     service = mod.TableExtractionService()
@@ -83,7 +86,7 @@ async def test_region_extraction_runs_off_the_loop(tmp_path, monkeypatch) -> Non
     assert seen >= 10
 
 
-async def test_oversized_document_is_rejected_before_download(tmp_path) -> None:
+async def test_oversized_document_is_rejected_before_download(tmp_path: Path) -> None:
     service = mod.TableExtractionService()
     big = _doc(str(tmp_path / "missing.pdf"), size=mod.MAX_EXTRACTION_PDF_BYTES + 1)
 
@@ -94,18 +97,16 @@ async def test_oversized_document_is_rejected_before_download(tmp_path) -> None:
             await service.extract_tables_from_pdf(big)
 
 
-def test_camelot_page_range_is_capped(tmp_path) -> None:
+def test_camelot_page_range_is_capped(tmp_path: Path) -> None:
     short, long_ = str(tmp_path / "s.pdf"), str(tmp_path / "l.pdf")
     _pdf(short, pages=3)
     _pdf(long_, pages=mod.MAX_TABLE_PAGES + 5)
 
     assert mod.TableExtractionService._page_range(short) == "1-3"
-    assert (
-        mod.TableExtractionService._page_range(long_) == f"1-{mod.MAX_TABLE_PAGES}"
-    )
+    assert mod.TableExtractionService._page_range(long_) == f"1-{mod.MAX_TABLE_PAGES}"
 
 
-def test_tables_pass_the_capped_range_to_camelot(tmp_path) -> None:
+def test_tables_pass_the_capped_range_to_camelot(tmp_path: Path) -> None:
     path = str(tmp_path / "l.pdf")
     _pdf(path, pages=mod.MAX_TABLE_PAGES + 5)
     calls: List[dict] = []
@@ -120,7 +121,9 @@ def test_tables_pass_the_capped_range_to_camelot(tmp_path) -> None:
     assert calls == [{"flavor": "lattice", "pages": f"1-{mod.MAX_TABLE_PAGES}"}]
 
 
-async def test_full_slots_reject_instead_of_queueing(tmp_path, monkeypatch) -> None:
+async def test_full_slots_reject_instead_of_queueing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = str(tmp_path / "a.pdf")
     _pdf(path)
     service = mod.TableExtractionService()
@@ -170,9 +173,13 @@ class _Db:
     ("error", "code"),
     [(mod.ExtractionBusyError(), 429), (mod.DocumentTooLargeError(), 413)],
 )
-async def test_routes_map_limit_errors(monkeypatch, error: Exception, code: int) -> None:
+async def test_routes_map_limit_errors(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, code: int
+) -> None:
     document = SimpleNamespace(file_path="x.pdf")
-    org = SimpleNamespace(id=uuid4())
+    org: Any = SimpleNamespace(id=uuid4())
+    user: Any = None
+    db: Any = _Db(document)
 
     async def _raise(*_args: Any, **_kwargs: Any) -> Any:
         raise error
@@ -181,10 +188,10 @@ async def test_routes_map_limit_errors(monkeypatch, error: Exception, code: int)
     monkeypatch.setattr(router_mod._service, "extract_region", _raise)
 
     with pytest.raises(HTTPException) as tables_exc:
-        await router_mod.extract_tables(uuid4(), None, org, _Db(document))
+        await router_mod.extract_tables(uuid4(), user, org, db)
     body = router_mod.ExtractRegionRequest(page=1, x1=0, y1=0, x2=1, y2=1)
     with pytest.raises(HTTPException) as region_exc:
-        await router_mod.extract_region(uuid4(), body, None, org, _Db(document))
+        await router_mod.extract_region(uuid4(), body, user, org, db)
 
     assert tables_exc.value.status_code == code
     assert region_exc.value.status_code == code

@@ -21,7 +21,7 @@ def _pdf_bytes(*pages: str) -> bytes:
     doc = fitz.open()
     for text in pages:
         doc.new_page().insert_text((72, 72), text)
-    data = doc.tobytes()
+    data: bytes = doc.tobytes()
     doc.close()
     return data
 
@@ -38,9 +38,13 @@ def test_sync_parse_keeps_page_framing() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_extract_pdf_content_does_not_block_the_loop(monkeypatch) -> None:
+async def test_extract_pdf_content_does_not_block_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Thread pool stand-in for the worker process, as test_arxiv_fulltext does.
-    monkeypatch.setattr(arxiv_fulltext, "_executor_factory", lambda: ThreadPoolExecutor(1))
+    monkeypatch.setattr(
+        arxiv_fulltext, "_executor_factory", lambda: ThreadPoolExecutor(1)
+    )
 
     def _slow_parse(_content: bytes) -> Dict[str, Any]:
         time.sleep(0.5)
@@ -69,7 +73,9 @@ async def test_extract_pdf_content_does_not_block_the_loop(monkeypatch) -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_daemonic_process_parses_in_a_thread(monkeypatch) -> None:
+async def test_daemonic_process_parses_in_a_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A Celery prefork worker is daemonic and may not start a child process."""
     monkeypatch.setattr(mod.multiprocessing.current_process(), "daemon", True)
     with patch.object(arxiv_fulltext, "run_in_subprocess") as run_in_subprocess:
@@ -81,8 +87,12 @@ async def test_daemonic_process_parses_in_a_thread(monkeypatch) -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_parse_failure_is_an_ingestion_error(monkeypatch) -> None:
-    monkeypatch.setattr(arxiv_fulltext, "_executor_factory", lambda: ThreadPoolExecutor(1))
+async def test_parse_failure_is_an_ingestion_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        arxiv_fulltext, "_executor_factory", lambda: ThreadPoolExecutor(1)
+    )
     service = mod.ArXivIngestionService.__new__(mod.ArXivIngestionService)
     with pytest.raises(mod.IngestionError):
         await service.extract_pdf_content(b"not a pdf")

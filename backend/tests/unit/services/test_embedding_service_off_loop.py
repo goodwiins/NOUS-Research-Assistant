@@ -59,7 +59,9 @@ def test_cohere_deployment_never_loads_the_local_model(
     loads: List[int] = []
     monkeypatch.setattr(cohere_module, "cohere_embed_service", _Cohere(True))
     monkeypatch.setattr(settings, "COHERE_EMBED_DIMENSIONS", 1024)
-    monkeypatch.setattr(mod.EmbeddingService, "_load_model", lambda self: loads.append(1))
+    monkeypatch.setattr(
+        mod.EmbeddingService, "_load_model", lambda self: loads.append(1)
+    )
 
     service = mod.EmbeddingService()
     info = service.get_model_info()
@@ -128,9 +130,7 @@ async def test_batch_encode_runs_off_the_loop(
     service = mod.EmbeddingService()
 
     response, ticks = await _measure_loop_ticks(
-        service.generate_batch_embeddings(
-            BatchEmbeddingRequest(texts=["a", "b"])
-        )
+        service.generate_batch_embeddings(BatchEmbeddingRequest(texts=["a", "b"]))
     )
 
     assert response.embeddings == [[1.0] * 4, [1.0] * 4]

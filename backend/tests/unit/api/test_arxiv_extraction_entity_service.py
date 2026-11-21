@@ -60,7 +60,8 @@ def _request() -> mod.ExtractionRequest:
 
 
 async def test_entity_service_is_built_once_and_nlp_runs_off_loop() -> None:
-    user = SimpleNamespace(organization_id="org-1", organization=None)
+    user: Any = SimpleNamespace(organization_id="org-1", organization=None)
+    background: Any = None
     ticks = 0
 
     async def _ticker() -> None:
@@ -72,10 +73,10 @@ async def test_entity_service_is_built_once_and_nlp_runs_off_loop() -> None:
     with patch.object(mod, "ArXivIngestionService", _Arxiv):
         ticker = asyncio.create_task(_ticker())
         await asyncio.sleep(0)
-        first = await mod._extract_paper_features(_request(), None, user)
+        first = await mod._extract_paper_features(_request(), background, user)
         seen = ticks
         await ticker
-        await mod._extract_paper_features(_request(), None, user)
+        await mod._extract_paper_features(_request(), background, user)
 
     assert _SlowEntityService.builds == [1]
     entities = first.results[0]["features"]["entities"]

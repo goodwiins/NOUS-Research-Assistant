@@ -536,9 +536,7 @@ class EmbeddingService:
                 provider="sentence_transformers",
             )
 
-    def _encode_local(
-        self, model_name: str, texts: Union[str, List[str]]
-    ) -> tuple:
+    def _encode_local(self, model_name: str, texts: Union[str, List[str]]) -> tuple:
         """Encode with sentence-transformers (blocking; run in a thread).
 
         Returns ``(embedding_as_lists, dimension)``.
