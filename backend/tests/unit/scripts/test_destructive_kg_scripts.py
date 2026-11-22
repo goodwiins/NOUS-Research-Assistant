@@ -285,6 +285,51 @@ def test_llm_failures_are_marked_as_errors(
     assert result["entities"] == [] and result.get("error") is True
 
 
+def test_content_filter_skip_is_not_an_error(
+    rebuild: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def filtered(**_kwargs: Any) -> dict:
+        raise RuntimeError("Error code: 400 - content_filter triggered")
+
+    monkeypatch.setattr(rebuild.azure_openai_service, "chat_completion", filtered)
+    result = rebuild.call_llm([{"role": "user", "content": "x"}], "doc")
+    assert result.get("error") is not True
+    assert result.get("content_filtered") is True
+
+
+def test_content_filtered_chunks_do_not_count_as_failures(
+    rebuild: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    results = iter(
+        [
+            {
+                "entities": [],
+                "relationships": [],
+                "usage": {},
+                "content_filtered": True,
+            },
+            {
+                "entities": [{"name": "A", "type": "concept"}],
+                "relationships": [],
+                "usage": {},
+            },
+            {"entities": [], "relationships": [], "usage": {}, "error": True},
+        ]
+    )
+    monkeypatch.setattr(rebuild, "chunk_text", lambda _text: ["c1", "c2", "c3"])
+    monkeypatch.setattr(rebuild, "extract_from_chunk", lambda _c, _t: next(results))
+    monkeypatch.setattr(
+        rebuild,
+        "insert_entities_batch",
+        lambda ents, _doc: {e["name"]: e["name"] for e in ents},
+    )
+    monkeypatch.setattr(rebuild, "insert_relationships", lambda *_a: (0, 0))
+    monkeypatch.setattr(rebuild.time, "sleep", lambda _s: None)
+    docs = [{"id": "d" * 16, "title": "T", "filename": "t.pdf", "content_text": "text"}]
+    entities, failed = rebuild.rebuild_documents(docs)
+    assert (entities, failed) == (1, 1), "only the real failure counts"
+
+
 def test_probe_budget_leaves_room_for_reasoning_tokens(
     rebuild: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

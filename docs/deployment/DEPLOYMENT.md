@@ -140,19 +140,19 @@ docker build -t rag-system/frontend:latest .
 ### 2. Production Docker Compose
 ```bash
 # Deploy to production
-docker-compose -f docker-compose.production.yml up -d
+docker-compose -f docker-compose.prod.yml up -d
 
 # Scale services
-docker-compose -f docker-compose.production.yml up -d --scale celery-worker=4
+docker-compose -f docker-compose.prod.yml up -d --scale celery-worker=4
 ```
 
 ### 3. Health Checks
 ```bash
 # Check service health
-docker-compose -f docker-compose.production.yml ps
+docker-compose -f docker-compose.prod.yml ps
 
 # Check logs
-docker-compose -f docker-compose.production.yml logs -f backend
+docker-compose -f docker-compose.prod.yml logs -f backend
 ```
 
 ## Kubernetes Deployment

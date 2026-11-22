@@ -236,7 +236,14 @@ def call_llm(messages: list[dict], doc_title: str) -> dict:
                 logger.warning(
                     f"Content filter triggered for '{doc_title}' chunk, skipping"
                 )
-                return {"entities": [], "relationships": [], "usage": {}, "error": True}
+                # A deliberate skip, not a failure: retrying cannot change it,
+                # so it must not mark the rebuild as partial.
+                return {
+                    "entities": [],
+                    "relationships": [],
+                    "usage": {},
+                    "content_filtered": True,
+                }
             if "429" in err_str or "rate" in err_str.lower():
                 wait = 2 ** (attempt + 1)
                 logger.warning(f"Rate limited, waiting {wait}s...")
@@ -582,6 +589,7 @@ def rebuild_documents(documents: list[dict]) -> tuple[int, int]:
     # Step 3: Process each document
     total_entities = 0
     failed_chunks = 0
+    filtered_chunks = 0
     total_relationships = 0
     total_input_tokens = 0
     total_output_tokens = 0
@@ -608,6 +616,8 @@ def rebuild_documents(documents: list[dict]) -> tuple[int, int]:
             result = extract_from_chunk(chunk, doc_title)
             if result.get("error"):
                 failed_chunks += 1
+            elif result.get("content_filtered"):
+                filtered_chunks += 1
 
             all_entities.extend(result["entities"])
             all_relationships.extend(result["relationships"])
@@ -653,6 +663,7 @@ def rebuild_documents(documents: list[dict]) -> tuple[int, int]:
     logger.info(f"Documents processed: {len(documents)}")
     logger.info(f"Total entities:      {total_entities}")
     logger.info(f"Failed chunks:       {failed_chunks}")
+    logger.info(f"Content-filtered:    {filtered_chunks} chunk(s) skipped")
     logger.info(f"Total relationships: {total_relationships}")
     logger.info(f"Time elapsed:        {elapsed:.1f}s")
     logger.info(

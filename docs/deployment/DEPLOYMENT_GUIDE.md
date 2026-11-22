@@ -201,10 +201,10 @@ docker-compose -f docker-compose.staging.yml --profile monitoring up -d
 
 ```bash
 # Start production services
-docker-compose -f docker-compose.production.yml up -d
+docker-compose -f docker-compose.prod.yml up -d
 
 # With full monitoring stack
-docker-compose -f docker-compose.production.yml --profile monitoring up -d
+docker-compose -f docker-compose.prod.yml --profile monitoring up -d
 ```
 
 ### Method 3: CI/CD Pipeline

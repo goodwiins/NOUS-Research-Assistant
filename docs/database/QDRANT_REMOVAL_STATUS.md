@@ -53,7 +53,7 @@ This tracks what's done vs. outstanding. Audit date: 2026-06-08.
 
 ## Outstanding — INFRA / SECRETS (outward-facing; owner action)
 
-- [ ] **PROD CONFIG (HIGH):** `config/environments/.env.production:15,32` still *requires*
+- [ ] **PROD CONFIG (HIGH):** `config/environments/.env.prod:15,32` still *requires*
       `QDRANT_API_KEY` + `QDRANT_URL`, **zero `DO_KB_*` vars** → prod retrieval has no backend.
       `deployment/github-actions/workflows/deploy.yml:237` creates the qdrant secret, never creates
       `do-kb-credentials`. Add `DO_KB_*`, drop `QDRANT_*`.
