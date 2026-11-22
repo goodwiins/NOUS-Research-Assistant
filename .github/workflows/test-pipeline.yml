@@ -1040,20 +1040,27 @@ jobs:
           PDF_EXPORT_TEST_REQUIRE_RENDERER: "1"
       - name: Run ingestion recovery PostgreSQL tests
         if: matrix.shard == 1
-        # These integration-marked tests live outside the sharded directory.
-        # Give them a real database once, and reject a green all-skipped run.
-        # The PDF-chat branch suites (GOO-436) ride this lane: they own
-        # generated schemas and cover the pb01 migration round trip and the
-        # accept/select/read serialization only PostgreSQL can prove.
+        # Every PostgreSQL test under backend/tests/unit runs here, once, on a
+        # real database: the Unit Tests job has none, so they skip there. The
+        # lane started with ingestion recovery and the PDF-chat branch suites
+        # (GOO-436); GOO-702 made it pick up every *_postgres.py file instead
+        # of a hand-kept list, plus the PostgreSQL tests that live in files
+        # named otherwise (listed below; tests/unit/ci/test_shard_tests.py
+        # fails if one is missing). REQUIRE_POSTGRES_TESTS=1 makes a skipped
+        # PostgreSQL test fail (backend/tests/conftest.py), and the check
+        # below rejects any skip in the junit report as well.
         run: |
           mkdir -p test-results
-          pytest backend/tests/unit/tasks/test_stuck_processing_recovery.py \
-            backend/tests/unit/tasks/test_stuck_recovery_terminal_retry.py \
-            backend/tests/unit/tasks/test_ingestion_stage_guard_postgres.py \
-            backend/tests/unit/services/test_message_branches_postgres.py \
-            backend/tests/unit/services/test_alphaxiv_live_postgres.py \
-            backend/tests/unit/services/test_native_pdf_branch_reads_postgres.py \
-            -c backend/pytest.ini -m integration \
+          # shellcheck disable=SC2207 # repo paths, no spaces
+          postgres_tests=(
+            $(find backend/tests/unit -name '*_postgres.py' | sort)
+            backend/tests/unit/tasks/test_stuck_processing_recovery.py
+            backend/tests/unit/tasks/test_stuck_recovery_terminal_retry.py
+            backend/tests/unit/services/integrations/test_account_connections.py
+            backend/tests/unit/services/integrations/test_account_scope.py
+          )
+          pytest "${postgres_tests[@]}" \
+            -c backend/pytest.ini -m "integration or requires_postgres" \
             --junitxml=test-results/ingestion-recovery.xml -q -ra
           python - <<'PY'
           import xml.etree.ElementTree as ET
@@ -1070,6 +1077,7 @@ jobs:
         env:
           ENVIRONMENT: testing
           ORCHESTRATION_TEST_DATABASE_URL: "postgresql://test:test@localhost:${{ job.services.postgres.ports['5432'] }}/test_db"
+          REQUIRE_POSTGRES_TESTS: "1"
           DATABASE_URL: "sqlite:///:memory:"
           ASYNC_DATABASE_URL: "sqlite+aiosqlite:///:memory:"
           REDIS_URL: "redis://localhost:${{ job.services.redis.ports['6379'] }}/0"

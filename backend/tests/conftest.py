@@ -731,3 +731,49 @@ try:
     from tests.fixtures.service_fixtures import *
 except ImportError:
     pass  # Service fixtures may not be available in all test contexts
+
+
+# ============================================================================
+# PostgreSQL tests may not skip where PostgreSQL is required (GOO-702)
+# ============================================================================
+# PostgreSQL tests skip without their database URL, and pytest exits 0 when
+# every selected test skips, so a CI lane that lost its database used to pass
+# with nothing run. Where a CI step provides PostgreSQL it sets
+# REQUIRE_POSTGRES_TESTS=1; there a skipped PostgreSQL test (marked
+# requires_postgres, or in a *_postgres.py file) is reported as a failure.
+# The Unit Tests job has no database, does not set it, and keeps skipping.
+REQUIRE_POSTGRES_TESTS = "REQUIRE_POSTGRES_TESTS"
+
+
+def _postgres_skips_fail() -> bool:
+    ci = os.getenv("CI", "").strip().lower() in {"1", "true", "yes"}
+    return ci and os.getenv(REQUIRE_POSTGRES_TESTS) == "1"
+
+
+def _is_postgres_test(item: pytest.Item) -> bool:
+    return item.get_closest_marker(
+        "requires_postgres"
+    ) is not None or item.path.name.endswith("_postgres.py")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if (
+        report.skipped
+        and not hasattr(report, "wasxfail")
+        and _postgres_skips_fail()
+        and _is_postgres_test(item)
+    ):
+        reason = (
+            report.longrepr[2]
+            if isinstance(report.longrepr, tuple)
+            else str(report.longrepr)
+        )
+        report.outcome = "failed"
+        report.longrepr = (
+            f"PostgreSQL test skipped in a CI step that requires PostgreSQL "
+            f"({REQUIRE_POSTGRES_TESTS}=1); the database is missing or "
+            f"unreachable. Skip reason: {reason}"
+        )
