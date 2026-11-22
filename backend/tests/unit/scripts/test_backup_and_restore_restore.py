@@ -96,6 +96,13 @@ esac
 exec /usr/bin/gunzip "$@"
 """
 
+# velero stub: logs its call and exits 1 when $STUB_FAIL has velero.
+VELERO_STUB = """#!/bin/sh
+echo "velero $*" >> "$STUB_LOG"
+case " ${STUB_FAIL:-} " in *" velero "*) exit 1 ;; esac
+exit 0
+"""
+
 
 def _bash() -> str:
     bash = shutil.which("bash")
@@ -109,7 +116,7 @@ def _stubs(tmp_path: Path) -> Tuple[Path, Dict[str, str]]:
     for name, body in (
         ("kubectl", KUBECTL_STUB),
         ("helm", LOGGING_STUB),
-        ("velero", LOGGING_STUB),
+        ("velero", VELERO_STUB),
         ("aws", AWS_STUB),
         ("gunzip", GUNZIP_STUB),
     ):
@@ -410,3 +417,69 @@ def test_backup_refuses_to_dump_rds(tmp_path: Path) -> None:
     assert result.returncode != 0, output
     assert "RDS" in output
     assert "pg_dump" not in log.read_text()
+
+
+def test_velero_failure_is_reported(tmp_path: Path) -> None:
+    # Under set -e a bare failing command would exit before any message.
+    log, env = _stubs(tmp_path)
+    env["STUB_FAIL"] = "velero"
+    result = subprocess.run(
+        [_bash(), "-c", 'source "$1" && create_velero_backup', "_", str(SCRIPT)],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "Velero backup failed" in output
+
+
+def test_help_states_the_velero_version(tmp_path: Path) -> None:
+    log, env = _stubs(tmp_path)
+    result = subprocess.run(
+        [_bash(), str(SCRIPT), "help"],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert "Velero >= 1.10" in result.stdout
+
+
+def _recovery_block(doc: str) -> str:
+    text = (REPO_ROOT / "docs" / "deployment" / doc).read_text()
+    start = text.index("NS=multimodal-rag-system")
+    return text[start : text.index("```", start)]
+
+
+def test_runbook_stops_on_rds_before_touching_workloads() -> None:
+    # NS defaults to the live namespace, so a copy-paste on AWS must stop at
+    # the RDS check before it scales anything down or deletes a Job.
+    block = _recovery_block("RUNBOOKS.md")
+    guard = block.index("get externalsecret aws-database-credentials")
+    assert "exit 1" in block[guard : guard + 300]
+    for destructive in (
+        "kubectl annotate",
+        "kubectl scale",
+        "kubectl delete",
+        "DROP DATABASE",
+        "./backup-and-restore.sh restore",
+    ):
+        assert guard < block.index(destructive), destructive
+
+
+def test_cluster_recovery_skips_the_data_restore_on_rds() -> None:
+    # Steps 1-5 (Velero, Infisical, Helm) are valid on AWS; only the data
+    # restore must be skipped when the database is RDS.
+    block = _recovery_block("PRODUCTION_DEPLOYMENT_GUIDE.md")
+    guard = block.index("get externalsecret aws-database-credentials")
+    restore = block.index("./backup-and-restore.sh restore")
+    assert guard < restore
+    assert "else" in block[guard:restore]
+    for destructive in ("kubectl scale", "kubectl delete", "DROP DATABASE"):
+        assert destructive not in block, destructive

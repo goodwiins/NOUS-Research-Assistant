@@ -429,17 +429,17 @@ kubectl rollout restart deployment/postgres -n knowledge-graph-analytics
 ```bash
 NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
 
-# 1. Restore from the Velero backup. It contains no Secrets. --namespace is
-#    Velero's own namespace (the script's VELERO_NAMESPACE, default velero);
-#    the backup itself already records that it covers "$NS".
+# 1. Restore from the Velero backup (Velero >= 1.10). It contains no
+#    Secrets. --namespace is Velero's own namespace (the script's
+#    VELERO_NAMESPACE, default velero); the backup itself already records
+#    that it covers "$NS".
 velero restore create --from-backup <backup-name> --namespace velero
 
 # 2. Re-create the Infisical bootstrap Secret. App secrets come from
 #    InfisicalSecret CRs (templates/infisical-secrets.yaml), and the operator
 #    authenticates with the manually created Secret infisical-universal-auth.
-#    Run the "Bootstrap commands" block in
-#    infrastructure/kubernetes/infisical-bootstrap.md with NS exported, so
-#    its loop targets "$NS" instead of its multimodal-rag-system default.
+#    Export NS, then run the "Bootstrap commands" block in
+#    infrastructure/kubernetes/infisical-bootstrap.md; its loop targets "$NS".
 export NS
 
 # 3. Wait for the operator to resync (it reconciles within about 60s), then
@@ -456,14 +456,18 @@ helm upgrade --install knowledge-graph-analytics \
   infrastructure/helm/knowledge-graph-analytics \
   -n "$NS" -f <the values files used for this cluster>
 
-# 6. Restore application data. On AWS the database is RDS: the script
-#    refuses to touch it, so restore RDS from a snapshot or point-in-time
-#    restore instead and skip the ragdb steps. Otherwise PostgreSQL loads only
-#    into an EMPTY ragdb:
-#    stop every writer and drop/recreate ragdb first, exactly as in
-#    "PostgreSQL Database Recovery" in RUNBOOKS.md. Redis is copied into the
-#    pod but not loaded; Neo4j, configs and uploads are listed as SKIPPED.
-./backup-and-restore.sh restore <backup-id>
+# 6. Restore application data. On AWS the database is RDS (the chart's
+#    aws-database-credentials ExternalSecret exists): skip this step and
+#    restore RDS from a snapshot or point-in-time restore. Otherwise
+#    PostgreSQL loads only into an EMPTY ragdb: stop every writer and
+#    drop/recreate ragdb first, exactly as in "PostgreSQL Database Recovery"
+#    in RUNBOOKS.md. Redis is copied into the pod but not loaded; Neo4j,
+#    configs and uploads are listed as SKIPPED.
+if kubectl get externalsecret aws-database-credentials -n "$NS" >/dev/null 2>&1; then
+  echo "PostgreSQL in $NS is RDS: restore it from an RDS snapshot or PITR." >&2
+else
+  ./backup-and-restore.sh restore <backup-id>
+fi
 
 # Verify application functionality
 kubectl get pods -n "$NS"

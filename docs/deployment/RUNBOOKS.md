@@ -114,6 +114,15 @@ kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser
 # snapshot or point-in-time restore instead.
 NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
 
+# 0. Stop here if PostgreSQL is RDS (the chart's aws-database-credentials
+#    ExternalSecret exists). The steps below would take the backend down for
+#    nothing: restore RDS from a snapshot or point-in-time restore instead.
+#    The exit deliberately ends a pasted session.
+if kubectl get externalsecret aws-database-credentials -n "$NS" >/dev/null 2>&1; then
+  echo "PostgreSQL in $NS is RDS: use an RDS snapshot or PITR, not this runbook." >&2
+  exit 1
+fi
+
 # 1. Stop every writer first, or the boot migrations (the migrate Job and the
 #    backend's run-migrations init container) repopulate ragdb before the
 #    restore. Turn off Argo CD auto-sync for the app first (Argo CD UI, or

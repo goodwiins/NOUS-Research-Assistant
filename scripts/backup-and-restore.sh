@@ -342,14 +342,14 @@ create_velero_backup() {
 
         log_info "Running Velero backup: $backup_name"
         # Needs Velero >= 1.10, which renamed --default-volumes-to-restic.
-        velero create backup "$backup_name" \
+        # The command is the if condition: under set -e a bare failure would
+        # exit before the error below is logged.
+        if velero create backup "$backup_name" \
             --namespace "$VELERO_NAMESPACE" \
             --include-namespaces "$NAMESPACE" \
             --exclude-resources secrets \
             --default-volumes-to-fs-backup=false \
-            --wait
-
-        if [ $? -eq 0 ]; then
+            --wait; then
             log_success "Velero backup completed: $backup_name"
         else
             log_error "Velero backup failed"
@@ -629,7 +629,8 @@ Components backed up:
     - Neo4j graph database
     - Kubernetes configurations (Secrets are NOT included; restore them
       from the secret manager)
-    - Velero cluster backup (also excludes Secrets: --exclude-resources secrets)
+    - Velero cluster backup (needs Velero >= 1.10; also excludes Secrets:
+      --exclude-resources secrets)
     - Application files
 
 Environment:
