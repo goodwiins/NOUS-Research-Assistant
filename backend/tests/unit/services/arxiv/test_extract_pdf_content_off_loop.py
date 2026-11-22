@@ -108,7 +108,8 @@ def _pdf_with_indirect_title() -> bytes:
     writer = PdfWriter(clone_from=PdfReader(BytesIO(_pdf_bytes("indirect title"))))
     writer.add_metadata({"/Author": "A. Author"})
     title_ref = writer._add_object(TextStringObject("Indirect Title"))
-    writer._info.get_object()[NameObject("/Title")] = title_ref
+    info: Any = writer._info
+    info.get_object()[NameObject("/Title")] = title_ref
     out = BytesIO()
     writer.write(out)
     return out.getvalue()
