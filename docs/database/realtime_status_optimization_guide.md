@@ -62,6 +62,8 @@ database/
    - `stage_executions`
    - `organizations`
 
+> **Amendment (2026-11-22, GOO-690):** the `psql -f` commands in this guide are historical. `database/deployment/realtime_status_deployment.sql` and `realtime_status_rollback.sql` were deleted in #2226 (GOO-681), and `database/migrations/009_realtime_status_optimizations.sql` is legacy SQL that no deployment applies. Alembic owns the schema (`cd backend && python -m alembic upgrade head`); roll back with `alembic downgrade <revision>`, and only after checking that revision's `downgrade()`.
+
 ### Deployment Steps
 
 1. **Run the main migration**:

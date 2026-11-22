@@ -629,6 +629,8 @@ SELECT * FROM create_recommended_indexes(p_dry_run => FALSE);
    SELECT pg_size_pretty(pg_database_size(current_database()));
    ```
 
+> **Amendment (2026-11-22, GOO-690): do not run the script below.** `database/deployment/deploy_analytics_dashboard.sql` was deleted in #2226 (GOO-681). Alembic owns the schema (`cd backend && python -m alembic upgrade head`). The ORM `analytics_*` dashboard tables and their never-mounted routers were retired in GOO-690.
+
 2. **Run Deployment Script**
    ```bash
    # Dry run first

@@ -27,6 +27,8 @@ The system integrates with the existing Multimodal Enterprise RAG System compone
 
 ### Step 1: Database Setup
 
+> **Amendment (2026-11-22, GOO-690): do not run these commands.** `database/migrations/007_knowledge_graph_analytics_dashboard.sql` is legacy SQL that no deployment applies, and the tables it lists match no current model. Alembic owns the schema (`cd backend && python -m alembic upgrade head`). The analytics dashboard, metric and report backend this guide describes (the `analytics_*` ORM tables and the never-mounted analytics routers) was retired in GOO-690.
+
 The analytics schema is already defined in `database/migrations/007_knowledge_graph_analytics_dashboard.sql`.
 
 To apply the migration:
