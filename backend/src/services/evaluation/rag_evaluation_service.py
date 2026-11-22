@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import and_, desc, func, or_
 from sqlalchemy.orm import Session
 
@@ -686,6 +687,12 @@ class RAGEvaluationService:
                 finally:
                     db.close()
 
+            except SoftTimeLimitExceeded:
+                # The task's time limit, not a per-query error: stop here so
+                # the caller can fail the job (SoftTimeLimitExceeded is an
+                # Exception, so the handler below would otherwise swallow it
+                # and keep evaluating until the hard limit kills the child).
+                raise
             except Exception as e:
                 logger.error(f"Error evaluating query '{query}': {e}")
                 continue
