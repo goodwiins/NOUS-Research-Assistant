@@ -107,54 +107,69 @@ kubectl delete pod -l app=postgres -n knowledge-graph-analytics
 # Check for corruption
 kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser -d ragdb -c "SELECT datname FROM pg_database WHERE datistemplate = false;"
 
-# If corruption detected, restore from backup. The restore loads only into
-# an EMPTY ragdb: the dump has no DROP statements. If any component's
-# precondition fails, it changes nothing. This is for in-cluster Postgres
-# only: on AWS the database is RDS and the script refuses, so use an RDS
-# snapshot or point-in-time restore instead.
-NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
+# If corruption detected, restore from backup. This is for in-cluster
+# Postgres only; the block below stops on RDS before touching anything.
+# The whole recovery is one subshell, so the shell reads all of it before
+# running any of it: a paste that is cut short or lands in another shell runs
+# nothing. `fail` leaves only the subshell, not your terminal. set -e stops at
+# the first failed step and leaves the writers scaled down; finish by hand.
+# Run it from the repo root after turning off Argo CD auto-sync for the app
+# (Argo CD UI, or `argocd app set <app> --sync-policy none`); otherwise
+# self-heal scales everything back and re-runs the migrate Job.
+(
+  set -eu
+  NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
+  BACKUP_ID=                 # REQUIRED: the backup to restore, e.g. 20261121_120000
+  fail() { echo "STOPPED, nothing changed: $*" >&2; exit 1; }
 
-# 0. Stop here if PostgreSQL is RDS (the chart's aws-database-credentials
-#    ExternalSecret exists). The steps below would take the backend down for
-#    nothing: restore RDS from a snapshot or point-in-time restore instead.
-#    The exit deliberately ends a pasted session.
-if kubectl get externalsecret aws-database-credentials -n "$NS" >/dev/null 2>&1; then
-  echo "PostgreSQL in $NS is RDS: use an RDS snapshot or PITR, not this runbook." >&2
-  exit 1
-fi
+  # 0. Preconditions. Any kubectl error (context, credentials, RBAC) stops
+  #    here too. On AWS the database is RDS: there is no deployment/postgres
+  #    and the chart's aws-database-credentials ExternalSecret exists, so
+  #    restore RDS from a snapshot or point-in-time restore instead.
+  [ -n "$NS" ] || fail "NS is empty"
+  [ -n "$BACKUP_ID" ] || fail "set BACKUP_ID"
+  [ -x scripts/backup-and-restore.sh ] || fail "run this from the repo root"
+  kubectl get deployment postgres -n "$NS" >/dev/null \
+    || fail "no in-cluster deployment/postgres in $NS, or kubectl failed"
+  eso_crd=$(kubectl get crd externalsecrets.external-secrets.io \
+    --ignore-not-found -o name) || fail "kubectl failed"
+  if [ -n "$eso_crd" ]; then
+    rds=$(kubectl get externalsecret aws-database-credentials -n "$NS" \
+      --ignore-not-found -o name) || fail "kubectl failed"
+    [ -z "$rds" ] || fail "PostgreSQL in $NS is RDS: use an RDS snapshot or PITR"
+  fi
 
-# 1. Stop every writer first, or the boot migrations (the migrate Job and the
-#    backend's run-migrations init container) repopulate ragdb before the
-#    restore. Turn off Argo CD auto-sync for the app first (Argo CD UI, or
-#    `argocd app set <app> --sync-policy none`); otherwise self-heal scales
-#    everything back and re-runs the migrate Job. If KEDA is installed
-#    (it is off on AWS), pause it so it does not scale the workers back up.
-if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
-  kubectl annotate scaledobject --all -n "$NS" \
-    autoscaling.keda.sh/paused-replicas="0" --overwrite
-fi
-kubectl scale deployment -n "$NS" --replicas=0 \
-  -l 'app.kubernetes.io/component in (backend,celery-worker,celery-beat)'
-kubectl delete job -n "$NS" -l app.kubernetes.io/component=migrations \
-  --ignore-not-found
+  # 1. Stop every writer, or the boot migrations (the migrate Job and the
+  #    backend's run-migrations init container) repopulate ragdb before the
+  #    restore. If KEDA is installed (it is off on AWS), pause it so it does
+  #    not scale the workers back up.
+  if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+    kubectl annotate scaledobject --all -n "$NS" \
+      autoscaling.keda.sh/paused-replicas="0" --overwrite
+  fi
+  kubectl scale deployment -n "$NS" --replicas=0 \
+    -l 'app.kubernetes.io/component in (backend,celery-worker,celery-beat)'
+  kubectl delete job -n "$NS" -l app.kubernetes.io/component=migrations \
+    --ignore-not-found
 
-# 2. Drop and recreate ragdb from the maintenance database. WITH (FORCE)
-#    needs PostgreSQL 13+, and raguser must own ragdb and have CREATEDB.
-kubectl exec -n "$NS" deployment/postgres -- psql -U raguser -d postgres \
-  -v ON_ERROR_STOP=1 \
-  -c 'DROP DATABASE IF EXISTS ragdb WITH (FORCE)' \
-  -c 'CREATE DATABASE ragdb OWNER raguser'
+  # 2. Drop and recreate ragdb from the maintenance database. WITH (FORCE)
+  #    needs PostgreSQL 13+, and raguser must own ragdb and have CREATEDB.
+  kubectl exec -n "$NS" deployment/postgres -- psql -U raguser -d postgres \
+    -v ON_ERROR_STOP=1 \
+    -c 'DROP DATABASE IF EXISTS ragdb WITH (FORCE)' \
+    -c 'CREATE DATABASE ragdb OWNER raguser'
 
-# 3. Restore
-cd scripts
-./backup-and-restore.sh restore <backup_id>
+  # 3. Restore. The restore loads only into an EMPTY ragdb: the dump has no
+  #    DROP statements.
+  NAMESPACE="$NS" scripts/backup-and-restore.sh restore "$BACKUP_ID"
 
-# 4. Bring the writers back: remove the KEDA pause (if KEDA is installed) and
-#    re-enable auto-sync. Argo CD restores the replicas and re-runs the
-#    migrate Job, which applies only the revisions newer than the backup.
-if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
-  kubectl annotate scaledobject --all -n "$NS" autoscaling.keda.sh/paused-replicas-
-fi
+  # 4. Bring the writers back: remove the KEDA pause (if KEDA is installed),
+  #    then re-enable auto-sync. Argo CD restores the replicas and re-runs the
+  #    migrate Job, which applies only the revisions newer than the backup.
+  if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+    kubectl annotate scaledobject --all -n "$NS" autoscaling.keda.sh/paused-replicas-
+  fi
+)
 ```
 
 If a step fails after PostgreSQL was loaded, the script says

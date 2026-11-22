@@ -451,35 +451,166 @@ def test_help_states_the_velero_version(tmp_path: Path) -> None:
     assert "Velero >= 1.10" in result.stdout
 
 
-def _recovery_block(doc: str) -> str:
-    text = (REPO_ROOT / "docs" / "deployment" / doc).read_text()
-    start = text.index("NS=multimodal-rag-system")
-    return text[start : text.index("```", start)]
+# kubectl stub for the RUNBOOKS recovery block. It logs every call.
+# - `get deployment postgres` fails when $RB_NO_PG=1;
+# - `get crd externalsecrets...` prints the CRD unless $RB_NO_ESO=1;
+# - `get externalsecret aws-database-credentials` prints its name when
+#   $RB_RDS=1, prints nothing otherwise;
+# - `get crd scaledobjects.keda.sh` fails (KEDA is not installed);
+# - $RB_FAIL lists calls that exit 1 instead: deploy, crd, es, drop.
+RUNBOOK_KUBECTL_STUB = """#!/bin/sh
+echo "kubectl $*" >> "$STUB_LOG"
+fails() { case " ${RB_FAIL:-} " in *" $1 "*) return 0 ;; esac; return 1; }
+case "$*" in
+    *"get deployment postgres"*)
+        fails deploy && exit 1; [ "${RB_NO_PG:-0}" != 1 ]; exit $? ;;
+    *"get crd externalsecrets.external-secrets.io"*)
+        fails crd && exit 1
+        [ "${RB_NO_ESO:-0}" = 1 ] || echo crd/externalsecrets.external-secrets.io
+        exit 0 ;;
+    *"get externalsecret aws-database-credentials"*)
+        fails es && exit 1
+        [ "${RB_RDS:-0}" = 1 ] && echo externalsecret/aws-database-credentials
+        exit 0 ;;
+    *"get crd scaledobjects.keda.sh"*) exit 1 ;;
+    *"DROP DATABASE"*) fails drop && exit 1; exit 0 ;;
+esac
+exit 0
+"""
+
+DESTRUCTIVE = (
+    "kubectl scale",
+    "kubectl delete job",
+    "kubectl annotate",
+    "DROP DATABASE",
+)
 
 
-def test_runbook_stops_on_rds_before_touching_workloads() -> None:
-    # NS defaults to the live namespace, so a copy-paste on AWS must stop at
-    # the RDS check before it scales anything down or deletes a Job.
-    block = _recovery_block("RUNBOOKS.md")
-    guard = block.index("get externalsecret aws-database-credentials")
-    assert "exit 1" in block[guard : guard + 300]
-    for destructive in (
-        "kubectl annotate",
-        "kubectl scale",
-        "kubectl delete",
-        "DROP DATABASE",
-        "./backup-and-restore.sh restore",
-    ):
-        assert guard < block.index(destructive), destructive
+def _runbook_block() -> str:
+    text = (REPO_ROOT / "docs" / "deployment" / "RUNBOOKS.md").read_text()
+    start = text.index("\n(\n  set -eu\n") + 1
+    end = text.index("\n)\n", start) + 3
+    return text[start:end]
 
 
-def test_cluster_recovery_skips_the_data_restore_on_rds() -> None:
-    # Steps 1-5 (Velero, Infisical, Helm) are valid on AWS; only the data
-    # restore must be skipped when the database is RDS.
-    block = _recovery_block("PRODUCTION_DEPLOYMENT_GUIDE.md")
-    guard = block.index("get externalsecret aws-database-credentials")
-    restore = block.index("./backup-and-restore.sh restore")
-    assert guard < restore
-    assert "else" in block[guard:restore]
-    for destructive in ("kubectl scale", "kubectl delete", "DROP DATABASE"):
+def _run_runbook(
+    tmp_path: Path, backup_id: str = BACKUP_ID, **extra: str
+) -> Tuple[subprocess.CompletedProcess, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    kubectl = bin_dir / "kubectl"
+    kubectl.write_text(RUNBOOK_KUBECTL_STUB)
+    kubectl.chmod(0o755)
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    restore = repo / "scripts" / "backup-and-restore.sh"
+    restore.write_text(
+        '#!/bin/sh\necho "backup-and-restore.sh NAMESPACE=$NAMESPACE $*" >> "$STUB_LOG"\n'
+    )
+    restore.chmod(0o755)
+    log = tmp_path / "stub.log"
+    log.touch()
+    block = _runbook_block().replace("  BACKUP_ID=  ", f"  BACKUP_ID={backup_id}  ", 1)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    env["STUB_LOG"] = str(log)
+    env.update(extra)
+    result = subprocess.run(
+        [_bash(), "-c", block],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        cwd=repo,
+        timeout=60,
+    )
+    return result, log.read_text()
+
+
+def test_runbook_is_one_compound_command() -> None:
+    # A paste that is cut short or lands in another shell must run nothing,
+    # so every step sits inside one subshell and nothing follows it.
+    text = (REPO_ROOT / "docs" / "deployment" / "RUNBOOKS.md").read_text()
+    block = _runbook_block()
+    fence = text.rindex("```bash", 0, text.index(block))
+    before = text[fence : text.index(block)]
+    after = text[text.index(block) + len(block) :]
+    for destructive in DESTRUCTIVE + ("backup-and-restore.sh restore",):
+        assert destructive in block, destructive
+        assert destructive not in before, destructive
+        assert destructive not in after[: after.index("```")], destructive
+    # `exit` inside the subshell never closes the operator's terminal.
+    assert "exit 1" not in before
+
+
+def test_runbook_runs_every_step_for_in_cluster_postgres(tmp_path: Path) -> None:
+    result, calls = _run_runbook(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "kubectl scale deployment -n multimodal-rag-system --replicas=0" in calls
+    assert "DROP DATABASE IF EXISTS ragdb WITH (FORCE)" in calls
+    assert (
+        f"backup-and-restore.sh NAMESPACE=multimodal-rag-system restore {BACKUP_ID}"
+        in calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "extra"),
+    [
+        ("rds", {"RB_RDS": "1"}),
+        ("no postgres deployment", {"RB_NO_PG": "1"}),
+        ("kubectl fails on the deployment", {"RB_FAIL": "deploy"}),
+        ("kubectl fails on the CRD", {"RB_FAIL": "crd"}),
+        ("kubectl fails on the ExternalSecret", {"RB_FAIL": "es"}),
+    ],
+)
+def test_runbook_stops_before_touching_workloads(
+    tmp_path: Path, case: str, extra: Dict[str, str]
+) -> None:
+    result, calls = _run_runbook(tmp_path, **extra)
+    assert result.returncode != 0, case
+    assert "STOPPED, nothing changed" in result.stderr, case
+    for destructive in DESTRUCTIVE + ("backup-and-restore.sh",):
+        assert destructive not in calls, (case, destructive)
+
+
+def test_runbook_refuses_without_a_backup_id(tmp_path: Path) -> None:
+    result, calls = _run_runbook(tmp_path, backup_id="")
+    assert result.returncode != 0
+    assert "set BACKUP_ID" in result.stderr
+    assert calls == ""
+
+
+def test_runbook_refuses_an_empty_namespace(tmp_path: Path) -> None:
+    block = _runbook_block()
+    assert block.count("  NS=multimodal-rag-system ") == 1
+    original = _runbook_block
+    try:
+        globals()["_runbook_block"] = lambda: original().replace(
+            "  NS=multimodal-rag-system ", "  NS= ", 1
+        )
+        result, calls = _run_runbook(tmp_path)
+    finally:
+        globals()["_runbook_block"] = original
+    assert result.returncode != 0
+    assert "NS is empty" in result.stderr
+    assert calls == ""
+
+
+def test_cluster_recovery_delegates_the_data_restore() -> None:
+    # Steps 1-5 (Velero, Infisical, Helm) are valid on AWS. The data restore
+    # is the RUNBOOKS block, which stops on RDS; it is not duplicated here.
+    text = REPO_ROOT / "docs" / "deployment" / "PRODUCTION_DEPLOYMENT_GUIDE.md"
+    guide = text.read_text()
+    start = guide.index("#### Scenario 3: Full Cluster Recovery")
+    block = guide[start : guide.index("**Secrets and Helm history.**", start)]
+    assert "PostgreSQL Database Recovery" in block
+    for destructive in DESTRUCTIVE + ("backup-and-restore.sh restore",):
         assert destructive not in block, destructive
+
+
+def test_runbook_stops_when_a_step_fails(tmp_path: Path) -> None:
+    # set -e: a failed drop must not go on to load the dump.
+    result, calls = _run_runbook(tmp_path, RB_FAIL="drop")
+    assert result.returncode != 0
+    assert "DROP DATABASE" in calls
+    assert "backup-and-restore.sh" not in calls

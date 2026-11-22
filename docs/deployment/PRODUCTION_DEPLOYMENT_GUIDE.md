@@ -456,18 +456,12 @@ helm upgrade --install knowledge-graph-analytics \
   infrastructure/helm/knowledge-graph-analytics \
   -n "$NS" -f <the values files used for this cluster>
 
-# 6. Restore application data. On AWS the database is RDS (the chart's
-#    aws-database-credentials ExternalSecret exists): skip this step and
-#    restore RDS from a snapshot or point-in-time restore. Otherwise
-#    PostgreSQL loads only into an EMPTY ragdb: stop every writer and
-#    drop/recreate ragdb first, exactly as in "PostgreSQL Database Recovery"
-#    in RUNBOOKS.md. Redis is copied into the pod but not loaded; Neo4j,
-#    configs and uploads are listed as SKIPPED.
-if kubectl get externalsecret aws-database-credentials -n "$NS" >/dev/null 2>&1; then
-  echo "PostgreSQL in $NS is RDS: restore it from an RDS snapshot or PITR." >&2
-else
-  ./backup-and-restore.sh restore <backup-id>
-fi
+# 6. Restore application data with the "PostgreSQL Database Recovery" block
+#    in RUNBOOKS.md. It is not repeated here: it stops every writer and
+#    drops ragdb first, and it stops before touching anything when the
+#    database is RDS (as on AWS), where you restore from an RDS snapshot or
+#    point-in-time restore instead. Redis is copied into the pod but not
+#    loaded; Neo4j, configs and uploads are listed as SKIPPED.
 
 # Verify application functionality
 kubectl get pods -n "$NS"
