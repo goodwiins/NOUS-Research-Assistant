@@ -625,7 +625,8 @@ async def delete_document(
     # (live row pointing at a missing file). A failure here leaves at worst
     # a sweepable orphan object.
     try:
-        file_service.delete_physical_file(document)
+        # Blocking boto3/disk calls: run in a worker thread (GOO-643 API-4).
+        await asyncio.to_thread(file_service.delete_physical_file, document)
     except Exception:
         logger.warning(
             "Soft-deleted document %s but failed to remove its storage object",
@@ -1137,7 +1138,8 @@ async def bulk_delete_documents(
     # missing file.
     for document in deleted_docs:
         try:
-            file_service.delete_physical_file(document)
+            # Blocking boto3/disk calls, several per document: worker thread.
+            await asyncio.to_thread(file_service.delete_physical_file, document)
         except Exception:
             logger.warning(
                 "Soft-deleted document %s but failed to remove its storage object",

@@ -410,12 +410,13 @@ docker-compose -f docker-compose.graph-services-corrected.yml exec neo4j-graph c
 
 #### Migration Errors
 ```bash
-# Check PostgreSQL migration status
-psql -h localhost -p 5433 -U rag_user -d rag_graph -c "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;"
-
-# Re-run migrations if needed
-psql -h localhost -p 5433 -U rag_user -d rag_graph -f database/005_correct_knowledge_graph_architecture.sql
+# The schema comes from Alembic. Check the applied revision, then upgrade.
+cd backend
+alembic current
+alembic upgrade head
 ```
+
+The standalone `005_correct_knowledge_graph_architecture.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
 
 #### Neo4j Constraint Errors
 ```bash

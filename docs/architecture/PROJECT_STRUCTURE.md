@@ -215,7 +215,7 @@ docs/
 
 ```
 docker-compose.development.yml  # Development environment (symlink to config/)
-docker-compose.production.yml   # Production environment
+docker-compose.prod.yml         # Production environment
 docker-compose.azure.yml        # Azure-specific configuration
 ```
 

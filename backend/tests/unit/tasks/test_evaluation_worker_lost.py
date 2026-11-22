@@ -123,22 +123,26 @@ def test_missing_job_raises() -> None:
 # ---- end to end through the Celery task ------------------------------------
 
 
-def test_worker_lost_redelivery_runs_no_item(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_lost_redelivery_runs_no_item(
+    monkeypatch: pytest.MonkeyPatch, eval_skips: list[dict[str, Any]]
+) -> None:
     job = _job(RUNNING, claimed_by="task-A")
     db = _db(job, _dataset(3))
     monkeypatch.setattr(et, "SessionLocal", lambda: db)
     triad = MagicMock()
     monkeypatch.setattr(et.rag_evaluation_service, "run_rag_triad_evaluation", triad)
 
-    result = et.run_rag_triad_evaluation.apply(args=("job-1",), task_id="task-A").result
+    result = et.run_rag_triad_evaluation.apply(args=("job-1",), task_id="task-A")
 
-    assert result["skipped"] == "worker_lost"
+    assert result.state == "IGNORED"
+    assert [s["skipped"] for s in eval_skips] == ["worker_lost"]
+    assert job.status == EvaluationStatus.FAILED.value
     triad.assert_not_called()
     job.start_job.assert_not_called()
 
 
 def test_batch_worker_lost_redelivery_runs_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, eval_skips: list[dict[str, Any]]
 ) -> None:
     job = _job(RUNNING, claimed_by="task-A")
     db = _db(job)
@@ -146,16 +150,15 @@ def test_batch_worker_lost_redelivery_runs_nothing(
     pipeline = MagicMock()
     monkeypatch.setattr(et.rag_evaluation_service, "evaluate_search_pipeline", pipeline)
 
-    result = et.run_batch_evaluation.apply(
-        args=("job-2", ["q1"]), task_id="task-A"
-    ).result
+    result = et.run_batch_evaluation.apply(args=("job-2", ["q1"]), task_id="task-A")
 
-    assert result["skipped"] == "worker_lost"
+    assert result.state == "IGNORED"
+    assert [s["skipped"] for s in eval_skips] == ["worker_lost"]
     pipeline.assert_not_called()
 
 
 def test_real_time_redelivery_of_a_running_job_fails_it(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, eval_skips: list[dict[str, Any]]
 ) -> None:
     existing = _job(RUNNING)
     existing.id = "job-3"
@@ -164,9 +167,12 @@ def test_real_time_redelivery_of_a_running_job_fails_it(
 
     result = et.run_real_time_evaluation.apply(
         args=("q", "a", ["ctx"]), task_id="task-A"
-    ).result
+    )
 
-    assert result == {"status": "failed", "job_id": "job-3", "skipped": "worker_lost"}
+    assert result.state == "IGNORED"
+    assert eval_skips == [
+        {"status": "failed", "job_id": "job-3", "skipped": "worker_lost"}
+    ]
     db.add.assert_not_called()
 
 

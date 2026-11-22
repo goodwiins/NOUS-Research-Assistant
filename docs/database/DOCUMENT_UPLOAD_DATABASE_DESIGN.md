@@ -1,5 +1,7 @@
 # Document Upload Database Schema Design
 
+> **Legacy SQL removed (2026-11-22, GOO-685):** the `database/migrations/` files this document names were deleted; none of them applied to a real database. The schema comes from `alembic upgrade head` in `backend/`.
+
 ## Overview
 
 This document extends the existing RAG system database schema to support document upload with automatic knowledge graph population.

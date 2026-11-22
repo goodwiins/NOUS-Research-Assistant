@@ -196,10 +196,12 @@ ANALYTICS_METRICS_RESOLUTION=1m
 ```
 
 ### Database Migration
-Run the analytics schema migration:
+The analytics tables come from the Alembic chain. From `backend/`:
 ```bash
-psql -d multimodal_rag -f database/migrations/007_analytics_schema.sql
+alembic upgrade head
 ```
+
+The standalone `007_analytics_schema.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
 
 ## Usage Examples
 

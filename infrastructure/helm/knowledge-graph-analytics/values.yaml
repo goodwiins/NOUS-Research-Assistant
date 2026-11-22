@@ -213,6 +213,13 @@ celeryWorker:
   # Warm-shutdown window; must exceed the global task_time_limit (600s,
   # backend/src/tasks/celery_app.py). Tasks with longer per-task limits (the
   # 960s arXiv ingest) can still be cut off and are redelivered by the broker.
+  # Evaluation tasks run up to EVALUATION_TASK_TIME_LIMIT_SECONDS (3000s) and
+  # are deliberately NOT covered: a 50-minute grace would stall every worker
+  # rollout. A rollout during a running evaluation SIGKILLs it; the
+  # redelivery then marks the job FAILED ("worker was lost ... not
+  # restarted", evaluation_tasks.py) and keeps the metrics already saved, so
+  # nothing is re-run or double-counted. Avoid rolling workers while a long
+  # evaluation is running, or start a new evaluation afterwards.
   terminationGracePeriodSeconds: 660
 
   image:

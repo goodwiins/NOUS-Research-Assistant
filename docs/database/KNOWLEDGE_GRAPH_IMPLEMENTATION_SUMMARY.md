@@ -1,5 +1,7 @@
 # Knowledge Graph Architecture Implementation Summary
 
+> **Legacy SQL removed (2026-11-22, GOO-685):** the `database/migrations/` files this document names were deleted; none of them applied to a real database. The schema comes from `alembic upgrade head` in `backend/`.
+
 > **Stale / historical (2026-10-17):** Qdrant is fully removed and live retrieval is PostgreSQL full-text search (`DO_KB_ENABLED` defaults to `False`; pgvector semantic search is flag-gated). Treat Qdrant, DO KB and vector-store statements below as historical. Current contracts: [`docs/engineering/`](../engineering/README.md).
 
 ## Project Overview

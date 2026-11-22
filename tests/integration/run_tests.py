@@ -25,44 +25,49 @@ import docker
 import pytest
 from docker.errors import DockerException
 
-MIGRATIONS_DIR = Path("database") / "migrations"
-CONTAINER_MIGRATIONS_DIR = "/migrations"
-
-
-def migration_files(directory: Path) -> List[Path]:
-    """Forward migration scripts in apply order; rollback scripts are skipped."""
-    return sorted(
-        path for path in directory.glob("*.sql") if "rollback" not in path.name
-    )
+# The schema comes from the Alembic chain, the only schema source. The legacy
+# standalone SQL does not apply to a clean database.
+BACKEND_DIR = Path("backend")
+TEST_DATABASE_URL = "postgresql://test_user:test_password@localhost:5433/test_analytics"
 
 
 class IntegrationTestRunner:
     """Comprehensive integration test runner"""
 
-    def apply_migrations(self, directory: Path) -> bool:
-        """Apply each forward migration with ON_ERROR_STOP=1; False on the first failure."""
-        container = self.containers["postgres"]
-        for path in migration_files(directory):
-            cmd = [
-                "psql",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "--no-psqlrc",
-                "-U",
-                "test_user",
-                "-d",
-                "test_analytics",
-                "-f",
-                f"{CONTAINER_MIGRATIONS_DIR}/{path.name}",
-            ]
-            result = container.exec_run(cmd)
-            if result.exit_code != 0:
-                output = result.output.decode(errors="replace").strip()
-                self.logger.error(
-                    f"Migration {path.name} failed (exit {result.exit_code}): {output}"
+    def apply_schema(self, database_url: str = TEST_DATABASE_URL) -> bool:
+        """Run `alembic upgrade head` against the test database; False on failure.
+
+        alembic/env.py imports the whole backend model layer, so the backend
+        requirements (backend/requirements*.txt) must already be installed in
+        this interpreter. This step runs before install_dependencies(), which
+        only installs tests/integration/requirements.txt.
+        """
+        env = dict(os.environ)
+        # alembic/env.py prefers SUPABASE_DB_URL. Set it empty rather than
+        # deleting it: env.py's `or` falls through to DATABASE_URL, and a later
+        # load_dotenv (override=False) cannot put a real URL back.
+        env["SUPABASE_DB_URL"] = ""
+        env["DATABASE_URL"] = database_url
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=str(self.project_root / BACKEND_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            tail = "\n".join((result.stderr or "").strip().splitlines()[-20:])
+            hint = ""
+            if "ModuleNotFoundError" in tail:
+                hint = (
+                    " (install the backend requirements first, e.g."
+                    " pip install -r backend/requirements-cpu-lock.txt)"
                 )
-                return False
-            self.logger.info(f"Applied migration {path.name}")
+            self.logger.error(
+                f"alembic upgrade head failed (exit {result.returncode}){hint}: {tail}"
+            )
+            return False
+        self.logger.info("Schema built with alembic upgrade head")
         return True
 
     def __init__(self, args: argparse.Namespace):
@@ -101,8 +106,8 @@ class IntegrationTestRunner:
             if not await self.wait_for_services():
                 return False
 
-            # Apply the legacy analytics SQL, stopping at the first error
-            if not self.apply_migrations(self.project_root / MIGRATIONS_DIR):
+            # Build the schema from the Alembic chain
+            if not self.apply_schema():
                 return False
 
             # Install dependencies
@@ -135,15 +140,6 @@ class IntegrationTestRunner:
                     "POSTGRES_INITDB_ARGS": "--encoding=UTF-8",
                 },
                 ports={"5432/tcp": ("127.0.0.1", 5433)},
-                # Mounted read-only and applied explicitly by apply_migrations()
-                # so a failing statement fails setup instead of silently
-                # killing the container during init.
-                volumes={
-                    str(self.project_root / MIGRATIONS_DIR): {
-                        "bind": CONTAINER_MIGRATIONS_DIR,
-                        "mode": "ro",
-                    }
-                },
                 detach=True,
                 remove=True,
             )
