@@ -154,7 +154,7 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ../../database/init:/docker-entrypoint-initdb.d
+      # Schema comes from Alembic (backend/alembic), not init scripts.
     ports:
       - "5432:5432"
     networks:
