@@ -196,8 +196,6 @@ ANALYTICS_METRICS_RESOLUTION=1m
 ```
 
 ### Database Migration
-> **Amendment (2026-11-22, GOO-690): do not run the command below.** The deployment never applied `database/migrations/007_analytics_schema.sql`; Alembic owns the schema (`cd backend && python -m alembic upgrade head`). The ORM-only `analytics_*` dashboard, metric, KPI and report tables, with their never-mounted `/dashboards`, `/metrics` and `/reports` routers and services, were retired in GOO-690.
-
 Run the analytics schema migration:
 ```bash
 psql -d multimodal_rag -f database/migrations/007_analytics_schema.sql

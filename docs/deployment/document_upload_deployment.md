@@ -137,8 +137,6 @@ class Settings:
 ### 1. Database Setup
 
 #### PostgreSQL
-> **Amendment (2026-11-22, GOO-690):** Alembic must run from `backend/`, where `alembic.ini` lives: `cd backend && python -m alembic upgrade head`. The `psql -f database/migrations/006_document_upload_schema.sql` step below is legacy SQL that no deployment applies.
-
 ```bash
 # Apply database migrations
 python -m alembic upgrade head
