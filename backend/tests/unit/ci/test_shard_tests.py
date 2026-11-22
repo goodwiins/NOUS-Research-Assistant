@@ -6,6 +6,7 @@ every test file exactly once, or a test silently stops running in CI.
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -154,6 +155,129 @@ def test_integration_job_enrolls_retention_purge_regression() -> None:
     assert "RETENTION_PURGE_TEST_DATABASE_URL" in source
 
 
+# ---- the unit-tree PostgreSQL lane (GOO-702) --------------------------------
+
+_POSTGRES_LANE = "Run ingestion recovery PostgreSQL tests"
+# A test file that reads a PostgreSQL URL from the environment.
+_READS_PG_URL = re.compile(
+    r"""(?:getenv|environ\.get|environ\[)\(?\s*["']([A-Z0-9_]*_TEST_DATABASE_URL)["']"""
+)
+
+
+def _postgres_lane_step() -> dict:
+    return next(
+        step
+        for step in _integration_job()["steps"]
+        if step.get("name") == _POSTGRES_LANE
+    )
+
+
+def _postgres_lane_files(step: dict) -> set[str]:
+    """Expand the lane's ``postgres_tests`` array in the real repository."""
+    lines = step["run"].splitlines()
+    start = next(i for i, line in enumerate(lines) if "postgres_tests=(" in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == ")")
+    script = "\n".join(
+        lines[start : end + 1] + ['printf "%s\\n" "${postgres_tests[@]}"']
+    )
+    result = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return set(result.stdout.split())
+
+
+def test_postgres_lane_collects_every_unit_test_that_reads_a_pg_url() -> None:
+    """Unit Tests has no database, so a PostgreSQL test the lane misses never
+    runs anywhere (it skips). The lane globs *_postgres.py; a file named
+    otherwise must be listed in it explicitly."""
+    collected = _postgres_lane_files(_postgres_lane_step())
+    unit = REPO_ROOT / "backend" / "tests" / "unit"
+    reading = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in unit.rglob("test_*.py")
+        if "ci" not in path.relative_to(unit).parts[:1]
+        and _READS_PG_URL.search(path.read_text(encoding="utf-8"))
+    }
+
+    assert reading, "the scan found no PostgreSQL tests; the pattern is stale"
+    assert reading <= collected, sorted(reading - collected)
+    for name in collected:
+        assert (REPO_ROOT / name).is_file(), f"{name} is listed but does not exist"
+
+
+def test_postgres_lane_files_select_their_postgres_tests() -> None:
+    """The lane runs ``-m "integration or requires_postgres"``; a collected
+    file with neither marker would be deselected and count for nothing."""
+    for name in _postgres_lane_files(_postgres_lane_step()):
+        source = (REPO_ROOT / name).read_text(encoding="utf-8")
+        assert (
+            "pytest.mark.integration" in source
+            or "pytest.mark.requires_postgres" in source
+        ), name
+
+
+def test_postgres_lane_turns_skips_into_failures() -> None:
+    step = _postgres_lane_step()
+    assert step["env"]["REQUIRE_POSTGRES_TESTS"] == "1"
+    assert '-m "integration or requires_postgres"' in step["run"]
+
+
+_GUARD_SAMPLE = Path(__file__).with_name("postgres_guard_sample.py")
+
+
+def _run_guard_sample(**env: str) -> subprocess.CompletedProcess[str]:
+    clean = {
+        k: v for k, v in os.environ.items() if k not in {"CI", "REQUIRE_POSTGRES_TESTS"}
+    }
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(_GUARD_SAMPLE),
+            "-c",
+            str(REPO_ROOT / "backend" / "pytest.ini"),
+            "-q",
+            "--color=no",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=REPO_ROOT / "backend",
+        env={**clean, **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_ci_postgres_lane_fails_a_skipped_postgres_test() -> None:
+    result = _run_guard_sample(CI="true", REQUIRE_POSTGRES_TESTS="1")
+
+    out = result.stdout + result.stderr
+    assert result.returncode == 1, out
+    assert "1 failed, 1 skipped" in out, out
+    assert "PostgreSQL test skipped in a CI step that requires PostgreSQL" in out
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"CI": "true"},  # the Unit Tests job: no database, skipping is right
+        {"REQUIRE_POSTGRES_TESTS": "1"},  # a local run outside CI
+    ],
+)
+def test_postgres_skips_stay_skips_outside_the_lane(env: dict[str, str]) -> None:
+    result = _run_guard_sample(**env)
+
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "2 skipped" in out, out
+
+
 @pytest.mark.parametrize(
     ("case_xml", "pytest_exit", "accepted"),
     [
@@ -179,22 +303,22 @@ def test_recovery_postgres_step_requires_executed_tests(
         "job.services.postgres.ports['5432']"
         in step["env"]["ORCHESTRATION_TEST_DATABASE_URL"]
     )
+    # GOO-702: every *_postgres.py file under the unit tree, not a hand list
+    # (the GOO-436 PDF-chat branch suites and ingestion stage guard included).
+    collected = _postgres_lane_files(step)
     for module in (
-        "test_stuck_processing_recovery.py",
-        "test_stuck_recovery_terminal_retry.py",
-        "test_ingestion_stage_guard_postgres.py",
+        "tasks/test_stuck_processing_recovery.py",
+        "tasks/test_stuck_recovery_terminal_retry.py",
+        "tasks/test_ingestion_stage_guard_postgres.py",
+        "services/test_message_branches_postgres.py",
+        "services/test_alphaxiv_live_postgres.py",
+        "services/test_native_pdf_branch_reads_postgres.py",
     ):
-        assert f"backend/tests/unit/tasks/{module}" in step["run"]
-    # GOO-436: the PDF-chat branch suites skip without a PostgreSQL URL.
-    for module in (
-        "test_message_branches_postgres.py",
-        "test_alphaxiv_live_postgres.py",
-        "test_native_pdf_branch_reads_postgres.py",
-    ):
-        assert f"backend/tests/unit/services/{module}" in step["run"]
+        assert f"backend/tests/unit/{module}" in collected
 
     # Execute the actual workflow shell against pytest's possible outcomes.
     # In particular, pytest exits zero when every selected test skips.
+    (tmp_path / "backend" / "tests" / "unit").mkdir(parents=True)  # for find
     results = tmp_path / "test-results"
     results.mkdir()
     (results / "ingestion-recovery.xml").write_text(
