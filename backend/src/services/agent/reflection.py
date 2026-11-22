@@ -27,13 +27,6 @@ _REFLECTION_LLM_TIMEOUT_SECONDS = 45.0  # bumped from 20s after 4096-token
 # budget let gpt-5-mini reasoning model spend ~20s on hard prompts; trace
 # 019e1874 hit CancelledError at exactly the old ceiling.
 
-# Cache the reflection LLM at module scope. The settings/endpoint are
-# resolved at import time once and reused across every reflection call,
-# saving a ~50ms client-build round-trip per turn. build_lightweight_llm()
-# also caches by args, so even a concurrent double-build returns the same
-# factory instance — no lock needed here.
-_REFLECTION_LLM = None
-
 
 # ---------------------------------------------------------------------------
 # Pydantic model
@@ -54,18 +47,16 @@ class ReflectionResult(BaseModel):
 
 
 def _build_reflection_llm():
-    """Return a cached lightweight LLM for reflection evaluation."""
-    global _REFLECTION_LLM
-    if _REFLECTION_LLM is not None:
-        return _REFLECTION_LLM
+    """Return the lightweight LLM for reflection evaluation."""
+    # No module-level cache: the factory caches by credential_fingerprint(),
+    # so a rotated Azure key/endpoint gets a fresh client (audit AG-1).
     # 4096 tokens: gpt-5-mini reasoning tokens count against
     # max_completion_tokens. 512 cap caused LengthFinishReasonError in trace
     # 019e1555 (research_reflection_gate). See classifier.py for context.
-    _REFLECTION_LLM = build_lightweight_llm(
+    return build_lightweight_llm(
         max_tokens=4096,
         request_timeout=_REFLECTION_LLM_TIMEOUT_SECONDS,
     )
-    return _REFLECTION_LLM
 
 
 # ---------------------------------------------------------------------------

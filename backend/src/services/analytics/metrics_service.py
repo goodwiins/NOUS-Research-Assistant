@@ -17,6 +17,7 @@ from sqlalchemy import and_, delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.core.background_tasks import spawn
 from src.core.config import settings
 from src.core.database import get_async_session
 from src.models.analytics.analytics_models import (
@@ -132,7 +133,7 @@ class MetricsService:
             self.running = True
 
             # Start background aggregation task
-            asyncio.create_task(self._aggregation_loop())
+            spawn(self._aggregation_loop())
 
             logger.info("Metrics service initialized successfully")
 
