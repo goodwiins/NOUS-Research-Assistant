@@ -55,11 +55,17 @@ from src.services.knowledge_graph.repair import repair_document_graph
 from src.shared.enums import SatelliteSyncStatus
 from src.tasks._async_utils import run_async
 from src.tasks.celery_app import celery_app  # noqa: F401 - binds tasks to the app
-from src.tasks.processing_tasks import _sync_document_to_kb_blocking
+from src.tasks.processing_tasks import (
+    GRAPH_REDRIVE_KEY,
+    _reset_pipeline_entities,
+    _sync_document_to_kb_blocking,
+)
 
 logger = logging.getLogger(__name__)
 
 _FAILED = SatelliteSyncStatus.FAILED.value
+_ABANDONED = SatelliteSyncStatus.ABANDONED.value
+_DEFAULT_NEO4J_MAX_ATTEMPTS = 5
 _COMPLETED = SatelliteSyncStatus.COMPLETED.value
 _PENDING = SatelliteSyncStatus.PENDING.value
 
@@ -163,8 +169,18 @@ class _LazyExtractionService:
         return self._service
 
 
-def _redrive_neo4j(db, document, extraction) -> bool:
-    """Re-drive one document's Neo4j index; returns True when repaired."""
+def _redrive_neo4j(
+    db, document, extraction, *, max_attempts: int = _DEFAULT_NEO4J_MAX_ATTEMPTS
+) -> bool:
+    """Re-drive one document's Neo4j index; returns True when repaired.
+
+    When ingestion-time extraction had failed (``graph_redrive`` metadata,
+    ``postgres_entities_stale``), the same extraction also replaces the
+    document's pipeline-owned Postgres ``Entity`` rows, whether or not the
+    graph write succeeds. A failed re-drive counts an attempt; after
+    ``max_attempts`` the document is marked ``abandoned`` and no longer
+    picked up (GOO-695).
+    """
     document_id, organization_id = document.id, document.organization_id
     document = (
         db.query(Document)
@@ -210,7 +226,22 @@ def _redrive_neo4j(db, document, extraction) -> bool:
     if document.processing_status != ProcessingStatus.COMPLETED:
         db.commit()
         return False
+    metadata = dict(document.document_metadata or {})
+    state = dict(metadata.get(GRAPH_REDRIVE_KEY) or {})
+    if state.get("postgres_entities_stale") and outcome.extracted_entities is not None:
+        _reset_pipeline_entities(db, document.id)
+        for entity in outcome.extracted_entities:
+            db.add(entity)
+        state["postgres_entities_stale"] = False
+        logger.info(
+            "reconciler: rebuilt %s Postgres entities for document %s (org %s)",
+            len(outcome.extracted_entities),
+            document.id,
+            document.organization_id,
+        )
     if outcome.ok:
+        metadata.pop(GRAPH_REDRIVE_KEY, None)
+        document.document_metadata = metadata
         document.neo4j_index_status = _COMPLETED
         document.neo4j_indexed_at = datetime.now(timezone.utc)
         logger.info(
@@ -224,16 +255,35 @@ def _redrive_neo4j(db, document, extraction) -> bool:
         )
         db.commit()
         return True
-    document.neo4j_index_status = _FAILED
-    logger.warning(
-        "reconciler: Neo4j re-drive still failing for document %s (org %s): "
-        "errors=%s skipped=%s error=%s",
-        document.id,
-        document.organization_id,
-        outcome.errors,
-        outcome.skipped_reason,
-        outcome.error_message,
-    )
+    attempts = int(state.get("attempts") or 0) + 1
+    state["attempts"] = attempts
+    metadata[GRAPH_REDRIVE_KEY] = state
+    document.document_metadata = metadata
+    if attempts >= max_attempts:
+        document.neo4j_index_status = _ABANDONED
+        logger.error(
+            "reconciler: giving up on Neo4j for document %s (org %s) after %s "
+            "attempts; marked abandoned. Last error: errors=%s skipped=%s error=%s",
+            document.id,
+            document.organization_id,
+            attempts,
+            outcome.errors,
+            outcome.skipped_reason,
+            outcome.error_message,
+        )
+    else:
+        document.neo4j_index_status = _FAILED
+        logger.warning(
+            "reconciler: Neo4j re-drive still failing for document %s (org %s), "
+            "attempt %s/%s: errors=%s skipped=%s error=%s",
+            document.id,
+            document.organization_id,
+            attempts,
+            max_attempts,
+            outcome.errors,
+            outcome.skipped_reason,
+            outcome.error_message,
+        )
     db.commit()
     return False
 
@@ -371,6 +421,16 @@ def reconcile_satellite_indexes() -> dict:
     apply_mode = bool(settings_local.RECONCILER_APPLY)
     cap = max(1, int(settings_local.RECONCILER_MAX_DOCS_PER_RUN))
     page_size = max(1, int(settings_local.RECONCILER_BATCH_SIZE))
+    max_attempts = max(
+        1,
+        int(
+            getattr(
+                settings_local,
+                "RECONCILER_NEO4J_MAX_ATTEMPTS",
+                _DEFAULT_NEO4J_MAX_ATTEMPTS,
+            )
+        ),
+    )
     do_kb_enabled = bool(settings_local.DO_KB_ENABLED)
     # With Bedrock sync on, do_kb_sync_status belongs to its queue tick
     # (src.tasks.bedrock_sync_tasks); re-driving it here via DO KB would fight
@@ -516,7 +576,9 @@ def reconcile_satellite_indexes() -> dict:
                             summary["kg_cleanup_failed"] += 1
 
                     if needs_kg:
-                        if _redrive_neo4j(db, doc, extraction):
+                        if _redrive_neo4j(
+                            db, doc, extraction, max_attempts=max_attempts
+                        ):
                             summary["kg_repaired"] += 1
                         else:
                             summary["kg_still_failed"] += 1
