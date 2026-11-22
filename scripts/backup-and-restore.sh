@@ -361,8 +361,11 @@ restore_backup() {
 
     log_info "Starting restore from backup: $backup_id"
 
-    # Download backup files from S3
+    # Download backup files from S3. The directory holds plaintext dumps, so
+    # it is removed when the script exits, whatever the outcome.
     local restore_dir="$BACKUP_DIR/restore_${backup_id}"
+    RESTORE_DIR_TO_CLEAN="$restore_dir"
+    trap 'rm -rf -- "${RESTORE_DIR_TO_CLEAN:-}"' EXIT
     mkdir -p "$restore_dir"
 
     # List available backups
@@ -385,27 +388,87 @@ restore_backup() {
         return 1
     fi
 
-    # Restore databases
-    log_info "Restoring databases..."
+    local pg_file="$restore_dir/postgres/postgres_backup_${backup_id}.sql.gz"
+    local redis_file="$restore_dir/redis/redis_backup_${backup_id}.rdb.gz"
+    local redis_pod=""
 
-    # Restore PostgreSQL
-    if [ -f "$restore_dir/postgres/postgres_backup_${backup_id}.sql.gz" ]; then
+    # Check the preconditions of every component before applying any of them,
+    # so a failure cannot leave a half-restored system.
+    log_info "Checking restore preconditions..."
+    if [ -f "$pg_file" ]; then
+        if ! gzip -t "$pg_file"; then
+            log_error "PostgreSQL dump is corrupt: $pg_file; nothing restored"
+            return 1
+        fi
+        # The dump is a plain pg_dump without --clean: loading it into a
+        # populated database collides with existing objects. Require an empty
+        # target instead of guessing what to drop.
+        local table_count
+        if ! table_count=$(kubectl exec -n "$NAMESPACE" deployment/postgres -- \
+            psql -U raguser -d ragdb -tAc \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"); then
+            log_error "Cannot query the target PostgreSQL database; nothing restored"
+            return 1
+        fi
+        table_count="${table_count//[[:space:]]/}"
+        if [ "$table_count" != "0" ]; then
+            log_error "Target database ragdb is not empty ($table_count tables). The dump has no DROP statements: drop and recreate ragdb, then re-run. Nothing restored."
+            return 1
+        fi
+    fi
+    if [ -f "$redis_file" ]; then
+        if ! gzip -t "$redis_file"; then
+            log_error "Redis snapshot is corrupt: $redis_file; nothing restored"
+            return 1
+        fi
+        redis_pod=$(kubectl get pods -n "$NAMESPACE" -l app=redis -o jsonpath='{.items[0].metadata.name}')
+        if [ -z "$redis_pod" ]; then
+            log_error "Redis pod not found in $NAMESPACE; nothing restored"
+            return 1
+        fi
+    fi
+
+    local restored=0
+
+    # Restore PostgreSQL in one transaction that stops at the first error.
+    if [ -f "$pg_file" ]; then
         log_info "Restoring PostgreSQL database..."
-        gunzip -c "$restore_dir/postgres/postgres_backup_${backup_id}.sql.gz" | kubectl exec -i -n "$NAMESPACE" deployment/postgres -- psql -U raguser -d ragdb
+        if ! gunzip -c "$pg_file" | kubectl exec -i -n "$NAMESPACE" deployment/postgres -- \
+            psql -U raguser -d ragdb -v ON_ERROR_STOP=1 --single-transaction; then
+            log_error "PostgreSQL restore failed; the transaction was rolled back"
+            return 1
+        fi
+        restored=$((restored + 1))
         log_success "PostgreSQL restore completed"
     fi
 
-    # Restore Redis
-    if [ -f "$restore_dir/redis/redis_backup_${backup_id}.rdb.gz" ]; then
-        log_info "Restoring Redis data..."
-        # Note: Redis restore requires service restart
-        kubectl cp "$restore_dir/redis/redis_backup_${backup_id}.rdb.gz" temp_redis_backup.rdb.gz
-        gunzip temp_redis_backup.rdb.gz
-        # Implementation would depend on Redis setup
-        log_warning "Redis restore requires manual intervention"
+    # Stage the Redis snapshot in the pod. Loading it means replacing dump.rdb
+    # while Redis is stopped, which depends on the deployment: left manual.
+    if [ -f "$redis_file" ]; then
+        local redis_rdb="$restore_dir/redis/redis_backup_${backup_id}.rdb"
+        local redis_target="/tmp/redis_restore_${backup_id}.rdb"
+        gunzip -c "$redis_file" > "$redis_rdb"
+        if ! kubectl cp "$redis_rdb" "$NAMESPACE/$redis_pod:$redis_target"; then
+            log_error "Copying the Redis snapshot into $redis_pod failed"
+            return 1
+        fi
+        log_warning "Redis snapshot copied to $redis_pod:$redis_target but NOT loaded: stop Redis, replace dump.rdb in its data dir, then restart it."
     fi
 
-    log_success "Restore process initiated. Please verify application functionality."
+    # Neo4j, Kubernetes configs and uploads are downloaded but not restored.
+    local skipped
+    skipped=$(find "$restore_dir" -type f -name "*_${backup_id}.*" \
+        ! -path "$restore_dir/postgres/*" ! -path "$restore_dir/redis/*" | sed "s|^$restore_dir/||")
+    if [ -n "$skipped" ]; then
+        log_warning "SKIPPED, this script does not restore these components; restore them by hand:"
+        printf '%s\n' "$skipped" | sed 's/^/    /'
+    fi
+
+    if [ "$restored" -eq 0 ]; then
+        log_error "No component was restored for backup $backup_id"
+        return 1
+    fi
+    log_success "Restored $restored component(s) from backup $backup_id. Re-create Secrets from the secret manager, then verify the application."
 }
 
 # List available backups
@@ -539,5 +602,7 @@ EOF
     esac
 }
 
-# Run main function with all arguments
-main "$@"
+# Run main unless sourced (tests source the script to call one function).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

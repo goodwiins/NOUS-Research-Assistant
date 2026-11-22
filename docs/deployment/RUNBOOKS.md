@@ -107,10 +107,20 @@ kubectl delete pod -l app=postgres -n knowledge-graph-analytics
 # Check for corruption
 kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser -d ragdb -c "SELECT datname FROM pg_database WHERE datistemplate = false;"
 
-# If corruption detected, restore from backup
+# If corruption detected, restore from backup. The restore loads only into
+# an EMPTY ragdb (the dump has no DROP statements), so drop and recreate the
+# database first. It fails, and changes nothing, if any component's
+# precondition fails.
 cd scripts
 ./backup-and-restore.sh restore <backup_id>
 ```
+
+After a Velero restore, Secrets are missing: backups exclude them. Re-create
+them from the secret manager by forcing an External Secrets resync
+(`kubectl annotate externalsecret --all -n knowledge-graph-analytics force-sync="$(date +%s)" --overwrite`).
+Helm release records are Secrets too, so run `helm upgrade --install` with the
+chart and values from git to re-create the release. See "Full Cluster
+Recovery" in `PRODUCTION_DEPLOYMENT_GUIDE.md`.
 
 #### Redis Cache Recovery
 ```bash

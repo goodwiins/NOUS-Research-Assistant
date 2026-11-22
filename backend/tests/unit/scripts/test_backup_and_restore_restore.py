@@ -1,16 +1,25 @@
 """backup-and-restore.sh restore and Velero behaviour (GOO-676).
 
-Restore synced `backups/<id>`, a prefix no upload ever uses (uploads live at
-`backups/postgres/postgres_backup_<id>.sql.gz` etc.), so it downloaded
-nothing, restored nothing and still exited 0. Velero backups also included
-Secrets while the help text said Secrets are never backed up.
+Restore used to sync `backups/<id>`, a prefix no upload uses (uploads are
+`backups/postgres/postgres_backup_<id>.sql.gz` and so on). So it downloaded
+nothing, restored nothing and still exited 0. With the prefix fixed, the
+restore paths behind it run for the first time, so these tests pin what they
+do:
+- preconditions for every component are checked before any is applied;
+- PostgreSQL loads only into an empty database, with ON_ERROR_STOP;
+- the Redis snapshot is copied into the pod;
+- components the script cannot restore are reported as skipped;
+- a run that restores nothing fails;
+- the plaintext dumps are removed afterwards.
 
-The script runs with a minimal environment and logging stubs for kubectl,
-aws, helm and velero; no cluster or bucket is touched.
+The script runs with a minimal environment and stubs for kubectl, aws, helm
+and velero. The stubs record their arguments and stdin. No cluster or bucket
+is touched.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import stat
 import subprocess
@@ -24,20 +33,47 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "backup-and-restore.sh"
 BACKUP_ID = "20261121_120000"
+DUMP_SQL = "SELECT 1;\n"
 
 LOGGING_STUB = """#!/bin/sh
 echo "$(basename "$0") $*" >> "$STUB_LOG"
-cat > /dev/null 2>&1 < /dev/null
 exit 0
 """
 
-# aws stub: `s3 sync SRC DEST ...` materialises the postgres dump when
-# STUB_HAS_BACKUP=1, mimicking a matching key in the bucket.
+# kubectl stub:
+# - `get pods -l app=redis` prints $STUB_REDIS_POD;
+# - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT;
+# - any other psql call stores its stdin in $STUB_PSQL_STDIN;
+# - `cp` copies its source to $STUB_CP_OUT.
+KUBECTL_STUB = """#!/bin/sh
+echo "kubectl $*" >> "$STUB_LOG"
+case "$*" in
+    *"get pods"*"app=redis"*) printf '%s' "${STUB_REDIS_POD:-}"; exit 0 ;;
+    *psql*-tAc*) echo "${STUB_TABLE_COUNT:-0}"; exit 0 ;;
+    *psql*) cat > "$STUB_PSQL_STDIN"; exit 0 ;;
+    cp\\ *) cp "$2" "$STUB_CP_OUT"; exit 0 ;;
+esac
+exit 0
+"""
+
+# aws stub: `s3 sync SRC DEST ...` creates the component files named in
+# $STUB_FILES (postgres, badgz, redis, neo4j), like matching keys in a bucket.
 AWS_STUB = """#!/bin/sh
 echo "aws $*" >> "$STUB_LOG"
-if [ "$1" = "s3" ] && [ "$2" = "sync" ] && [ "${STUB_HAS_BACKUP:-0}" = "1" ]; then
-    mkdir -p "$4/postgres"
-    printf 'SELECT 1;\\n' | gzip > "$4/postgres/postgres_backup_${STUB_BACKUP_ID}.sql.gz"
+if [ "$1" = "s3" ] && [ "$2" = "sync" ]; then
+    d="$4"
+    for f in ${STUB_FILES:-}; do
+        case "$f" in
+            postgres) mkdir -p "$d/postgres"
+                printf 'SELECT 1;\\n' | gzip > "$d/postgres/postgres_backup_${STUB_BACKUP_ID}.sql.gz" ;;
+            badgz) mkdir -p "$d/postgres"
+                printf 'not gzip' > "$d/postgres/postgres_backup_${STUB_BACKUP_ID}.sql.gz" ;;
+            redis) mkdir -p "$d/redis"
+                printf 'REDIS0011' | gzip > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
+            neo4j) mkdir -p "$d/neo4j"
+                printf 'dump' | gzip > "$d/neo4j/neo4j_backup_${STUB_BACKUP_ID}.dump.gz" ;;
+        esac
+    done
 fi
 exit 0
 """
@@ -49,13 +85,11 @@ def _bash() -> str:
     return bash
 
 
-def _run(
-    tmp_path: Path, args: list[str], extra_env: Optional[Dict[str, str]] = None
-) -> Tuple[subprocess.CompletedProcess, str]:
+def _stubs(tmp_path: Path) -> Tuple[Path, Dict[str, str]]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, body in (
-        ("kubectl", LOGGING_STUB),
+        ("kubectl", KUBECTL_STUB),
         ("helm", LOGGING_STUB),
         ("velero", LOGGING_STUB),
         ("aws", AWS_STUB),
@@ -72,11 +106,21 @@ def _run(
         "BACKUP_DIR": str(tmp_path / "backups"),
         "STUB_LOG": str(log),
         "STUB_BACKUP_ID": BACKUP_ID,
+        "STUB_PSQL_STDIN": str(tmp_path / "psql.stdin"),
+        "STUB_CP_OUT": str(tmp_path / "cp.out"),
     }
+    return log, env
+
+
+def _run(
+    tmp_path: Path, args: list[str], extra_env: Optional[Dict[str, str]] = None
+) -> Tuple[subprocess.CompletedProcess, str]:
+    log, env = _stubs(tmp_path)
     env.update(extra_env or {})
     result = subprocess.run(
         [_bash(), str(SCRIPT), *args],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         env=env,
         cwd=tmp_path,
@@ -85,21 +129,89 @@ def _run(
     return result, log.read_text()
 
 
+def _restore(
+    tmp_path: Path, files: str, **extra: str
+) -> Tuple[subprocess.CompletedProcess, str, str]:
+    result, calls = _run(
+        tmp_path, ["restore", BACKUP_ID], {"STUB_FILES": files, **extra}
+    )
+    return result, calls, result.stdout + result.stderr
+
+
+def _psql_stdin(tmp_path: Path) -> Optional[str]:
+    path = tmp_path / "psql.stdin"
+    return path.read_text() if path.exists() else None
+
+
 def test_restore_fails_when_no_backup_matches(tmp_path: Path) -> None:
-    result, calls = _run(tmp_path, ["restore", BACKUP_ID])
-    output = result.stdout + result.stderr
+    result, calls, output = _restore(tmp_path, "")
     assert result.returncode != 0, output
-    assert "Restore process initiated" not in output
     assert "kubectl exec" not in calls
 
 
-def test_restore_downloads_the_component_keys_for_the_id(tmp_path: Path) -> None:
-    result, calls = _run(tmp_path, ["restore", BACKUP_ID], {"STUB_HAS_BACKUP": "1"})
-    output = result.stdout + result.stderr
+def test_restore_syncs_only_the_keys_for_the_id(tmp_path: Path) -> None:
+    result, calls, output = _restore(tmp_path, "postgres")
     assert result.returncode == 0, output
     sync = next(line for line in calls.splitlines() if line.startswith("aws s3 sync"))
-    assert f"*_{BACKUP_ID}.*" in sync
-    assert "kubectl exec -i" in calls and "psql" in calls
+    assert f"--exclude * --include *_{BACKUP_ID}.*" in sync
+
+
+def test_restore_pipes_the_dump_into_psql_with_on_error_stop(tmp_path: Path) -> None:
+    result, calls, output = _restore(tmp_path, "postgres")
+    assert result.returncode == 0, output
+    assert _psql_stdin(tmp_path) == DUMP_SQL
+    load = [
+        line for line in calls.splitlines() if "psql" in line and "-tAc" not in line
+    ]
+    assert len(load) == 1 and "ON_ERROR_STOP=1" in load[0], calls
+
+
+def test_restore_refuses_a_populated_database(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "postgres", STUB_TABLE_COUNT="12")
+    assert result.returncode != 0, output
+    assert "not empty" in output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_restore_rejects_a_corrupt_dump_before_loading(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "badgz")
+    assert result.returncode != 0, output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_restore_checks_every_component_before_applying_any(tmp_path: Path) -> None:
+    # Redis cannot be restored (no pod), so Postgres must not be touched.
+    result, _calls, output = _restore(tmp_path, "postgres redis", STUB_REDIS_POD="")
+    assert result.returncode != 0, output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_redis_snapshot_is_copied_into_the_pod(tmp_path: Path) -> None:
+    result, calls, output = _restore(
+        tmp_path, "postgres redis", STUB_REDIS_POD="redis-0"
+    )
+    assert result.returncode == 0, output
+    cp = next(line for line in calls.splitlines() if line.startswith("kubectl cp "))
+    assert re.search(r" \S+/redis-0:/\S+$", cp), cp
+    assert (tmp_path / "cp.out").read_bytes().startswith(b"REDIS")
+
+
+def test_components_the_script_cannot_restore_are_reported(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "postgres neo4j")
+    assert result.returncode == 0, output
+    assert "SKIPPED" in output and "neo4j" in output
+
+
+def test_restore_that_restores_nothing_fails(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "neo4j")
+    assert result.returncode != 0, output
+    assert "kubectl exec" not in _calls
+
+
+def test_restore_removes_the_plaintext_dumps(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "postgres")
+    assert result.returncode == 0, output
+    assert not (tmp_path / "backups" / f"restore_{BACKUP_ID}").exists()
 
 
 def test_restore_rejects_a_malformed_backup_id(tmp_path: Path) -> None:
@@ -108,8 +220,19 @@ def test_restore_rejects_a_malformed_backup_id(tmp_path: Path) -> None:
     assert "aws s3 sync" not in calls
 
 
-def test_velero_backup_excludes_secrets() -> None:
-    code = SCRIPT.read_text(encoding="utf-8")
-    start = code.index("velero create backup")
-    command = code[start : code.index("--wait", start)]
-    assert "--exclude-resources secrets" in command
+def test_velero_backup_excludes_secrets(tmp_path: Path) -> None:
+    log, env = _stubs(tmp_path)
+    result = subprocess.run(
+        [_bash(), "-c", 'source "$1" && create_velero_backup', "_", str(SCRIPT)],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = log.read_text().splitlines()
+    create = [line for line in calls if line.startswith("velero create backup")]
+    assert len(create) == 1, calls
+    assert "--exclude-resources secrets" in create[0]

@@ -427,15 +427,36 @@ kubectl rollout restart deployment/postgres -n knowledge-graph-analytics
 #### Scenario 3: Full Cluster Recovery
 
 ```bash
-# Restore from Velero backup
+# Restore from Velero backup (it contains no Secrets)
 velero restore create --from-backup <backup-name> --namespace knowledge-graph-analytics
 
-# Restore application data
+# Re-create Secrets from the secret manager (Infisical, synced by External
+# Secrets): force a resync, then check that every ExternalSecret is Ready
+kubectl annotate externalsecret --all -n knowledge-graph-analytics \
+  force-sync="$(date +%s)" --overwrite
+kubectl get externalsecret -n knowledge-graph-analytics
+
+# Recover the Helm release record (see the note below)
+helm upgrade --install knowledge-graph-analytics \
+  infrastructure/helm/knowledge-graph-analytics \
+  -n knowledge-graph-analytics -f <the values files used for this cluster>
+
+# Restore application data. PostgreSQL loads only into an EMPTY ragdb
+# (drop and recreate it first). Redis is copied into the pod but not loaded,
+# and Neo4j, configs and uploads are listed as SKIPPED: restore those by hand.
 ./backup-and-restore.sh restore <backup-id>
 
 # Verify application functionality
 kubectl get pods -n knowledge-graph-analytics
 ```
+
+**Secrets and Helm history.** Velero backups run with
+`--exclude-resources secrets`, so no credential is ever written to the backup
+bucket. Helm 3 stores its release records as Secrets
+(`sh.helm.release.v1.<release>.v<n>`), so a restored namespace has no Helm
+history: `helm list` is empty and `helm rollback` has nothing to roll back to.
+The `helm upgrade --install` step above re-creates the release from the chart
+and values in git; the history restarts at revision 1.
 
 ### 3. Backup Testing
 
