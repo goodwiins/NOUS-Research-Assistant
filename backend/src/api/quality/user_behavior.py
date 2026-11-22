@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from src.core.database import get_db, get_db_sync
 from src.core.dependencies import get_current_user
+from src.core.thread_offload import to_thread_finish_on_cancel
 from src.models.user import User
 from src.schemas.quality_metrics import (
     AnalyticsExportRequest,
@@ -233,7 +234,7 @@ async def get_user_behavior_analytics(
         # Reject when the caller has no org, or the target is missing / in a
         # different org. Guard against None==None: a null-org caller must not
         # read other null-org users' behavior.
-        target_user = await asyncio.to_thread(
+        target_user = await to_thread_finish_on_cancel(
             lambda: db.query(UserModel).filter(UserModel.id == user_id).first()
         )
         if (
@@ -461,7 +462,7 @@ async def get_organization_user_behavior(
 
         # Get all users in the organization
 
-        users = await asyncio.to_thread(
+        users = await to_thread_finish_on_cancel(
             lambda: db.execute(
                 text("""
             SELECT DISTINCT u.id
@@ -659,7 +660,7 @@ async def generate_behavior_report(
             # missing target with the same 403 so this is not an existence oracle.
             from src.models.user import User as UserModel
 
-            target_user = await asyncio.to_thread(
+            target_user = await to_thread_finish_on_cancel(
                 lambda: db.query(UserModel)
                 .filter(UserModel.id == report_request.user_id)
                 .first()
@@ -732,7 +733,7 @@ async def export_behavior_data(
 
         elif export_request.data_type == "content_usage":
             # Sync Session query: keep it off the event loop (GOO-643 API-5).
-            export_data["content_usage"] = await asyncio.to_thread(
+            export_data["content_usage"] = await to_thread_finish_on_cancel(
                 _query_content_usage,
                 db,
                 current_user.organization_id,

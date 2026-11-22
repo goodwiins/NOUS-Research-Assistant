@@ -4,17 +4,18 @@ Redis caching layer for Evidence Agreement Meter
 Caches stance classifications and evidence meters for fast retrieval
 """
 
+import asyncio
 import hashlib
 import json
 import logging
 import random
 import time
+import weakref
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 import redis.asyncio as redis
-from redis.exceptions import ConnectionError as RedisConnectionError
-from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.exceptions import DataError, RedisError, ResponseError
 
 from ...core.config import settings
 
@@ -24,6 +25,16 @@ logger = logging.getLogger(__name__)
 # After a connection failure, skip Redis for this long instead of paying a
 # connect timeout on every request while it is down.
 _UNAVAILABLE_BACKOFF_SECONDS = 30.0
+
+# Errors that say "this command/value is bad", not "Redis is unusable"
+# (including ResponseError subclasses such as READONLY or NOPERM): they must
+# not switch the cache off for everyone.
+_COMMAND_ERRORS = (ResponseError, DataError)
+# Errors that mean Redis (or this client) is unusable right now: any other
+# RedisError (connection, timeout, auth, protocol errors...), socket errors,
+# asyncio timeouts, and the RuntimeError a client raises when used from a
+# different or closed event loop.
+_UNAVAILABLE_ERRORS = (RedisError, OSError, asyncio.TimeoutError, RuntimeError)
 
 
 class EvidenceCacheService:
@@ -38,16 +49,31 @@ class EvidenceCacheService:
     """
 
     def __init__(self):
+        # An injected client (tests) wins; otherwise one client per event
+        # loop. An asyncio Redis client's connections belong to the loop that
+        # opened them, and this service is a module-level singleton used from
+        # the API loop and from Celery's run_async loop alike (GOO-693).
         self.redis_client: Optional[redis.Redis] = None
+        self._loop_clients: (
+            "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, redis.Redis]"
+        ) = weakref.WeakKeyDictionary()
         self._unavailable_until = 0.0
 
     def _client(self) -> Optional[redis.Redis]:
-        """The client, created lazily (no I/O), or None while backing off."""
+        """The client for the running loop, created lazily (no I/O), or None
+        while backing off."""
         if time.monotonic() < self._unavailable_until:
             return None
-        if self.redis_client is None:
+        if self.redis_client is not None:
+            return self.redis_client
+        try:
+            loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        client = self._loop_clients.get(loop) if loop is not None else None
+        if client is None:
             try:
-                self.redis_client = redis.Redis.from_url(
+                client = redis.Redis.from_url(
                     settings.REDIS_URL or "redis://localhost:6379/0",
                     decode_responses=True,
                     socket_timeout=5,
@@ -58,13 +84,17 @@ class EvidenceCacheService:
                 logger.error(f"Failed to create Redis client: {e}")
                 self._mark_unavailable()
                 return None
-        return self.redis_client
+            if loop is not None:
+                self._loop_clients[loop] = client
+        return client
 
     def _mark_unavailable(self) -> None:
         self._unavailable_until = time.monotonic() + _UNAVAILABLE_BACKOFF_SECONDS
 
     def _note_failure(self, error: Exception) -> None:
-        if isinstance(error, (RedisConnectionError, RedisTimeoutError, OSError)):
+        if isinstance(error, _COMMAND_ERRORS):
+            return
+        if isinstance(error, _UNAVAILABLE_ERRORS):
             self._mark_unavailable()
 
     async def _ensure_connected(self) -> bool:
