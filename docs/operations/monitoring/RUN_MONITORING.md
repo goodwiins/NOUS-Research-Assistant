@@ -20,7 +20,7 @@ git clone <your-repo-url>
 cd RAG_system
 
 # Copy environment templates
-cp .env.example .env.production
+cp .env.example .env.prod
 cp .env.example .env.local
 
 # Configure your environment variables

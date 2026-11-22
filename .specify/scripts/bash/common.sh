@@ -94,19 +94,20 @@ get_feature_paths() {
     
     local feature_dir=$(get_feature_dir "$repo_root" "$current_branch")
     
-    cat <<EOF
-REPO_ROOT='$repo_root'
-CURRENT_BRANCH='$current_branch'
-HAS_GIT='$has_git_repo'
-FEATURE_DIR='$feature_dir'
-FEATURE_SPEC='$feature_dir/spec.md'
-IMPL_PLAN='$feature_dir/plan.md'
-TASKS='$feature_dir/tasks.md'
-RESEARCH='$feature_dir/research.md'
-DATA_MODEL='$feature_dir/data-model.md'
-QUICKSTART='$feature_dir/quickstart.md'
-CONTRACTS_DIR='$feature_dir/contracts'
-EOF
+    # Callers `eval` this output. The branch name comes from git or
+    # SPECIFY_FEATURE and may contain quotes or $(...), so every value is
+    # shell-escaped with %q instead of being wrapped in single quotes.
+    printf 'REPO_ROOT=%q\n' "$repo_root"
+    printf 'CURRENT_BRANCH=%q\n' "$current_branch"
+    printf 'HAS_GIT=%q\n' "$has_git_repo"
+    printf 'FEATURE_DIR=%q\n' "$feature_dir"
+    printf 'FEATURE_SPEC=%q\n' "$feature_dir/spec.md"
+    printf 'IMPL_PLAN=%q\n' "$feature_dir/plan.md"
+    printf 'TASKS=%q\n' "$feature_dir/tasks.md"
+    printf 'RESEARCH=%q\n' "$feature_dir/research.md"
+    printf 'DATA_MODEL=%q\n' "$feature_dir/data-model.md"
+    printf 'QUICKSTART=%q\n' "$feature_dir/quickstart.md"
+    printf 'CONTRACTS_DIR=%q\n' "$feature_dir/contracts"
 }
 
 check_file() { [[ -f "$1" ]] && echo "  ✓ $2" || echo "  ✗ $2"; }
