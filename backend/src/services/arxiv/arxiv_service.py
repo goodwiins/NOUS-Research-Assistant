@@ -8,6 +8,7 @@ for testing and evaluating the multimodal RAG system.
 import asyncio
 import json
 import logging
+import multiprocessing
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -214,6 +215,73 @@ _MAX_CONCURRENT_PDF_DOWNLOADS = 3
 # built from a model-supplied id, with redirects followed — one bad id could
 # pull an arbitrary-size body into memory. Real arXiv PDFs are well under this.
 _MAX_PDF_BYTES = 50 * 1024 * 1024
+
+
+def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
+    """Parse a PDF with pypdf. Sync and top-level so a worker process can run it."""
+    pdf_reader = PdfReader(BytesIO(pdf_content))
+
+    full_text = ""
+    page_texts = []
+    for page_num, page in enumerate(pdf_reader.pages):
+        try:
+            page_text = page.extract_text() or ""
+            page_texts.append({"page": page_num + 1, "text": page_text})
+            if page_text.strip():
+                full_text += f"[Page {page_num + 1}]\n{page_text}\n\n"
+        except Exception as e:
+            logger.warning(f"Failed to extract text from page {page_num + 1}: {e}")
+
+    metadata = {}
+    info = pdf_reader.metadata
+    if info:
+
+        def _field(name: str) -> str:
+            # Values can be IndirectObjects (or other pypdf objects) that hold
+            # a reference back to the reader; pickling one back from the
+            # worker process recurses until RecursionError. Resolve and
+            # coerce to plain str.
+            value = info.get(name)
+            if value is None:
+                return ""
+            try:
+                value = value.get_object()
+            except AttributeError:
+                pass
+            return "" if value is None else str(value)
+
+        metadata = {
+            "title": _field("/Title"),
+            "author": _field("/Author"),
+            "subject": _field("/Subject"),
+            "creator": _field("/Creator"),
+            "producer": _field("/Producer"),
+            "creation_date": _field("/CreationDate"),
+            "modification_date": _field("/ModDate"),
+        }
+
+    return {
+        "full_text": full_text,
+        "page_texts": page_texts,
+        "num_pages": len(pdf_reader.pages),
+        "metadata": metadata,
+    }
+
+
+async def _parse_pdf_off_loop(pdf_content: bytes) -> Dict[str, Any]:
+    """Run ``_extract_pdf_content_sync`` without blocking the event loop.
+
+    pypdf is pure Python, so a thread still holds the GIL; a worker process
+    (the bounded, per-call one ``arxiv_fulltext`` uses) keeps the API loop
+    free. A daemonic process (a Celery prefork worker) may not start
+    children, so there the parse falls back to a thread.
+    """
+    if multiprocessing.current_process().daemon:
+        return await asyncio.to_thread(_extract_pdf_content_sync, pdf_content)
+    from src.services.integrations.arxiv_fulltext import run_in_subprocess
+
+    return await run_in_subprocess(_extract_pdf_content_sync, pdf_content)
+
 
 _pdf_semaphore: Optional[asyncio.Semaphore] = None
 _pdf_semaphore_loop: Any = None
@@ -805,6 +873,10 @@ class ArXivIngestionService:
         """
         Extract text content from PDF
 
+        The pypdf parse is CPU-bound and a PDF may be up to _MAX_PDF_BYTES, so
+        it runs off the event loop (GOO-642/IS-6): in a worker process of its
+        own where possible, else in a thread.
+
         Args:
             pdf_content: PDF file content as bytes
 
@@ -812,44 +884,7 @@ class ArXivIngestionService:
             Dictionary with extracted content
         """
         try:
-            pdf_file = BytesIO(pdf_content)
-            pdf_reader = PdfReader(pdf_file)
-
-            # Extract text from all pages
-            full_text = ""
-            page_texts = []
-
-            for page_num, page in enumerate(pdf_reader.pages):
-                try:
-                    page_text = page.extract_text() or ""
-                    page_texts.append({"page": page_num + 1, "text": page_text})
-                    if page_text.strip():
-                        full_text += f"[Page {page_num + 1}]\n{page_text}\n\n"
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to extract text from page {page_num + 1}: {e}"
-                    )
-
-            # Extract metadata
-            metadata = {}
-            if pdf_reader.metadata:
-                metadata = {
-                    "title": pdf_reader.metadata.get("/Title", ""),
-                    "author": pdf_reader.metadata.get("/Author", ""),
-                    "subject": pdf_reader.metadata.get("/Subject", ""),
-                    "creator": pdf_reader.metadata.get("/Creator", ""),
-                    "producer": pdf_reader.metadata.get("/Producer", ""),
-                    "creation_date": str(pdf_reader.metadata.get("/CreationDate", "")),
-                    "modification_date": str(pdf_reader.metadata.get("/ModDate", "")),
-                }
-
-            return {
-                "full_text": full_text,
-                "page_texts": page_texts,
-                "num_pages": len(pdf_reader.pages),
-                "metadata": metadata,
-            }
-
+            return await _parse_pdf_off_loop(pdf_content)
         except Exception as e:
             logger.error(f"Failed to extract PDF content: {e}")
             raise IngestionError(f"PDF extraction failed: {e}")

@@ -125,6 +125,11 @@ async def _run_in_subprocess(fn: Callable[..., _T], *args: Any) -> _T:
             executor.shutdown(wait=False, cancel_futures=True)
 
 
+# Public name for other modules that parse PDFs off the event loop
+# (ArXivIngestionService.extract_pdf_content); same slots, same worker policy.
+run_in_subprocess = _run_in_subprocess
+
+
 async def _extract_in_subprocess(pdf_path: str) -> str:
     """Parse ``pdf_path`` with pypdf in a worker process of its own."""
     return await _run_in_subprocess(_extract, pdf_path)

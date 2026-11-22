@@ -583,13 +583,23 @@ def process_document_ingestion(self, job_id: str):
         job.update_progress("Extracting entities", 50)
         commit_if_active()
 
+        entities = None
         if document.content_text:
             entities = run_async(
                 processing_service.process_entity_extraction(
                     document, document.content_text
                 )
             )
+            if entities is None:
+                # Extraction errored: keep the entities a previous run wrote
+                # rather than resetting them to an empty set.
+                logger.warning(
+                    "Entity extraction failed for document %s; keeping its "
+                    "existing entities",
+                    document.id,
+                )
 
+        if entities is not None:
             # Replay-safe write: drop any spaCy/regex entities left by a prior
             # crashed run for this document before inserting the fresh set, so an
             # acks_late reclaim replaces rather than duplicates them. The delete
@@ -734,7 +744,7 @@ def process_document_ingestion(self, job_id: str):
         job.complete_job(
             result={
                 "text_extracted": bool(document.content_text),
-                "entities_found": len(entities) if "entities" in locals() else 0,
+                "entities_found": len(entities or []),
                 # is_embedded is the source of truth (set after DO KB sync).
                 # embedding_id is the dead Qdrant vector-id column (always NULL
                 # now), so bool(embedding_id) always reported False.
