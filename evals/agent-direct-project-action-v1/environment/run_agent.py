@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -85,6 +86,35 @@ def json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _proxy_generated(response: "httpx.Response") -> bool:
+    """True when the proxy itself produced the response (Squid error page)."""
+    return "x-squid-error" in response.headers
+
+
+def approved_probe_reachable(response: "httpx.Response") -> bool:
+    """The approved model host answered through the proxy.
+
+    Any 1xx-4xx status from the upstream counts (a model API root commonly
+    answers 401/404). A 5xx, or any response the proxy generated itself
+    (denied, upstream unreachable, gateway timeout), does not.
+    """
+    return 100 <= response.status_code <= 499 and not _proxy_generated(response)
+
+
+def denied_probe_response_blocked(response: "httpx.Response") -> bool:
+    """A response to the denied HTTPS probe means the CONNECT tunnel opened.
+
+    The destination itself answering 403 is not a proxy block. Only a 403 the
+    proxy generated counts.
+    """
+    return response.status_code == 403 and _proxy_generated(response)
+
+
+def denied_probe_error_blocked(exc: Exception) -> bool:
+    """httpx reports a refused CONNECT as ProxyError("<status> <reason>")."""
+    return re.match(r"403\b", str(exc).strip()) is not None
+
+
 async def bootstrap_schema() -> None:
     """Provision the disposable benchmark DB from production ORM metadata.
 
@@ -129,7 +159,7 @@ def validate_network_boundary() -> dict[str, Any]:
         with httpx.Client(timeout=10, follow_redirects=False) as client:
             allowed_response = client.get(endpoint.rstrip("/") + "/")
             allowed_status = allowed_response.status_code
-            allowed_reachable = 100 <= allowed_status <= 599
+            allowed_reachable = approved_probe_reachable(allowed_response)
     except httpx.HTTPError as exc:
         raise InfrastructureFailure(
             f"approved model-host proxy preflight failed: {type(exc).__name__}"
@@ -140,12 +170,12 @@ def validate_network_boundary() -> dict[str, Any]:
         with httpx.Client(timeout=10, follow_redirects=False) as client:
             blocked_response = client.get("https://example.com/")
             blocked_status = blocked_response.status_code
-            unrelated_blocked = blocked_status == 403
+            unrelated_blocked = denied_probe_response_blocked(blocked_response)
     except httpx.ProxyError as exc:
         # For a denied HTTPS CONNECT, httpx surfaces Squid's 403 as a
         # ProxyError instead of an HTTP response.  That is the expected proof
         # that the proxy rejected an unapproved destination.
-        unrelated_blocked = "403" in str(exc)
+        unrelated_blocked = denied_probe_error_blocked(exc)
         blocked_status = 403 if unrelated_blocked else None
     except httpx.HTTPError as exc:
         raise InfrastructureFailure(

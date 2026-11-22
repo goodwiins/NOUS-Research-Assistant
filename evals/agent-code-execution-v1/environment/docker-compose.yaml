@@ -80,6 +80,10 @@ services:
   mock-services:
     build:
       context: ./mock_services
+    environment:
+      # Reachable from `main` over the internal-only network; /execute still
+      # requires a sandbox access token issued by this service.
+      MOCK_BIND_HOST: 0.0.0.0
     networks:
       - benchmark-internal
     healthcheck:
