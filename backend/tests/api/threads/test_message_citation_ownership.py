@@ -7,44 +7,51 @@ return that document's title and type.
 
 from __future__ import annotations
 
-from uuid import uuid4
+from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models import Citation, Document, DocumentType, MessageRole
-from src.schemas.chat import ChatMessageCreate, CitationCreate
+from src.models import Citation, Document, DocumentType
+from src.schemas.chat import ChatMessageCreate, CitationCreate, MessageRole
 from src.services.threads.chat_service import ChatService
 
 pytestmark = pytest.mark.integration
 
 
-async def _seed_document(db_session, organization_id) -> Document:
-    doc = Document(
-        id=uuid4(),
-        title="secret-title",
-        filename="secret.pdf",
-        file_path="s3://bucket/secret.pdf",
-        file_size_bytes=123,
-        mime_type="application/pdf",
-        document_type=DocumentType.PDF,
-        organization_id=organization_id,
-        is_deleted=False,
+async def _seed_document(db_session: AsyncSession, organization_id: Any) -> UUID:
+    """Insert a document owned by ``organization_id`` and return its id."""
+    doc_id = uuid4()
+    db_session.add(
+        Document(
+            id=doc_id,
+            title="secret-title",
+            filename="secret.pdf",
+            file_path="s3://bucket/secret.pdf",
+            file_size_bytes=123,
+            mime_type="application/pdf",
+            document_type=DocumentType.PDF,
+            organization_id=organization_id,
+            is_deleted=False,
+        )
     )
-    db_session.add(doc)
     await db_session.commit()
-    await db_session.refresh(doc)
-    return doc
+    return doc_id
 
 
 async def test_foreign_org_citation_is_unlinked_and_owned_kept(
-    db_session, thread_factory, user_factory, organization_factory
-):
+    db_session: AsyncSession,
+    thread_factory: Any,
+    user_factory: Any,
+    organization_factory: Any,
+) -> None:
     org_b = await organization_factory()
-    foreign_doc = await _seed_document(db_session, org_b.id)
+    foreign_doc_id = await _seed_document(db_session, org_b.id)
 
     user_a = await user_factory()
-    owned_doc = await _seed_document(db_session, user_a.organization_id)
+    owned_doc_id = await _seed_document(db_session, user_a.organization_id)
     thread = await thread_factory(user=user_a)
 
     message = await ChatService(db_session).create_message(
@@ -53,8 +60,8 @@ async def test_foreign_org_citation_is_unlinked_and_owned_kept(
             content="answer",
             role=MessageRole.ASSISTANT,
             citations=[
-                CitationCreate(document_id=foreign_doc.id, chunk_index=0),
-                CitationCreate(document_id=owned_doc.id, chunk_index=1),
+                CitationCreate(document_id=foreign_doc_id, chunk_index=0),
+                CitationCreate(document_id=owned_doc_id, chunk_index=1),
             ],
         ),
         user_id=user_a.id,
@@ -66,4 +73,4 @@ async def test_foreign_org_citation_is_unlinked_and_owned_kept(
         .where(Citation.message_id == message.id)
         .order_by(Citation.chunk_index)
     )
-    assert list(rows.scalars().all()) == [None, owned_doc.id]
+    assert list(rows.scalars().all()) == [None, owned_doc_id]

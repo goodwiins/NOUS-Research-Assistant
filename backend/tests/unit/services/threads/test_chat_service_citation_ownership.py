@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator, Sequence
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -112,7 +113,7 @@ async def _create_with_citations(
     return message, owned_filter
 
 
-async def _stored_citations(session: AsyncSession, message_id: uuid.UUID) -> list:
+async def _stored_citations(session: AsyncSession, message_id: Any) -> list:
     rows = await session.execute(
         select(Citation)
         .where(Citation.message_id == message_id)
