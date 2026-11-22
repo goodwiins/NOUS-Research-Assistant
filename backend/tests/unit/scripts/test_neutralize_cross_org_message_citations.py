@@ -9,7 +9,8 @@ it belongs to the *citing user's* organization and is not soft-deleted.
 The one-off script must match that as closely as stored data allows:
 
 * User-authored messages: exact parity, so the document must be in the
-  author's org (case B: the thread's own org is not enough).
+  author's org (case B: the thread's own org is not enough), and an author
+  with no org keeps nothing, like ``filter_owned_document_ids``.
 * Assistant/system messages have no author, so the document may be in any org
   that legitimately takes part in the thread: workspace org, owner org, thread
   creator org, or an active member's org (case A: a cross-org member's own
@@ -19,6 +20,8 @@ The one-off script must match that as closely as stored data allows:
 * Dry run by default, writes nothing, but reports would_* counts; every
   affected row is emitted as one NDJSON audit record in both modes, with no
   titles; the concurrent-edit guard holds; a rerun is a no-op.
+* ``--apply`` needs ``--audit-file``; a batch's audit records are durable
+  before it commits, and an audit write failure rolls the batch back.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import scripts.neutralize_cross_org_message_citations as script
-from scripts.neutralize_cross_org_message_citations import neutralize
+from scripts.neutralize_cross_org_message_citations import AuditLog, neutralize
 from src.models.base import Base
 from src.models.chat_message import ChatMessage
 from src.models.citation import Citation
@@ -49,6 +52,7 @@ from src.models.document import Document, DocumentType
 from src.models.thread import Thread
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMember
+from src.services.threads.workspace_access import filter_owned_document_ids
 
 pytestmark = pytest.mark.unit
 
@@ -73,6 +77,22 @@ _TABLES = [
 ]
 
 _ZERO_WRITES = {"unlinked": 0, "copied_fields_cleared": 0}
+
+
+class _Capture(AuditLog):
+    """In-memory audit sink: keeps every record, sync is a no-op."""
+
+    def __init__(self) -> None:
+        self.records: List[Dict[str, Any]] = []
+
+    def write(self, record: Dict[str, Any]) -> None:
+        self.records.append(record)
+
+    def sync(self) -> None:
+        pass
+
+    def events(self, name: str) -> List[Dict[str, Any]]:
+        return [r for r in self.records if r["event"] == name]
 
 
 async def _make_engine(url: str) -> AsyncEngine:
@@ -188,6 +208,7 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> Dict[str, UUID]:
         removed_c = await w.user(org_c)
         creator_c = await w.user(org_c)
         orphan = await w.user(None)
+        no_org = await w.user(None)
 
         ws = await w.workspace(owner_a, org_a)
         await w.member(ws, member_b)
@@ -197,6 +218,8 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> Dict[str, UUID]:
         thread = await w.thread(ws, owner_a)
         bot = await w.message(thread)
         by_b = await w.message(thread, member_b)
+        await w.member(ws, no_org)
+        by_no_org = await w.message(thread, no_org)
 
         legacy_ws = await w.workspace(owner_a, None)  # NULL org -> owner's org
         legacy_bot = await w.message(await w.thread(legacy_ws, owner_a))
@@ -245,6 +268,9 @@ async def _seed(factory: async_sessionmaker[AsyncSession]) -> Dict[str, UUID]:
                 bot, None, chunk_index=11, external_reference_id="arxiv:1"
             ),
             "standalone": await w.citation(None, c_doc, chunk_index=12),
+            # An author with no org: #2195 keeps none of their documents,
+            # even one of the thread's own org.
+            "orgless_author": await w.citation(by_no_org, own_doc, chunk_index=13),
         }
         await db.commit()
     return ids
@@ -265,11 +291,11 @@ async def _rows(factory: async_sessionmaker[AsyncSession]) -> Dict[UUID, Any]:
 
 
 _FIRST_PASS = {
-    "scanned": 11,
-    "cross_org": 4,
+    "scanned": 12,
+    "cross_org": 5,
     "deleted_document": 1,
     "undetermined_org": 1,
-    "would_unlink": 5,
+    "would_unlink": 6,
     "would_clear_fields": 2,
 }
 _UNLINKED = (
@@ -278,6 +304,7 @@ _UNLINKED = (
     "author_not_owner",
     "legacy_foreign",
     "deleted",
+    "orgless_author",
 )
 _KEPT = (
     "own",
@@ -297,14 +324,16 @@ async def test_dry_run_reports_would_counts_audits_and_writes_nothing(
 ) -> None:
     ids = await _seed(factory)
     before = await _rows(factory)
-    audit: List[Dict[str, Any]] = []
+    audit = _Capture()
 
-    result = await neutralize(factory, apply=False, audit=audit.append)
+    result = await neutralize(factory, apply=False, audit=audit)
 
     assert result == {**_FIRST_PASS, **_ZERO_WRITES}
     assert await _rows(factory) == before
-    assert {UUID(r["citation_id"]) for r in audit} == {ids[k] for k in _UNLINKED}
-    assert all(r["applied"] is False for r in audit)
+    cited = audit.events("citation")
+    assert {UUID(r["citation_id"]) for r in cited} == {ids[k] for k in _UNLINKED}
+    assert all(r["applied"] is False and r["staged"] is False for r in cited)
+    assert audit.events("batch_committed") == []
 
 
 @pytest.mark.asyncio
@@ -314,8 +343,8 @@ async def test_apply_unlinks_only_what_2195_would_have_dropped(
     ids = await _seed(factory)
     before = await _rows(factory)
 
-    first = await neutralize(factory, apply=True)
-    assert first == {**_FIRST_PASS, "unlinked": 5, "copied_fields_cleared": 2}
+    first = await neutralize(factory, apply=True, audit=_Capture())
+    assert first == {**_FIRST_PASS, "unlinked": 6, "copied_fields_cleared": 2}
 
     after = await _rows(factory)
     for key in _UNLINKED:
@@ -331,7 +360,7 @@ async def test_apply_unlinks_only_what_2195_would_have_dropped(
     # A soft-deleted document of the thread's own org: link dropped, title kept.
     assert after[ids["deleted"]].document_title == "gone"
 
-    second = await neutralize(factory, apply=True)
+    second = await neutralize(factory, apply=True, audit=_Capture())
     assert second == {
         "scanned": 6,
         "cross_org": 0,
@@ -345,28 +374,96 @@ async def test_apply_unlinks_only_what_2195_would_have_dropped(
 
 
 @pytest.mark.asyncio
+async def test_user_authored_citations_match_filter_owned_document_ids(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Differential: for every user-authored citation, the script keeps the
+    link iff #2195's real ``filter_owned_document_ids`` would have kept it
+    (an author without an org keeps nothing)."""
+    ids = await _seed(factory)
+    async with factory() as db:
+        authored = (
+            await db.execute(
+                select(Citation.id, Citation.document_id, ChatMessage.user_id)
+                .join(ChatMessage, ChatMessage.id == Citation.message_id)
+                .where(
+                    ChatMessage.user_id.is_not(None),
+                    Citation.document_id.is_not(None),
+                )
+            )
+        ).all()
+        expected = {
+            row.id: bool(
+                await filter_owned_document_ids(db, [row.document_id], row.user_id)
+            )
+            for row in authored
+        }
+    assert ids["orgless_author"] in expected and not expected[ids["orgless_author"]]
+    assert set(expected.values()) == {True, False}
+
+    await neutralize(factory, apply=True, audit=_Capture())
+
+    after = await _rows(factory)
+    assert {cid: after[cid].document_id is not None for cid in expected} == expected
+
+
+@pytest.mark.asyncio
 async def test_audit_records_allow_restore_and_carry_no_titles(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     ids = await _seed(factory)
     before = await _rows(factory)
-    audit: List[Dict[str, Any]] = []
+    audit = _Capture()
 
-    await neutralize(factory, apply=True, audit=audit.append)
+    await neutralize(factory, apply=True, audit=audit, target="sqlite://x")
 
-    by_id = {UUID(r["citation_id"]): r for r in audit}
+    header = audit.records[0]
+    assert header["event"] == "run_start" and header["mode"] == "apply"
+    run_id = header["run_id"]
+    assert all(r["run_id"] == run_id and r["timestamp"] for r in audit.records)
+    by_id = {UUID(r["citation_id"]): r for r in audit.events("citation")}
+    committed = {
+        UUID(cid)
+        for marker in audit.events("batch_committed")
+        for cid in marker["applied_citation_ids"]
+    }
+    assert committed == {ids[k] for k in _UNLINKED}
+
     foreign = by_id[ids["foreign"]]
-    assert foreign["applied"] is True
+    # Written before the commit, so never claims to be applied by itself.
+    assert foreign["applied"] is False and foreign["staged"] is True
     assert foreign["reason"] == "cross_org"
     assert UUID(foreign["old_document_id"]) == before[ids["foreign"]].document_id
+    assert UUID(foreign["message_id"])
     assert foreign["fields_cleared"] == ["document_title", "document_type"]
+    assert foreign["document_title_cleared"] is True
     assert foreign["old_document_type"] == "pdf"
-    assert {"doc_org", "thread_org", "author_org"} <= foreign.keys()
+    assert {"doc_org", "thread_org", "author_org", "batch"} <= foreign.keys()
+    assert by_id[ids["foreign_own_title"]]["document_title_cleared"] is False
     assert by_id[ids["deleted"]]["reason"] == "deleted_document"
     assert by_id[ids["deleted"]]["fields_cleared"] == []
-    dumped = json.dumps(audit)
-    for title in ("SECRET", "client label", "ours", "gone"):
+    dumped = json.dumps(audit.records)
+    for title in ("SECRET", "client label", "ours", "gone", "client snippet"):
         assert title not in dumped
+
+
+class _FailingSync(_Capture):
+    def sync(self) -> None:
+        if self.events("citation"):
+            raise OSError("disk full")
+
+
+@pytest.mark.asyncio
+async def test_audit_write_failure_rolls_back_and_unlinks_nothing(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(factory)
+    before = await _rows(factory)
+
+    with pytest.raises(script.AuditWriteError):
+        await neutralize(factory, apply=True, audit=_FailingSync())
+
+    assert await _rows(factory) == before
 
 
 @pytest.mark.asyncio
@@ -396,10 +493,17 @@ async def test_concurrent_edit_is_not_overwritten(
         return await original(db, workspace_ids)
 
     monkeypatch.setattr(script, "_member_orgs", edit_between_read_and_write)
-    result = await neutralize(factory, apply=True)
+    audit = _Capture()
+    result = await neutralize(factory, apply=True, audit=audit)
 
-    assert result["unlinked"] == 4
+    assert result["unlinked"] == 5
     assert (await _rows(factory))[ids["foreign"]].document_id == replacement
+    committed = {
+        cid
+        for m in audit.events("batch_committed")
+        for cid in m["applied_citation_ids"]
+    }
+    assert str(ids["foreign"]) not in committed
 
 
 @pytest.mark.asyncio
@@ -407,9 +511,12 @@ async def test_small_batches_give_the_same_result(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _seed(factory)
-    result = await neutralize(factory, apply=True, batch_size=1)
-    assert result["unlinked"] == 5
-    assert (await neutralize(factory, apply=True, batch_size=1))["would_unlink"] == 0
+    audit = _Capture()
+    result = await neutralize(factory, apply=True, batch_size=1, audit=audit)
+    assert result["unlinked"] == 6
+    assert len(audit.events("batch_committed")) == 6
+    again = await neutralize(factory, apply=True, batch_size=1, audit=_Capture())
+    assert again["would_unlink"] == 0
 
 
 def _file_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
@@ -433,6 +540,17 @@ def _file_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     return url
 
 
+def _file_rows(url: str) -> Dict[UUID, Any]:
+    async def read() -> Dict[UUID, Any]:
+        engine = create_async_engine(url)
+        try:
+            return await _rows(async_sessionmaker(engine))
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(read())
+
+
 def test_main_dry_run_prints_would_counts_target_and_audit_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -446,15 +564,67 @@ def test_main_dry_run_prints_would_counts_target_and_audit_file(
     out, err = capsys.readouterr()
     summary = json.loads(out.strip().splitlines()[-1])
     assert summary["mode"] == "dry-run"
-    assert summary["would_unlink"] == 5
+    assert summary["would_unlink"] == 6
     assert summary["would_clear_fields"] == 2
     assert "db.internal" in err and "hunter2" not in err
-    lines = audit_file.read_text().splitlines()
-    assert len(lines) == 5
-    assert all(json.loads(line)["applied"] is False for line in lines)
+    records = [json.loads(line) for line in audit_file.read_text().splitlines()]
+    assert [r["event"] for r in records] == ["run_start"] + ["citation"] * 6 + [
+        "summary"
+    ]
+    assert records[0]["target"] == "postgresql+asyncpg://db.internal:5432"
+    assert summary["run_id"] == records[0]["run_id"]
 
 
-def test_main_audits_to_stdout_without_audit_file(
+def test_main_apply_appends_a_second_run_with_its_own_header(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _file_db(tmp_path, monkeypatch)
+    audit_file = tmp_path / "audit.ndjson"
+
+    script.main(["--audit-file", str(audit_file)])
+    script.main(["--apply", "--audit-file", str(audit_file)])
+
+    records = [json.loads(line) for line in audit_file.read_text().splitlines()]
+    headers = [r for r in records if r["event"] == "run_start"]
+    assert [h["mode"] for h in headers] == ["dry-run", "apply"]
+    assert headers[0]["run_id"] != headers[1]["run_id"]
+    assert [r["event"] for r in records].count("batch_committed") == 1
+
+
+def test_main_audit_fsync_failure_exits_nonzero_and_unlinks_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = _file_db(tmp_path, monkeypatch)
+    before = _file_rows(url)
+    calls = {"n": 0}
+
+    def failing_fsync(fd: int) -> None:
+        calls["n"] += 1
+        if calls["n"] > 1:  # the run_start header syncs fine; the batch does not
+            raise OSError("disk full")
+
+    monkeypatch.setattr(script.os, "fsync", failing_fsync)
+    with pytest.raises(SystemExit) as excinfo:
+        script.main(["--apply", "--audit-file", str(tmp_path / "audit.ndjson")])
+
+    assert excinfo.value.code == 1
+    assert _file_rows(url) == before
+
+
+def test_apply_requires_an_audit_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_open() -> Any:
+        raise AssertionError("--apply without --audit-file reached the database")
+
+    monkeypatch.setattr(script, "_open_target", must_not_open)
+    with pytest.raises(SystemExit) as excinfo:
+        script.main(["--apply"])
+    assert excinfo.value.code == 2
+
+
+def test_dry_run_audits_to_stdout_without_audit_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -464,17 +634,20 @@ def test_main_audits_to_stdout_without_audit_file(
     script.main([])
 
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert [r["event"] for r in records] == ["citation"] * 5 + ["summary"]
+    assert [r["event"] for r in records] == ["run_start"] + ["citation"] * 6 + [
+        "summary"
+    ]
 
 
 @pytest.mark.parametrize("abbrev", ["--a", "--ap", "--appl"])
 def test_abbreviated_apply_is_rejected(
-    abbrev: str, monkeypatch: pytest.MonkeyPatch
+    abbrev: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def must_not_open() -> Any:
         raise AssertionError("an abbreviation reached the database")
 
     monkeypatch.setattr(script, "_open_target", must_not_open)
+    # --audit-file is given, so only the abbreviation itself can be rejected.
     with pytest.raises(SystemExit) as excinfo:
-        script.main([abbrev])
+        script.main([abbrev, "--audit-file", str(tmp_path / "a.ndjson")])
     assert excinfo.value.code == 2

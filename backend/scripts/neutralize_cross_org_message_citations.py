@@ -5,30 +5,32 @@ from the request without an ownership check. The message presenter falls back
 to ``citation.document.title`` / ``document_type``, so a citation that names
 another organization's document still shows that document whenever its thread
 is reopened. #2195 stops new ones (``filter_owned_document_ids``: the document
-must belong to the *citing user's* org and not be soft-deleted); this one-off
-cleans up old rows.
+must belong to the *citing user's* org and not be soft-deleted; a caller with
+no org keeps nothing); this one-off cleans up old rows.
 
 Examples (from ``backend/``):
-  python -m scripts.neutralize_cross_org_message_citations                 # dry run (default)
+  python -m scripts.neutralize_cross_org_message_citations                 # dry run, audit to stdout
   python -m scripts.neutralize_cross_org_message_citations --audit-file a.ndjson
   python -m scripts.neutralize_cross_org_message_citations --apply --audit-file a.ndjson
 
 Which orgs a citation's document may belong to:
 
-* User-authored message whose author has an org: exactly that org, the same
+* User-authored message (``user_id`` set): exactly the author's org, the same
   rule #2195 applies at write time. A document of the thread's own org that
-  the (cross-org member) author does not belong to is unlinked.
-* Assistant/system message (``user_id`` is NULL), or an author with no org:
-  the citing user is unknown, so exact parity is impossible. The document may
-  belong to any org that legitimately takes part in the thread: the
-  workspace's org, the workspace owner's org, the thread creator's org, or the
-  org of any active (not soft-deleted) workspace member. Workspace membership
-  crosses orgs by design, so a cross-org member's own document is kept.
+  the (cross-org member) author does not belong to is unlinked. An author with
+  no org (or a missing user row) keeps NONE of their document citations,
+  matching ``filter_owned_document_ids`` for an org-less caller.
+* Assistant/system message (``user_id`` is NULL): the citing user is unknown,
+  so exact parity is impossible. The document may belong to any org that
+  legitimately takes part in the thread: the workspace's org, the workspace
+  owner's org, the thread creator's org, or the org of any active (not
+  soft-deleted) workspace member. Workspace membership crosses orgs by
+  design, so a cross-org member's own document is kept.
   RESIDUAL LEAK: an assistant citation to a document of one participating org
   that the requesting user could not see is kept, because the stored row
-  does not say who asked. Removed members' orgs do not count.
-* If none of those orgs is known, the row is counted as ``undetermined_org``
-  and left alone.
+  does not say who asked. Removed members' orgs do not count. If none of
+  those orgs is known, the row is counted as ``undetermined_org`` and left
+  alone.
 
 What changes, per citation attached to a chat message with a ``document_id``:
 
@@ -44,16 +46,29 @@ Same-org live citations, citations without a document, and citations not
 attached to a message are never touched. (``citations.document_id`` is
 ``ON DELETE SET NULL``, so a dangling id cannot exist.)
 
-Audit trail: every affected row is written as one NDJSON record
-(``"event": "citation"``) in BOTH modes, to ``--audit-file`` (appended) or
-stdout: citation id, old document id, old document type when it is cleared,
-document/thread/author org, reason, fields cleared, and whether it was
-applied. No titles or snippets. A cleared title equals the document's own
-title, so ``old_document_id`` is enough to restore it. With ``--apply``,
-records are written only after their batch commits. The last stdout line is
-the ``"event": "summary"`` counts: dry runs report ``would_unlink`` /
-``would_clear_fields``; ``unlinked`` / ``copied_fields_cleared`` count rows
-actually written. The redacted target database is printed to stderr first.
+Audit trail (NDJSON; ``--apply`` REQUIRES ``--audit-file``, which is appended
+to; a dry run may use stdout). Every line carries ``run_id`` and ``timestamp``:
+
+* ``run_start``: mode, redacted target database, batch size.
+* ``citation``, one per affected row, in BOTH modes: batch number, citation
+  and message id, old document id, old document type when cleared,
+  ``document_title_cleared`` (a boolean, never the text), fields cleared,
+  document/thread/author org, reason, ``staged`` (the guarded UPDATE matched)
+  and ``applied: false``. No titles or snippets. A cleared title equals the
+  document's own title, so ``old_document_id`` is enough to restore it.
+* ``batch_committed`` (``--apply`` only): the ids of that batch's citations
+  that were actually written. A citation is applied iff its id appears in a
+  ``batch_committed`` line of the same run.
+* ``summary``: the counts.
+
+Write-ahead: with ``--apply``, a batch's ``citation`` records are written,
+flushed and fsynced BEFORE the batch commits. If that fails, the batch is
+rolled back and the script exits 1, so nothing is ever unlinked without a
+durable record. The ``batch_committed`` marker is written after the commit.
+
+Counts: dry runs report ``would_unlink`` / ``would_clear_fields``; ``unlinked``
+/ ``copied_fields_cleared`` count rows actually committed. The redacted target
+database is also printed to stderr first.
 
 Idempotent: unlinked rows have no ``document_id`` and drop out of the next
 scan, so a rerun reports ``would_unlink: 0``. ``--apply`` commits per batch.
@@ -65,10 +80,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, cast
-from uuid import UUID
+from datetime import datetime, timezone
+from typing import IO, Any, Dict, List, Optional, Sequence, Set, Tuple, cast
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
@@ -88,11 +105,33 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = 500
 
-AuditSink = Callable[[Dict[str, Any]], None]
-
 _Owner = aliased(User, name="owner")
 _Creator = aliased(User, name="creator")
 _Author = aliased(User, name="author")
+
+
+class AuditWriteError(RuntimeError):
+    """The audit trail could not be made durable; the batch was rolled back."""
+
+
+class AuditLog:
+    """NDJSON audit sink. ``sync`` makes everything written so far durable."""
+
+    def __init__(self, stream: IO[str], *, durable: bool) -> None:
+        self._stream = stream
+        self._durable = durable
+
+    def write(self, record: Dict[str, Any]) -> None:
+        self._stream.write(json.dumps(record) + "\n")
+
+    def sync(self) -> None:
+        self._stream.flush()
+        if self._durable:
+            os.fsync(self._stream.fileno())
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _type_value(document_type: Any) -> Optional[str]:
@@ -108,6 +147,7 @@ def _batch_query(after: Optional[UUID], batch_size: int) -> Any:
     stmt = (
         select(
             Citation.id,
+            Citation.message_id,
             Citation.document_id,
             Citation.document_title,
             Citation.document_type,
@@ -157,12 +197,15 @@ async def _member_orgs(
     return orgs
 
 
-def _allowed_orgs(row: Any, member_orgs: Dict[UUID, Set[UUID]]) -> Set[UUID]:
-    if row.author_id is not None and row.author_org is not None:
-        return {row.author_org}  # exact #2195 parity
+def _allowed_orgs(row: Any, member_orgs: Dict[UUID, Set[UUID]]) -> Optional[Set[UUID]]:
+    """Orgs the cited document may belong to; None when undeterminable."""
+    if row.author_id is not None:
+        # Exact #2195 parity; an org-less author keeps nothing (empty set).
+        return set() if row.author_org is None else {row.author_org}
     candidates = {row.workspace_org, row.owner_org, row.creator_org}
     candidates |= member_orgs.get(row.workspace_id, set())
-    return {org for org in candidates if org is not None}
+    allowed = {org for org in candidates if org is not None}
+    return allowed or None
 
 
 def _plan(row: Any, allowed: Set[UUID]) -> Optional[Tuple[str, Dict[str, Any]]]:
@@ -185,10 +228,18 @@ async def neutralize(
     factory: async_sessionmaker[AsyncSession],
     *,
     apply: bool,
+    audit: AuditLog,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    audit: Optional[AuditSink] = None,
+    target: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, int]:
-    """Scan message citations and (with ``apply``) unlink the disallowed ones."""
+    """Scan message citations and (with ``apply``) unlink the disallowed ones.
+
+    Raises ``AuditWriteError`` (after rolling the batch back) if a batch's
+    audit records cannot be made durable before its commit.
+    """
+    run_id = run_id or uuid4().hex
+    mode = "apply" if apply else "dry-run"
     counts = {
         "scanned": 0,
         "cross_org": 0,
@@ -199,19 +250,38 @@ async def neutralize(
         "unlinked": 0,
         "copied_fields_cleared": 0,
     }
+    try:
+        audit.write(
+            {
+                "event": "run_start",
+                "run_id": run_id,
+                "timestamp": _now(),
+                "mode": mode,
+                "target": target,
+                "batch_size": batch_size,
+            }
+        )
+        audit.sync()
+    except OSError as exc:
+        raise AuditWriteError("could not write the audit header") from exc
+
     after: Optional[UUID] = None
+    batch = 0
     while True:
-        records: List[Dict[str, Any]] = []
         async with factory() as db:
             rows = (await db.execute(_batch_query(after, batch_size))).all()
             if not rows:
                 break
+            batch += 1
             after = rows[-1].id
             member_orgs = await _member_orgs(db, {row.workspace_id for row in rows})
+            records: List[Dict[str, Any]] = []
+            staged_ids: List[str] = []
+            staged_cleared = 0
             for row in rows:
                 counts["scanned"] += 1
                 allowed = _allowed_orgs(row, member_orgs)
-                if not allowed:
+                if allowed is None:
                     counts["undetermined_org"] += 1
                     continue
                 planned = _plan(row, allowed)
@@ -223,7 +293,7 @@ async def neutralize(
                 counts["would_unlink"] += 1
                 if cleared:
                     counts["would_clear_fields"] += 1
-                applied = False
+                staged = False
                 if apply:
                     # Guard on the old document_id so a concurrent edit is not
                     # overwritten; a no-op update is simply not counted.
@@ -239,36 +309,79 @@ async def neutralize(
                             .execution_options(synchronize_session=False)
                         ),
                     )
-                    applied = bool(result.rowcount)
-                    if applied:
-                        counts["unlinked"] += 1
+                    staged = bool(result.rowcount)
+                    if staged:
+                        staged_ids.append(str(row.id))
                         if cleared:
-                            counts["copied_fields_cleared"] += 1
+                            staged_cleared += 1
                 records.append(
                     {
                         "event": "citation",
-                        "mode": "apply" if apply else "dry-run",
-                        "applied": applied,
+                        "run_id": run_id,
+                        "timestamp": _now(),
+                        "mode": mode,
+                        "batch": batch,
+                        "applied": False,
+                        "staged": staged,
                         "reason": reason,
                         "citation_id": str(row.id),
+                        "message_id": str(row.message_id),
                         "old_document_id": str(row.document_id),
                         "old_document_type": (
                             row.document_type if "document_type" in cleared else None
                         ),
+                        "document_title_cleared": "document_title" in cleared,
                         "fields_cleared": cleared,
                         "doc_org": _str(row.doc_org),
                         "thread_org": _str(row.workspace_org or row.owner_org),
                         "author_org": _str(row.author_org),
                     }
                 )
-            if apply:
-                await db.commit()
-        # Emit only after the batch's commit, so "applied" is never a lie.
-        if audit is not None:
-            for record in records:
-                audit(record)
+            # Write-ahead: the records must be durable before anything commits.
+            try:
+                for record in records:
+                    audit.write(record)
+                audit.sync()
+            except OSError as exc:
+                await db.rollback()
+                raise AuditWriteError(
+                    f"audit write failed in batch {batch}; batch rolled back"
+                ) from exc
+            if not apply:
+                continue
+            await db.commit()
+            counts["unlinked"] += len(staged_ids)
+            counts["copied_fields_cleared"] += staged_cleared
+        if records:
+            try:
+                audit.write(
+                    {
+                        "event": "batch_committed",
+                        "run_id": run_id,
+                        "timestamp": _now(),
+                        "batch": batch,
+                        "applied_citation_ids": staged_ids,
+                    }
+                )
+                audit.sync()
+            except OSError as exc:
+                raise AuditWriteError(
+                    f"batch {batch} COMMITTED but its batch_committed marker was "
+                    "not written; its citation records with staged=true are the "
+                    "rows that were unlinked"
+                ) from exc
         logger.info("neutralize_cross_org_message_citations progress: %s", counts)
     return counts
+
+
+def _summary(run_id: str, mode: str, counts: Dict[str, int]) -> Dict[str, Any]:
+    return {
+        "event": "summary",
+        "run_id": run_id,
+        "timestamp": _now(),
+        "mode": mode,
+        **counts,
+    }
 
 
 def _open_target() -> Tuple[async_sessionmaker[AsyncSession], str]:
@@ -297,11 +410,14 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--audit-file",
-        help="append one NDJSON record per affected citation here (default: stdout)",
+        help="append the NDJSON audit trail here (required with --apply; "
+        "default for a dry run: stdout)",
     )
     args = parser.parse_args(argv)
     if args.batch_size < 1:
         parser.error("--batch-size must be >= 1")
+    if args.apply and not args.audit_file:
+        parser.error("--apply requires --audit-file")
     return args
 
 
@@ -309,29 +425,41 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     mode = "apply" if args.apply else "dry-run"
+    run_id = uuid4().hex
 
     async def run() -> Dict[str, int]:
         factory, url = _open_target()
-        print(f"target database ({mode}): {redact_url(url)}", file=sys.stderr)
+        target = redact_url(url)
+        print(f"target database ({mode}): {target}", file=sys.stderr)
         if args.audit_file is None:
             return await neutralize(
                 factory,
                 apply=args.apply,
                 batch_size=args.batch_size,
-                audit=lambda record: print(json.dumps(record), flush=True),
+                target=target,
+                run_id=run_id,
+                audit=AuditLog(sys.stdout, durable=False),
             )
         with open(args.audit_file, "a", encoding="utf-8") as sink:
-
-            def write(record: Dict[str, Any]) -> None:
-                sink.write(json.dumps(record) + "\n")
-                sink.flush()
-
-            return await neutralize(
-                factory, apply=args.apply, batch_size=args.batch_size, audit=write
+            audit = AuditLog(sink, durable=True)
+            counts = await neutralize(
+                factory,
+                apply=args.apply,
+                batch_size=args.batch_size,
+                target=target,
+                run_id=run_id,
+                audit=audit,
             )
+            audit.write(_summary(run_id, mode, counts))
+            audit.sync()
+            return counts
 
-    result = asyncio.run(run())
-    print(json.dumps({"event": "summary", "mode": mode, **result}))
+    try:
+        result = asyncio.run(run())
+    except AuditWriteError as exc:
+        print(f"ERROR: {exc}: {exc.__cause__!r}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(_summary(run_id, mode, result)))
 
 
 if __name__ == "__main__":
