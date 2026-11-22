@@ -127,8 +127,17 @@ class RAGEvaluationService:
         self, request: EvaluationRequest, db: Session
     ) -> EvaluationJob:
         """
-        Create a new evaluation job
+        Create a new evaluation job.
+
+        ``db`` is a sync Session: the inserts and commits run in a worker
+        thread so they do not block the event loop (GOO-643 / API-5).
         """
+        return await asyncio.to_thread(self._create_evaluation_job_sync, request, db)
+
+    def _create_evaluation_job_sync(
+        self, request: EvaluationRequest, db: Session
+    ) -> EvaluationJob:
+        """Blocking body of ``create_evaluation_job``."""
         try:
             # Create evaluation job
             job = EvaluationJob(

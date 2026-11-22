@@ -6,6 +6,7 @@ notes, and bibliography generation.
 User Story 4: Organize Documents into Research Projects
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 from typing import List, Optional
@@ -517,7 +518,9 @@ async def add_document_to_project(
                     )
                 except HTTPException:  # no form version: nothing to extract into
                     continue
-                run_extraction_matrix.apply_async(
+                # Blocking broker round-trip: worker thread (GOO-643 / API-5).
+                await asyncio.to_thread(
+                    run_extraction_matrix.apply_async,
                     kwargs=kwargs,
                     task_id=task_id,
                     queue="low_priority",

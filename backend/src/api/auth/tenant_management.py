@@ -183,7 +183,7 @@ def get_current_user_role():
     response_model=OrganizationResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_organization(
+def create_organization(
     organization_data: OrganizationCreate,
     tenant_service: TenantService = Depends(get_tenant_service),
     _: str = Depends(require_tenant_permission("organization_create")),
@@ -210,7 +210,7 @@ async def create_organization(
 
 
 @router.get("/organizations/{organization_id}", response_model=OrganizationResponse)
-async def get_organization(
+def get_organization(
     organization_id: str,
     tenant_service: TenantService = Depends(get_tenant_service),
     _: str = Depends(require_org_access("organization_read")),
@@ -241,7 +241,7 @@ async def get_organization(
 
 
 @router.put("/organizations/{organization_id}", response_model=OrganizationResponse)
-async def update_organization(
+def update_organization(
     organization_id: str,
     organization_data: OrganizationUpdate,
     tenant_service: TenantService = Depends(get_tenant_service),
@@ -279,7 +279,7 @@ async def update_organization(
 @router.post(
     "/organizations/{organization_id}/upgrade-tier", response_model=OrganizationResponse
 )
-async def upgrade_storage_tier(
+def upgrade_storage_tier(
     organization_id: str,
     upgrade_data: StorageTierUpgrade,
     tenant_service: TenantService = Depends(get_tenant_service),
@@ -317,7 +317,7 @@ async def upgrade_storage_tier(
     "/organizations/{organization_id}/storage-quota",
     response_model=StorageQuotaResponse,
 )
-async def get_storage_quota_status(
+def get_storage_quota_status(
     organization_id: str,
     tenant_service: TenantService = Depends(get_tenant_service),
     _: str = Depends(require_org_access("organization_read")),
@@ -350,7 +350,7 @@ async def get_storage_quota_status(
 @router.get(
     "/organizations/{organization_id}/users/count", response_model=UserCountResponse
 )
-async def get_user_count(
+def get_user_count(
     organization_id: str,
     tenant_service: TenantService = Depends(get_tenant_service),
     _: str = Depends(require_org_access("organization_users_read")),
@@ -379,7 +379,7 @@ async def get_user_count(
     "/organizations/{organization_id}/analytics",
     response_model=OrganizationAnalyticsResponse,
 )
-async def get_organization_analytics(
+def get_organization_analytics(
     organization_id: str,
     days: int = Query(
         default=30, ge=1, le=365, description="Number of days to analyze"
@@ -409,7 +409,7 @@ async def get_organization_analytics(
 @router.get(
     "/organizations/{organization_id}/limits", response_model=OrganizationLimitsResponse
 )
-async def validate_organization_limits(
+def validate_organization_limits(
     organization_id: str,
     tenant_service: TenantService = Depends(get_tenant_service),
     _: str = Depends(require_org_access("organization_read")),
@@ -440,7 +440,7 @@ async def validate_organization_limits(
 
 
 @router.get("/current-tenant")
-async def get_current_tenant_info(
+def get_current_tenant_info(
     tenant_service: TenantService = Depends(get_tenant_service),
 ):
     """Get current tenant information"""
@@ -476,7 +476,7 @@ async def get_current_tenant_info(
 
 
 @router.post("/organizations/{organization_id}/test-isolation")
-async def test_tenant_isolation(
+def test_tenant_isolation(
     organization_id: str,
     tenant_service: TenantService = Depends(get_tenant_service),
     _: str = Depends(require_org_access("organization_read")),

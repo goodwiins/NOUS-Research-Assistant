@@ -3,13 +3,14 @@ ArXiv Local PDF Processing API endpoints
 For processing PDF files stored locally in the data/arxiv directory
 """
 
+import asyncio
 import logging
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -68,6 +69,36 @@ from src.services.expensive_work_admission import metered_expensive_work
 _shared_embedding_service = None
 
 
+def _read_pdf_text_and_metadata(pdf_file: Path) -> Tuple[str, Dict[str, Any]]:
+    """Extract all page text and metadata with PyMuPDF (blocking).
+
+    Raises ImportError when PyMuPDF is missing, as the inline code did.
+    """
+    import fitz  # PyMuPDF
+
+    pdf_document = fitz.open(str(pdf_file))
+    try:
+        text_content = []
+        for page_num in range(len(pdf_document)):
+            page = pdf_document.load_page(page_num)
+            text_content.append(page.get_text())
+
+        metadata = pdf_document.metadata or {}
+        pdf_metadata = {
+            "title": metadata.get("title") or "",
+            "author": metadata.get("author") or "",
+            "subject": metadata.get("subject") or "",
+            "creator": metadata.get("creator") or "",
+            "producer": metadata.get("producer") or "",
+            "creation_date": metadata.get("creationDate") or "",
+            "modification_date": metadata.get("modDate") or "",
+            "page_count": len(pdf_document),
+        }
+    finally:
+        pdf_document.close()
+    return "\n".join(text_content), pdf_metadata
+
+
 def _get_shared_embedding_service():
     """Process-wide EmbeddingService (R6-M4: no per-document reloads)."""
     global _shared_embedding_service
@@ -77,7 +108,7 @@ def _get_shared_embedding_service():
 
 
 @router.get("/local-papers")
-async def list_local_papers(
+def list_local_papers(
     limit: int = Query(default=50, description="Maximum number of papers to return"),
     offset: int = Query(default=0, description="Offset for pagination"),
     search: Optional[str] = Query(None, description="Search term to filter papers"),
@@ -154,8 +185,8 @@ async def _extract_features_from_local_pdfs(
     try:
         logger.info(f"Starting local PDF feature extraction")
 
-        # Get all PDF files
-        pdf_files = list(ARXIV_DATA_PATH.glob("*.pdf"))
+        # Get all PDF files (directory scan off the loop)
+        pdf_files = await asyncio.to_thread(lambda: list(ARXIV_DATA_PATH.glob("*.pdf")))
         logger.info(f"Found {len(pdf_files)} PDF files")
 
         # Filter by paper IDs if specified
@@ -196,61 +227,10 @@ async def _extract_features_from_local_pdfs(
                 if request.process_full_content:
                     logger.info(f"Processing full content for {pdf_file.name}...")
                     try:
-                        # Use PyMuPDF (fitz) directly for PDF extraction
-                        import fitz  # PyMuPDF
-
-                        pdf_document = fitz.open(str(pdf_file))
-
-                        # Extract text from all pages
-                        text_content = []
-                        for page_num in range(len(pdf_document)):
-                            page = pdf_document.load_page(page_num)
-                            text_content.append(page.get_text())
-
-                        extracted_text = "\n".join(text_content)
-
-                        # Extract metadata
-                        metadata = pdf_document.metadata
-                        pdf_metadata = {
-                            "title": (
-                                metadata.get("title", "")
-                                if metadata.get("title")
-                                else ""
-                            ),
-                            "author": (
-                                metadata.get("author", "")
-                                if metadata.get("author")
-                                else ""
-                            ),
-                            "subject": (
-                                metadata.get("subject", "")
-                                if metadata.get("subject")
-                                else ""
-                            ),
-                            "creator": (
-                                metadata.get("creator", "")
-                                if metadata.get("creator")
-                                else ""
-                            ),
-                            "producer": (
-                                metadata.get("producer", "")
-                                if metadata.get("producer")
-                                else ""
-                            ),
-                            "creation_date": (
-                                metadata.get("creationDate", "")
-                                if metadata.get("creationDate")
-                                else ""
-                            ),
-                            "modification_date": (
-                                metadata.get("modDate", "")
-                                if metadata.get("modDate")
-                                else ""
-                            ),
-                            "page_count": len(pdf_document),
-                        }
-
-                        pdf_document.close()
+                        # CPU-bound PyMuPDF parse: worker thread (GOO-643 API-5).
+                        extracted_text, pdf_metadata = await asyncio.to_thread(
+                            _read_pdf_text_and_metadata, pdf_file
+                        )
 
                         extraction_result["features"]["extracted_text"] = extracted_text
                         extraction_result["features"]["metadata"] = pdf_metadata
@@ -414,7 +394,9 @@ async def _post_process_extraction(result, request, organization_id=None):
                 # SentenceTransformer weights from disk every document); the
                 # azure_openai branch was dead — a fresh instance's provider
                 # is always the default.
-                embedding = await _get_shared_embedding_service().generate_embedding(
+                # First call loads the embedding model: build it off the loop.
+                shared_embedder = await asyncio.to_thread(_get_shared_embedding_service)
+                embedding = await shared_embedder.generate_embedding(
                     EmbeddingRequest(
                         text=extracted_text[:2000],
                         model="sentence-transformers/all-MiniLM-L6-v2",
@@ -434,8 +416,6 @@ async def _post_process_extraction(result, request, organization_id=None):
 
         # 3. Update Knowledge Graph (Sync wrapper in ThreadPool)
         if request.update_knowledge_graph:
-            import asyncio
-
             loop = asyncio.get_event_loop()
 
             # Run the synchronous KG update in the global executor
@@ -575,7 +555,7 @@ def _update_knowledge_graph_with_local_extractions_sync(
 
 
 @router.get("/local-stats")
-async def get_local_papers_stats(current_user: dict = Depends(get_current_user)):
+def get_local_papers_stats(current_user: dict = Depends(get_current_user)):
     """
     Get statistics about locally stored ArXiv papers
     """

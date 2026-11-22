@@ -394,7 +394,7 @@ async def hybrid_search(
 
 
 @router.get("/suggestions")
-async def get_search_suggestions(
+def get_search_suggestions(
     q: str = Query(
         ..., min_length=2, max_length=100, description="Query for suggestions"
     ),
@@ -498,7 +498,7 @@ async def get_search_analytics(
 
 
 @router.post("/indexes/rebuild")
-async def rebuild_search_indexes(
+def rebuild_search_indexes(
     current_user: User = Depends(get_current_user), db=Depends(get_db_sync)
 ):
     """
@@ -609,7 +609,7 @@ def get_search_indexes(
 
 
 @router.post("/documents/{document_id}/reindex")
-async def reindex_document(
+def reindex_document(
     document_id: str,
     current_user: User = Depends(get_current_user),
     db=Depends(get_db_sync),
@@ -755,7 +755,8 @@ async def search_health_check(
                 query="test", search_type=SearchType.FULLTEXT, limit=1
             )
             start_time = time.time()
-            ft_result = fulltext_search_service.search(
+            ft_result = await run_in_threadpool(
+                fulltext_search_service.search,
                 search_request=ft_query,
                 user_id=str(current_user.id),
                 organization_id=organization_id,
@@ -807,8 +808,9 @@ async def search_health_check(
             WHERE tablename = 'documents'
                 AND indexname LIKE '%search%'
             """
-            index_result = db.execute(text(index_check_query))
-            index_count = index_result.scalar()
+            index_count = await run_in_threadpool(
+                lambda: db.execute(text(index_check_query)).scalar()
+            )
             health_status["indexes"] = {
                 "search_indexes_count": index_count,
                 "indexes_available": index_count > 0,
@@ -1128,7 +1130,7 @@ def log_search_query(
         db.close()
 
 
-async def persist_api_key_usage_log(
+def persist_api_key_usage_log(
     api_key_id: str,
     endpoint: str,
     method: str,
@@ -1140,7 +1142,10 @@ async def persist_api_key_usage_log(
     response_status: int = 200,
 ):
     """
-    Persist API key usage to database for audit trail (background task)
+    Persist API key usage to database for audit trail (background task).
+
+    A plain ``def`` so Starlette runs the task in its threadpool: the sync
+    Session insert/commit used to run on the event loop (GOO-643 / API-5).
     """
     try:
         from src.core.database import SessionLocal

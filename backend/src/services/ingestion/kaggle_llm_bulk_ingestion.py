@@ -566,9 +566,7 @@ Response (JSON array only):"""
                         if progress_callback:
                             elapsed = time.time() - start_time
                             pps = (
-                                total_stats["processed"] / elapsed
-                                if elapsed > 0
-                                else 0
+                                total_stats["processed"] / elapsed if elapsed > 0 else 0
                             )
                             eta = (
                                 (self.max_papers - total_stats["processed"]) / pps
@@ -588,9 +586,7 @@ Response (JSON array only):"""
                                 relationships_extracted=self.stats[
                                     "relationships_extracted"
                                 ],
-                                embeddings_generated=self.stats[
-                                    "embeddings_generated"
-                                ],
+                                embeddings_generated=self.stats["embeddings_generated"],
                                 progress_percent=(
                                     total_stats["processed"] / self.max_papers
                                 )

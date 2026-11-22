@@ -607,7 +607,9 @@ class FileService:
                 )
                 file_path_with_ext = f"{file_path}{original_ext}"
                 saved_path = await self.save_file(file, file_path_with_ext)
-                file_hash = await asyncio.to_thread(self.calculate_file_hash, saved_path)
+                file_hash = await asyncio.to_thread(
+                    self.calculate_file_hash, saved_path
+                )
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
                 except Exception:

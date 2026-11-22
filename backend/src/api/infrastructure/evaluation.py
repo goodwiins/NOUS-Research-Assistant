@@ -2,6 +2,7 @@
 Evaluation API endpoints for RAG Triad metrics and evaluation workflows
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -220,9 +221,10 @@ async def create_evaluation_job(
         # in create_batch_evaluation_job.
         job_id_str = str(job.id)
         try:
-            run_rag_triad_evaluation.delay(job_id_str)
+            # .delay() is a blocking broker round-trip (GOO-466 / GOO-643).
+            await asyncio.to_thread(run_rag_triad_evaluation.delay, job_id_str)
         except OperationalError:
-            _fail_job_quietly(db, job, job_id_str)
+            await asyncio.to_thread(_fail_job_quietly, db, job, job_id_str)
             raise HTTPException(
                 status_code=503,
                 detail="Evaluation queue unavailable. Please retry.",
@@ -247,7 +249,7 @@ async def create_evaluation_job(
 
 
 @router.post("/jobs/batch", response_model=Dict[str, Any])
-async def create_batch_evaluation_job(
+def create_batch_evaluation_job(
     request: BatchEvaluationRequest,
     current_user: User = Depends(get_current_user),
     db=Depends(get_db_sync),
@@ -313,7 +315,7 @@ async def create_batch_evaluation_job(
 
 
 @router.post("/real-time", response_model=Dict[str, Any])
-async def evaluate_real_time(
+def evaluate_real_time(
     request: RealTimeEvaluationRequest,
     current_user: User = Depends(get_current_user),
     db=Depends(get_db_sync),
@@ -358,7 +360,7 @@ async def evaluate_real_time(
 
 
 @router.get("/jobs/{job_id}", response_model=Dict[str, Any])
-async def get_evaluation_job(
+def get_evaluation_job(
     job_id: str, current_user: User = Depends(get_current_user), db=Depends(get_db_sync)
 ):
     """
@@ -393,7 +395,7 @@ async def get_evaluation_job(
 
 
 @router.get("/jobs", response_model=List[Dict[str, Any]])
-async def list_evaluation_jobs(
+def list_evaluation_jobs(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     status: Optional[str] = Query(None),
@@ -451,7 +453,7 @@ async def list_evaluation_jobs(
 
 
 @router.get("/jobs/{job_id}/metrics", response_model=List[Dict[str, Any]])
-async def get_evaluation_metrics(
+def get_evaluation_metrics(
     job_id: str,
     metric_types: Optional[List[str]] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
@@ -522,7 +524,7 @@ async def get_evaluation_metrics(
 
 # Comparison endpoints
 @router.post("/comparisons", response_model=Dict[str, Any])
-async def create_evaluation_comparison(
+def create_evaluation_comparison(
     request: ComparisonRequest,
     current_user: User = Depends(get_current_user),
     db=Depends(get_db_sync),
@@ -598,7 +600,7 @@ async def create_evaluation_comparison(
 
 
 @router.get("/comparisons", response_model=List[Dict[str, Any]])
-async def list_evaluation_comparisons(
+def list_evaluation_comparisons(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
@@ -647,7 +649,7 @@ async def list_evaluation_comparisons(
 # endpoint function (no .delay → AttributeError inside BackgroundTasks,
 # swallowed post-response) and reports would never be generated.
 @router.post("/jobs/{job_id}/reports/{report_type}", response_model=Dict[str, Any])
-async def trigger_evaluation_report(
+def trigger_evaluation_report(
     job_id: str,
     report_type: str,
     current_user: User = Depends(get_current_user),
@@ -716,7 +718,7 @@ async def trigger_evaluation_report(
 
 
 @router.get("/reports", response_model=List[Dict[str, Any]])
-async def list_evaluation_reports(
+def list_evaluation_reports(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
@@ -755,7 +757,7 @@ async def list_evaluation_reports(
 
 
 @router.get("/reports/{report_id}", response_model=Dict[str, Any])
-async def get_evaluation_report(
+def get_evaluation_report(
     report_id: str,
     current_user: User = Depends(get_current_user),
     db=Depends(get_db_sync),
@@ -801,7 +803,7 @@ async def get_evaluation_report(
 
 # Metrics and analytics endpoints
 @router.get("/metrics/summary", response_model=Dict[str, Any])
-async def get_metrics_summary(
+def get_metrics_summary(
     days: int = Query(30, ge=1, le=365),
     current_user: User = Depends(get_current_user),
     db=Depends(get_db_sync),
@@ -909,7 +911,7 @@ async def get_metrics_summary(
 
 
 @router.delete("/jobs/{job_id}")
-async def delete_evaluation_job(
+def delete_evaluation_job(
     job_id: str, current_user: User = Depends(get_current_user), db=Depends(get_db_sync)
 ):
     """

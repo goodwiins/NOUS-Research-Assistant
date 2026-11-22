@@ -1257,7 +1257,7 @@ class TestEvidenceBreakdownEndpoint:
 
         query.yield_per.return_value = candidate_rows()
 
-        await get_evidence_breakdown(
+        get_evidence_breakdown(
             claim_hash="deterministic_pagination_hash",
             stance_filter=None,
             limit=1,
