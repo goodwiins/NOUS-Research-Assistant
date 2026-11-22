@@ -2,7 +2,10 @@ import { logger, task, metadata } from "@trigger.dev/sdk";
 import { ingestPaper } from "./ingest-paper";
 import { backendClient } from "../_lib/backend-client";
 import { emptyTally, tallyIngestRuns } from "./tally";
-import type { ArxivBulkIngestPayload } from "../_lib/schemas";
+import {
+  ArxivSearchResponseSchema,
+  type ArxivBulkIngestPayload,
+} from "../_lib/schemas";
 
 export const bulkIngestArxiv = task({
   id: "arxiv-bulk-ingest",
@@ -35,14 +38,15 @@ export const bulkIngestArxiv = task({
     if (dateFrom) searchParams.date_from = dateFrom;
     if (dateTo) searchParams.date_to = dateTo;
 
-    const searchResult = await backendClient.post<{
-      papers: Array<{ id: string; title: string }>;
-      total?: number;
-    }>("/api/v1/arxiv/search", searchParams, undefined, undefined, {
-      idempotent: true,
-    });
-
-    const papers = searchResult.papers ?? [];
+    // The endpoint returns a bare array. Validating it means a shape change
+    // fails the run loudly instead of silently ingesting zero papers.
+    const papers = await backendClient.post(
+      "/api/v1/arxiv/search",
+      searchParams,
+      ArxivSearchResponseSchema,
+      undefined,
+      { idempotent: true },
+    );
     metadata.set("totalPapers", papers.length);
     metadata.set("status", "ingesting");
 
