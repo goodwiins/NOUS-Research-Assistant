@@ -140,9 +140,6 @@ def _install_recorder(sink: list):
     # Reset every build + result cache so the recorder is actually constructed.
     llm_factory.reset_llm_caches()
     graph._LLM_CACHE.clear()
-    classifier._CLASSIFIER_LLM = None
-    reflection._REFLECTION_LLM = None
-    compactor._COMPACTOR_LLM = None
 
     targets = [
         (llm_factory, "build_lightweight_llm"),

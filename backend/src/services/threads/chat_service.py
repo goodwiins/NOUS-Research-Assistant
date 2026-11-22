@@ -808,12 +808,29 @@ class ChatService:
                 )
                 self.db.add(attachment)
 
-        # Handle citations (for assistant messages with RAG sources)
+        # Handle citations (for assistant messages with RAG sources). The
+        # presenter falls back to ``citation.document.title``/``type``, so a
+        # client-supplied foreign document UUID would leak that document's
+        # metadata (IDOR, same as attachments above). A citation whose
+        # document the caller's org doesn't own keeps its own fields but
+        # loses the document link.
         if data.citations:
+            cited_ids = list(
+                dict.fromkeys(
+                    cit.document_id for cit in data.citations if cit.document_id
+                )
+            )
+            owned_cited_ids = (
+                set(await self._filter_owned_document_ids(cited_ids, user_id))
+                if cited_ids
+                else set()
+            )
             for cit in data.citations:
                 citation = Citation(
                     message_id=message.id,
-                    document_id=cit.document_id,
+                    document_id=(
+                        cit.document_id if cit.document_id in owned_cited_ids else None
+                    ),
                     external_reference_id=cit.external_reference_id,
                     chunk_index=cit.chunk_index,
                     chunk_id=cit.chunk_id,

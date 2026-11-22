@@ -65,6 +65,9 @@ _EXCLUDE_LEGACY_AGENT_THREADS = (
 # replaced must not be findable by its old text, and the count twin must carry
 # the identical predicate or `total` over-reports and `has_more` goes phantom.
 _EXCLUDE_SUPERSEDED_MESSAGES = "    AND m.superseded_by_message_id IS NULL"
+# A soft-deleted message must not match a search or come back as a result
+# (GOO-635): the ancestor ``is_deleted`` checks don't cover the message row.
+_EXCLUDE_DELETED_MESSAGES = "    AND m.is_deleted = false"
 
 
 class ThreadSearchSortOrder(str, Enum):
@@ -553,6 +556,7 @@ class ThreadMessageSearchService:
                         AND c.is_deleted = false
                         AND w.is_deleted = false
                         AND m.superseded_by_message_id IS NULL
+                        AND m.is_deleted = false
                         {message_filters}
                 )
                 SELECT * FROM (
@@ -748,7 +752,7 @@ class ThreadMessageSearchService:
             "    ts_rank_cd(t.search_vector, plainto_tsquery(:query)) * 10 as relevance_score,",
             f"    ts_headline('english', COALESCE(t.title, ''), plainto_tsquery(:query), 'StartSel={self.highlight_pre_tag}, StopSel={self.highlight_post_tag}, MaxWords=50, MinWords=10') as highlighted_title,",
             f"    ts_headline('english', COALESCE(t.summary, ''), plainto_tsquery(:query), 'StartSel={self.highlight_pre_tag}, StopSel={self.highlight_post_tag}, MaxWords={self.snippet_length}, MinWords={self.snippet_surround}') as highlighted_summary,",
-            "    (SELECT COUNT(*) FROM chat_messages cm WHERE cm.thread_id = t.id AND cm.search_vector @@ plainto_tsquery(:query) AND cm.superseded_by_message_id IS NULL) as matching_message_count",
+            "    (SELECT COUNT(*) FROM chat_messages cm WHERE cm.thread_id = t.id AND cm.search_vector @@ plainto_tsquery(:query) AND cm.superseded_by_message_id IS NULL AND cm.is_deleted = false) as matching_message_count",
             "FROM threads t",
             "JOIN conversations c ON t.conversation_id = c.id",
             "JOIN workspaces w ON c.workspace_id = w.id",
@@ -759,7 +763,7 @@ class ThreadMessageSearchService:
             "    AND w.is_deleted = false",
             "    AND (",
             "        t.search_vector @@ plainto_tsquery(:query)",
-            "        OR EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.thread_id = t.id AND cm.search_vector @@ plainto_tsquery(:query) AND cm.superseded_by_message_id IS NULL)",
+            "        OR EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.thread_id = t.id AND cm.search_vector @@ plainto_tsquery(:query) AND cm.superseded_by_message_id IS NULL AND cm.is_deleted = false)",
             "    )",
             _WORKSPACE_ACCESS_PREDICATE,
         ]
@@ -798,7 +802,7 @@ class ThreadMessageSearchService:
             "    AND w.is_deleted = false",
             "    AND (",
             "        t.search_vector @@ plainto_tsquery(:query)",
-            "        OR EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.thread_id = t.id AND cm.search_vector @@ plainto_tsquery(:query) AND cm.superseded_by_message_id IS NULL)",
+            "        OR EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.thread_id = t.id AND cm.search_vector @@ plainto_tsquery(:query) AND cm.superseded_by_message_id IS NULL AND cm.is_deleted = false)",
             "    )",
             _WORKSPACE_ACCESS_PREDICATE,
         ]
@@ -839,6 +843,7 @@ class ThreadMessageSearchService:
             # Same-filters rule: page and count must move in lockstep, and an
             # edited-away message must not be findable by its old text.
             _EXCLUDE_SUPERSEDED_MESSAGES,
+            _EXCLUDE_DELETED_MESSAGES,
             _WORKSPACE_ACCESS_PREDICATE,
         ]
 
@@ -879,6 +884,7 @@ class ThreadMessageSearchService:
             # Same-filters rule: page and count must move in lockstep, and an
             # edited-away message must not be findable by its old text.
             _EXCLUDE_SUPERSEDED_MESSAGES,
+            _EXCLUDE_DELETED_MESSAGES,
             _WORKSPACE_ACCESS_PREDICATE,
         ]
 

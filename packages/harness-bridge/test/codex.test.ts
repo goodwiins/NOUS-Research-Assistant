@@ -217,6 +217,9 @@ test("a handshake from a different version than the probe is refused", async (t)
   server.configure({ version: "0.161.0", userAgentVersion: "0.153.4" });
   await assert.rejects(adapter.startSession(options), /unsupported Codex handshake/);
   assert.equal(server.calls("thread/start").length, 0);
+  // TD2D-9: the refused handshake must not leave the app-server running.
+  const pid = Number(readFileSync(join(server.root, "pid"), "utf8"));
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
 for (const mode of ["split", "malformed", "oversized", "exit", "eof"])
   test("transport " + mode, async (t) => {

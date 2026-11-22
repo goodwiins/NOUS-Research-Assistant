@@ -12,11 +12,6 @@ from .auth_service import (
     RegistrationError,
 )
 from .encryption_service import EncryptionService
-from .enhanced_security_service import (
-    DataClassification,
-    EncryptionAlgorithm,
-    EnhancedSecurityService,
-)
 from .rbac_service import RBACService
 from .security_audit_service import (
     SecurityAuditService,
@@ -31,9 +26,6 @@ __all__ = [
     "AuthorizationError",
     "RegistrationError",
     "EncryptionService",
-    "EnhancedSecurityService",
-    "DataClassification",
-    "EncryptionAlgorithm",
     "RBACService",
     "SecurityAuditService",
     "SecurityEventType",

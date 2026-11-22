@@ -19,11 +19,7 @@ def test_classifier_llm_uses_4096_token_budget():
     internal reasoning before structured output is emitted."""
     import src.services.agent.classifier as classifier_mod
 
-    classifier_mod._CLASSIFIER_LLM = None  # force rebuild
-
-    with patch(
-        "src.services.agent.llm_factory.build_lightweight_llm"
-    ) as builder:
+    with patch("src.services.agent.llm_factory.build_lightweight_llm") as builder:
         builder.return_value = MagicMock()
         classifier_mod._build_classifier_llm()
         assert builder.call_count == 1
@@ -33,28 +29,20 @@ def test_classifier_llm_uses_4096_token_budget():
             "256 caused LengthFinishReasonError in trace 019e1554."
         )
 
-    classifier_mod._CLASSIFIER_LLM = None
-
 
 @pytest.mark.unit
 def test_reflection_llm_uses_4096_token_budget():
     """Reflection must request 4096 max_tokens for same reason as classifier."""
     import src.services.agent.reflection as reflection_mod
 
-    reflection_mod._REFLECTION_LLM = None  # force rebuild
-
-    with patch(
-        "src.services.agent.reflection.build_lightweight_llm"
-    ) as builder:
+    with patch("src.services.agent.reflection.build_lightweight_llm") as builder:
         builder.return_value = MagicMock()
         reflection_mod._build_reflection_llm()
         assert builder.call_count == 1
         kwargs = builder.call_args.kwargs
-        assert kwargs["max_tokens"] == 4096, (
-            "Reflection must pass max_tokens=4096; 512 caused LengthFinishReasonError"
-        )
-
-    reflection_mod._REFLECTION_LLM = None
+        assert (
+            kwargs["max_tokens"] == 4096
+        ), "Reflection must pass max_tokens=4096; 512 caused LengthFinishReasonError"
 
 
 @pytest.mark.unit
@@ -62,9 +50,7 @@ def test_planner_lightweight_llm_uses_2048_token_budget():
     """Planner complexity-check LLM uses 2048 max_tokens (raised from 1024)."""
     from src.services.agent import planner as planner_mod
 
-    with patch(
-        "src.services.agent.planner.build_lightweight_llm"
-    ) as builder:
+    with patch("src.services.agent.planner.build_lightweight_llm") as builder:
         builder.return_value = MagicMock()
         planner_mod._build_planner_llm()
         assert builder.call_count == 1

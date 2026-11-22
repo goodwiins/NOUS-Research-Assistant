@@ -31,6 +31,44 @@ from src.core.neo4j_auth import get_neo4j_auth
 
 logger = logging.getLogger(__name__)
 
+# Neo4j labels and relationship types cannot be query parameters, so the
+# writes below interpolate them. They come from LLM output over third-party
+# abstracts, which a crafted abstract can steer into Cypher (GOO-639), so only
+# these fixed values ever reach a query. They mirror the prompts' type lists
+# plus this module's own defaults (CONCEPT, RELATED_TO).
+ALLOWED_ENTITY_LABELS = frozenset(
+    {
+        "METHODOLOGY",
+        "MODEL",
+        "METRIC",
+        "TASK",
+        "DATASET",
+        "FRAMEWORK",
+        "THEORY",
+        "DOMAIN",
+        "ARCHITECTURE",
+        "LOSS_FUNCTION",
+        "OPTIMIZATION",
+        "INSTITUTION",
+        "CONCEPT",
+    }
+)
+ALLOWED_RELATIONSHIP_TYPES = frozenset(
+    {"USES", "EVALUATED_ON", "ACHIEVED", "COMPARED_WITH", "EXTENDS", "RELATED_TO"}
+)
+
+
+def _allowlisted(value: Any, allowed: frozenset[str]) -> Optional[str]:
+    """Normalize an LLM-provided label and return it only if allowlisted.
+
+    ``"loss function"`` / ``"loss-function"`` map to ``LOSS_FUNCTION``;
+    anything not on the list (including injected Cypher) returns ``None``.
+    """
+    if not isinstance(value, str):
+        return None
+    normalized = "_".join(value.strip().upper().replace("-", " ").split())
+    return normalized if normalized in allowed else None
+
 
 class LLMIngestionProgress(TypedDict):
     """Progress information for LLM bulk ingestion"""
@@ -367,10 +405,18 @@ Response (JSON array only):"""
 
                 # Store entities in Neo4j
                 for entity in entities:
-                    entity_type = entity.get("type", "CONCEPT").upper()
+                    entity_type = _allowlisted(
+                        entity.get("type") or "CONCEPT", ALLOWED_ENTITY_LABELS
+                    )
                     entity_name = entity.get("name", "")
                     confidence = entity.get("confidence", 0.8)
 
+                    if entity_type is None:
+                        logger.warning(
+                            "Dropping entity with non-allowlisted type for paper %s",
+                            paper_id,
+                        )
+                        continue
                     if entity_name:
                         await session.run(
                             f"""
@@ -399,9 +445,19 @@ Response (JSON array only):"""
                 for rel in relationships:
                     source = rel.get("source", "")
                     target = rel.get("target", "")
-                    rel_type = rel.get("relationship", "RELATED_TO").upper()
+                    rel_type = _allowlisted(
+                        rel.get("relationship") or "RELATED_TO",
+                        ALLOWED_RELATIONSHIP_TYPES,
+                    )
                     confidence = rel.get("confidence", 0.7)
 
+                    if rel_type is None:
+                        logger.warning(
+                            "Dropping relationship with non-allowlisted type "
+                            "for paper %s",
+                            paper_id,
+                        )
+                        continue
                     if source and target:
                         await session.run(
                             f"""

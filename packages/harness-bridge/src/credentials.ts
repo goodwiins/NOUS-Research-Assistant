@@ -98,6 +98,21 @@ export class CredentialStore {
       await handle.close();
     }
   }
+  /**
+   * Like readLocal, but a missing file is `null`. Any other failure (wrong
+   * permissions, a corrupt file, an I/O error) is rethrown: an unreadable
+   * file is not the same as no file, and treating it as absent would orphan
+   * credentials or misreport the connection state.
+   */
+  async readLocalIfPresent(name: string): Promise<unknown> {
+    try {
+      return await this.readLocal(name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`stored ${name} is unreadable: ${reason}`);
+    }
+  }
   async save(credentials: IntegrationCredentials): Promise<string> {
     this.validate(credentials);
     const credentialHandle = randomUUID();

@@ -19,11 +19,13 @@ export const cacheWarmAfterProcessing = task({
     const query = documentTitle || documentId;
 
     try {
-      await backendClient.post("/api/v1/search", {
-        query,
-        limit: 5,
-        document_ids: [documentId],
-      });
+      await backendClient.post(
+        "/api/v1/search",
+        { query, limit: 5, document_ids: [documentId] },
+        undefined,
+        undefined,
+        { idempotent: true },
+      );
       logger.info("Cache warmed via search", { documentId });
     } catch (err) {
       logger.warn("Cache warm search failed, non-fatal", {

@@ -54,3 +54,16 @@ The root manifest exposes `pnpm trigger:dev` and `pnpm trigger:deploy`, but no
 isolated offline validator for this tree is defined. Both commands are
 configured-service operations, not routine offline verification commands; do
 not advertise or report them as proof that these jobs are valid or deployed.
+
+Offline unit checks for the pure helpers and the backend client's retry
+policy live in `tests/trigger/` (Node built-in test runner, SDK mocked):
+
+```sh
+node --experimental-transform-types --experimental-test-module-mocks \
+  --test tests/trigger/*.test.mjs
+```
+
+The backend client retries GET by default and never retries a POST unless the
+caller passes `{ idempotent: true }` (a read over POST, or an endpoint that
+dedupes on a key the caller sends, such as `client_message_id` on
+`/api/v1/agent/execute`).

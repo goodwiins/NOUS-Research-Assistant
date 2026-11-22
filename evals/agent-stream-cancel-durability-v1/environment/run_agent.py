@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import socket
 import sys
 import time
@@ -99,13 +100,46 @@ async def bootstrap_schema() -> None:
         ) from exc
 
 
+# The task's own docker-compose service: `redis`, started with persistence off.
+EVAL_REDIS_HOST = "redis"
+
+
+async def assert_eval_owned_redis(client: Any, url: str) -> None:
+    """Refuse to flush any Redis that is not this task's ephemeral service.
+
+    Same guard as agent-fast-path-cancel-v1: the compose host name, and the
+    server's own config matching the compose command (no RDB saves, no AOF).
+    """
+    host = urlparse(url).hostname
+    if host != EVAL_REDIS_HOST:
+        raise InfrastructureFailure(
+            f"refusing to FLUSHDB: REDIS_URL host {host!r} is not the task's "
+            f"own {EVAL_REDIS_HOST!r} service"
+        )
+    try:
+        save = (await client.config_get("save")).get("save")
+        appendonly = (await client.config_get("appendonly")).get("appendonly")
+    except Exception as exc:  # noqa: BLE001 - unverifiable ownership is infra
+        raise InfrastructureFailure(
+            f"refusing to FLUSHDB: cannot read Redis config ({type(exc).__name__})"
+        ) from exc
+    if save != "" or appendonly != "no":
+        raise InfrastructureFailure(
+            "refusing to FLUSHDB: Redis is persistent "
+            f"(save={save!r}, appendonly={appendonly!r}); not the ephemeral "
+            "eval service"
+        )
+
+
 async def reset_redis() -> None:
     import redis.asyncio as aioredis
 
-    client = aioredis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    url = os.environ["REDIS_URL"]
+    client = aioredis.from_url(url, decode_responses=True)
     try:
         if not await client.ping():
             raise InfrastructureFailure("Redis ping returned false")
+        await assert_eval_owned_redis(client, url)
         await client.flushdb()
     except InfrastructureFailure:
         raise
@@ -266,6 +300,35 @@ async def redis_snapshot() -> dict[str, Any]:
         await client.aclose()
 
 
+def _proxy_generated(response: "httpx.Response") -> bool:
+    """True when the proxy itself produced the response (Squid error page)."""
+    return "x-squid-error" in response.headers
+
+
+def approved_probe_reachable(response: "httpx.Response") -> bool:
+    """The approved model host answered through the proxy.
+
+    Any 1xx-4xx status from the upstream counts (a model API root commonly
+    answers 401/404). A 5xx, or any response the proxy generated itself
+    (denied, upstream unreachable, gateway timeout), does not.
+    """
+    return 100 <= response.status_code <= 499 and not _proxy_generated(response)
+
+
+def denied_probe_response_blocked(response: "httpx.Response") -> bool:
+    """A response to the denied HTTPS probe means the CONNECT tunnel opened.
+
+    The destination itself answering 403 is not a proxy block. Only a 403 the
+    proxy generated counts.
+    """
+    return response.status_code == 403 and _proxy_generated(response)
+
+
+def denied_probe_error_blocked(exc: Exception) -> bool:
+    """httpx reports a refused CONNECT as ProxyError("<status> <reason>")."""
+    return re.match(r"403\b", str(exc).strip()) is not None
+
+
 def token_log_from_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize server replay token frames for diagnostic evidence."""
     return [
@@ -296,7 +359,7 @@ def validate_network_boundary() -> dict[str, Any]:
     try:
         with httpx.Client(timeout=10, follow_redirects=False) as client:
             allowed = client.get(endpoint.rstrip("/") + "/")
-            approved_reachable = 100 <= allowed.status_code <= 599
+            approved_reachable = approved_probe_reachable(allowed)
     except httpx.HTTPError as exc:
         raise InfrastructureFailure(
             f"approved model-host proxy preflight failed: {type(exc).__name__}"
@@ -308,9 +371,9 @@ def validate_network_boundary() -> dict[str, Any]:
         with httpx.Client(timeout=10, follow_redirects=False) as client:
             blocked = client.get("https://example.com/")
             blocked_status = blocked.status_code
-            unrelated_blocked = blocked_status == 403
+            unrelated_blocked = denied_probe_response_blocked(blocked)
     except httpx.ProxyError as exc:
-        unrelated_blocked = "403" in str(exc)
+        unrelated_blocked = denied_probe_error_blocked(exc)
         blocked_status = 403 if unrelated_blocked else None
     except httpx.HTTPError as exc:
         raise InfrastructureFailure(
