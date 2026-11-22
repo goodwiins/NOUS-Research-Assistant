@@ -8,55 +8,81 @@ import hashlib
 import json
 import logging
 import random
-from typing import Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-import redis
+import redis.asyncio as redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from ...core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
+# After a connection failure, skip Redis for this long instead of paying a
+# connect timeout on every request while it is down.
+_UNAVAILABLE_BACKOFF_SECONDS = 30.0
+
+
 class EvidenceCacheService:
-    """Redis caching service for evidence meter data"""
+    """Redis caching service for evidence meter data.
+
+    Uses the asyncio Redis client (GOO-643/RS-1). The old sync client blocked
+    the event loop on every call, PINGed before every operation and connected
+    (5 s timeout) at import time, since the router builds this at import.
+    Now nothing connects until the first operation, there is no per-call
+    PING, and a connection failure backs off for
+    ``_UNAVAILABLE_BACKOFF_SECONDS``. Every operation degrades to a cache miss.
+    """
 
     def __init__(self):
-        self.redis_client = None
-        self._connect()
+        self.redis_client: Optional[redis.Redis] = None
+        self._unavailable_until = 0.0
 
-    def _connect(self):
-        """Initialize Redis connection"""
-        try:
-            self.redis_client = redis.Redis.from_url(
-                settings.REDIS_URL or "redis://localhost:6379/0",
-                decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5,
-                health_check_interval=30,
-            )
-            # Test connection
-            self.redis_client.ping()
-            logger.info("Connected to Redis for evidence caching")
-        except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            self.redis_client = None
-
-    def _ensure_connected(self) -> bool:
-        """Ensure Redis connection is active"""
-        if not self.redis_client:
-            self._connect()
-
-        if self.redis_client:
+    def _client(self) -> Optional[redis.Redis]:
+        """The client, created lazily (no I/O), or None while backing off."""
+        if time.monotonic() < self._unavailable_until:
+            return None
+        if self.redis_client is None:
             try:
-                self.redis_client.ping()
-                return True
+                self.redis_client = redis.Redis.from_url(
+                    settings.REDIS_URL or "redis://localhost:6379/0",
+                    decode_responses=True,
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
+                    health_check_interval=30,
+                )
             except Exception as e:
-                logger.warning(f"Redis connection lost, reconnecting: {e}")
-                self._connect()
-                return self.redis_client is not None
+                logger.error(f"Failed to create Redis client: {e}")
+                self._mark_unavailable()
+                return None
+        return self.redis_client
 
-        return False
+    def _mark_unavailable(self) -> None:
+        self._unavailable_until = time.monotonic() + _UNAVAILABLE_BACKOFF_SECONDS
+
+    def _note_failure(self, error: Exception) -> None:
+        if isinstance(error, (RedisConnectionError, RedisTimeoutError, OSError)):
+            self._mark_unavailable()
+
+    async def _ensure_connected(self) -> bool:
+        """Health probe: one PING. Not called on the data path."""
+        client = self._client()
+        if client is None:
+            return False
+        try:
+            await client.ping()
+            return True
+        except Exception as e:
+            logger.warning(f"Redis ping failed for evidence cache: {e}")
+            self._note_failure(e)
+            return False
+
+    async def _scan_keys(self, client: redis.Redis, pattern: str) -> List[Any]:
+        """SCAN instead of KEYS, which blocks the Redis server on a big DB."""
+        return [key async for key in client.scan_iter(match=pattern, count=500)]
 
     def _serialize_data(self, data: dict) -> str:
         """Serialize data for Redis storage"""
@@ -70,11 +96,12 @@ class EvidenceCacheService:
 
     async def get_stance_classification(self, cache_key: str) -> Optional[Dict]:
         """Get cached stance classification"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return None
 
         try:
-            data = self.redis_client.get(cache_key)
+            data = await client.get(cache_key)
             if data:
                 result = self._deserialize_data(data)
                 logger.debug(f"Cache hit for stance classification: {cache_key}")
@@ -82,24 +109,27 @@ class EvidenceCacheService:
             return None
         except Exception as e:
             logger.error(f"Failed to get stance classification from cache: {e}")
+            self._note_failure(e)
             return None
 
     async def set_stance_classification(
         self, cache_key: str, classification: Dict, ttl: int = 86400
     ) -> bool:
         """Set stance classification in cache"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return False
 
         try:
             data = self._serialize_data(classification)
             jitter = int(ttl * 0.15)
             effective_ttl = ttl + random.randint(-jitter, jitter)
-            result = self.redis_client.setex(cache_key, effective_ttl, data)
+            result = await client.setex(cache_key, effective_ttl, data)
             logger.debug(f"Cached stance classification: {cache_key} (TTL: {ttl}s)")
             return bool(result)
         except Exception as e:
             logger.error(f"Failed to cache stance classification: {e}")
+            self._note_failure(e)
             return False
 
     # Evidence meter caching
@@ -131,7 +161,8 @@ class EvidenceCacheService:
         organization_id,
     ) -> Optional[Dict]:
         """Get cached evidence meter"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return None
 
         cache_key = self._generate_meter_cache_key(
@@ -139,7 +170,7 @@ class EvidenceCacheService:
         )
 
         try:
-            data = self.redis_client.get(cache_key)
+            data = await client.get(cache_key)
             if data:
                 result = self._deserialize_data(data)
                 logger.debug(f"Cache hit for evidence meter: {cache_key}")
@@ -147,6 +178,7 @@ class EvidenceCacheService:
             return None
         except Exception as e:
             logger.error(f"Failed to get evidence meter from cache: {e}")
+            self._note_failure(e)
             return None
 
     async def set_evidence_meter(
@@ -159,7 +191,8 @@ class EvidenceCacheService:
         ttl: int = 86400,
     ) -> bool:
         """Set evidence meter in cache"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return False
 
         cache_key = self._generate_meter_cache_key(
@@ -168,11 +201,12 @@ class EvidenceCacheService:
 
         try:
             data = self._serialize_data(meter_data)
-            result = self.redis_client.setex(cache_key, ttl, data)
+            result = await client.setex(cache_key, ttl, data)
             logger.debug(f"Cached evidence meter: {cache_key} (TTL: {ttl}s)")
             return bool(result)
         except Exception as e:
             logger.error(f"Failed to cache evidence meter: {e}")
+            self._note_failure(e)
             return False
 
     # Batch operations
@@ -181,12 +215,13 @@ class EvidenceCacheService:
         self, cache_keys: List[str]
     ) -> Dict[str, Optional[Dict]]:
         """Get multiple stance classifications from cache"""
-        if not self._ensure_connected() or not cache_keys:
+        client = self._client()
+        if client is None or not cache_keys:
             return {key: None for key in cache_keys}
 
         try:
             # Use mget for efficient batch retrieval
-            results = self.redis_client.mget(cache_keys)
+            results = await client.mget(cache_keys)
 
             cache_results = {}
             for i, key in enumerate(cache_keys):
@@ -208,23 +243,25 @@ class EvidenceCacheService:
 
         except Exception as e:
             logger.error(f"Failed to get stance classifications batch: {e}")
+            self._note_failure(e)
             return {key: None for key in cache_keys}
 
     async def set_stance_classifications_batch(
         self, classifications: Dict[str, Dict], ttl: int = 86400
     ) -> bool:
         """Set multiple stance classifications in cache"""
-        if not self._ensure_connected() or not classifications:
+        client = self._client()
+        if client is None or not classifications:
             return False
 
         try:
-            pipe = self.redis_client.pipeline()
+            pipe = client.pipeline()
 
             for cache_key, classification in classifications.items():
                 data = self._serialize_data(classification)
                 pipe.setex(cache_key, ttl, data)
 
-            results = pipe.execute()
+            results = await pipe.execute()
             success_count = sum(1 for r in results if r)
 
             logger.debug(
@@ -234,13 +271,15 @@ class EvidenceCacheService:
 
         except Exception as e:
             logger.error(f"Failed to set stance classifications batch: {e}")
+            self._note_failure(e)
             return False
 
     # Cache management
 
     async def invalidate_claim_cache(self, claim_hash: str) -> int:
         """Invalidate all cache entries for a claim"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return 0
 
         try:
@@ -252,9 +291,9 @@ class EvidenceCacheService:
 
             deleted_count = 0
             for pattern in patterns:
-                keys = self.redis_client.keys(pattern)
+                keys = await self._scan_keys(client, pattern)
                 if keys:
-                    deleted = self.redis_client.delete(*keys)
+                    deleted = await client.delete(*keys)
                     deleted_count += deleted
 
             logger.info(
@@ -264,20 +303,22 @@ class EvidenceCacheService:
 
         except Exception as e:
             logger.error(f"Failed to invalidate claim cache: {e}")
+            self._note_failure(e)
             return 0
 
     async def invalidate_source_cache(self, source_id: str) -> int:
         """Invalidate all cache entries for a source"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return 0
 
         try:
             # Find stance classifications for this source
             pattern = f"stance:*:{source_id}:*"
-            keys = self.redis_client.keys(pattern)
+            keys = await self._scan_keys(client, pattern)
 
             if keys:
-                deleted = self.redis_client.delete(*keys)
+                deleted = await client.delete(*keys)
                 logger.info(
                     f"Invalidated {deleted} cache entries for source {source_id}"
                 )
@@ -287,18 +328,20 @@ class EvidenceCacheService:
 
         except Exception as e:
             logger.error(f"Failed to invalidate source cache: {e}")
+            self._note_failure(e)
             return 0
 
     async def cleanup_old_model_versions(self, current_model_version: str) -> int:
         """Clean up cache entries from old model versions"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return 0
 
         try:
             # Find all stance and meter keys
             all_keys = []
             for pattern in ["stance:*", "meter:*"]:
-                keys = self.redis_client.keys(pattern)
+                keys = await self._scan_keys(client, pattern)
                 all_keys.extend(keys)
 
             # Filter for old model versions
@@ -312,7 +355,7 @@ class EvidenceCacheService:
                     old_keys.append(key)  # Mark old versions for deletion
 
             if old_keys:
-                deleted = self.redis_client.delete(*old_keys)
+                deleted = await client.delete(*old_keys)
                 logger.info(
                     f"Cleaned up {deleted} cache entries from old model versions"
                 )
@@ -322,21 +365,23 @@ class EvidenceCacheService:
 
         except Exception as e:
             logger.error(f"Failed to cleanup old model versions: {e}")
+            self._note_failure(e)
             return 0
 
     # Cache statistics
 
     async def get_cache_stats(self) -> Dict:
         """Get cache usage statistics"""
-        if not self._ensure_connected():
+        client = self._client()
+        if client is None:
             return {"error": "Redis not connected"}
 
         try:
-            info = self.redis_client.info()
+            info = await client.info()
 
             # Count different key types
-            stance_keys = len(self.redis_client.keys("stance:*"))
-            meter_keys = len(self.redis_client.keys("meter:*"))
+            stance_keys = len(await self._scan_keys(client, "stance:*"))
+            meter_keys = len(await self._scan_keys(client, "meter:*"))
 
             return {
                 "connected": True,
@@ -352,4 +397,5 @@ class EvidenceCacheService:
 
         except Exception as e:
             logger.error(f"Failed to get cache stats: {e}")
+            self._note_failure(e)
             return {"error": str(e)}

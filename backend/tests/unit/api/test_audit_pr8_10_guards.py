@@ -105,7 +105,7 @@ def test_local_fallback_secrets_are_process_stable() -> None:
 # R5-L15 — already SQL-aggregated upstream; assert no full-row load
 def test_metrics_summary_is_sql_aggregate() -> None:
     src = _read("src/api/infrastructure/evaluation.py")
-    blk = src[src.find("async def get_metrics_summary") :]
+    blk = src[src.find("def get_metrics_summary") :]
     assert "func.count(EvaluationMetric.id)" in blk[:2500]
     assert ".all()\n        )" in blk  # aggregates, not ORM rows loop
 
