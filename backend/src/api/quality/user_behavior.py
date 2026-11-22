@@ -731,8 +731,13 @@ async def export_behavior_data(
             export_data["patterns"] = patterns
 
         elif export_request.data_type == "content_usage":
-            export_data["content_usage"] = _query_content_usage(
-                db, current_user.organization_id, days_back, limit=500
+            # Sync Session query: keep it off the event loop (GOO-643 API-5).
+            export_data["content_usage"] = await asyncio.to_thread(
+                _query_content_usage,
+                db,
+                current_user.organization_id,
+                days_back,
+                limit=500,
             )
 
         # Create export response

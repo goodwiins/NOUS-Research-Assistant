@@ -67,9 +67,7 @@ def test_search_analytics_uses_persisted_events() -> None:
         )
     ]
     logger = src[
-        src.find("def log_search_query") : src.find(
-            "def persist_api_key_usage_log"
-        )
+        src.find("def log_search_query") : src.find("def persist_api_key_usage_log")
     ]
     assert "_load_search_analytics" in analytics
     assert "Placeholder" not in analytics

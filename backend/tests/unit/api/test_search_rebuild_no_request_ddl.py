@@ -51,9 +51,7 @@ async def test_rebuild_does_not_create_indexes(monkeypatch: pytest.MonkeyPatch) 
         lambda doc_id, db: rebuilt.append(doc_id),
     )
 
-    response = search_api.rebuild_search_indexes(
-        current_user=_admin(), db=MagicMock()
-    )
+    response = search_api.rebuild_search_indexes(current_user=_admin(), db=MagicMock())
 
     assert rebuilt == ["d1", "d2"]
     # Same response keys as before; the flag/message are now truthful.

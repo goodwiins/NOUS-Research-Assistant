@@ -56,18 +56,6 @@ SYNC_HANDLERS = {
         "shutdown_worker",
         "get_workers_health",
     ],
-    "src.api.auth.tenant_management": [
-        "create_organization",
-        "get_organization",
-        "update_organization",
-        "upgrade_storage_tier",
-        "get_storage_quota_status",
-        "get_user_count",
-        "get_organization_analytics",
-        "validate_organization_limits",
-        "get_current_tenant_info",
-        "test_tenant_isolation",
-    ],
     "src.api.arxiv.arxiv_local": ["list_local_papers", "get_local_papers_stats"],
 }
 

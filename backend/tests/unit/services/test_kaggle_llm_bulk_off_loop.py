@@ -28,9 +28,7 @@ def _write_snapshot(directory: Path, categories: List[str]) -> None:
 
 def test_iter_papers_filters_by_category(tmp_path: Path) -> None:
     _write_snapshot(tmp_path, ["cs.AI", "math.CO", "cs.LG cs.AI", "q-bio"])
-    papers = mod._iter_papers(
-        tmp_path / "arxiv-metadata-oai-snapshot.json", ["cs.AI"]
-    )
+    papers = mod._iter_papers(tmp_path / "arxiv-metadata-oai-snapshot.json", ["cs.AI"])
 
     assert [p["id"] for p in mod._take(papers, 10)] == ["p0", "p2"]
 
@@ -111,3 +109,27 @@ async def test_run_ingestion_reads_the_dataset_off_the_loop(
     assert batches == expected_batches
     assert download_threads and download_threads[0] is not loop_thread
     assert read_threads and all(t is not loop_thread for t in read_threads)
+
+
+def test_closing_the_iterator_while_a_batch_is_running_does_not_raise() -> None:
+    """On cancellation the worker thread can still be inside the generator;
+    ``close()`` then raises ValueError, which would mask the CancelledError."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _papers() -> Any:
+        entered.set()
+        release.wait(timeout=5)
+        yield {"id": "p0"}
+
+    papers = _papers()
+    worker = threading.Thread(target=lambda: mod._take(papers, 1))
+    worker.start()
+    assert entered.wait(timeout=5)
+    try:
+        mod._close_papers_iter(papers)  # must not raise
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    mod._close_papers_iter(papers)  # a normal close still works

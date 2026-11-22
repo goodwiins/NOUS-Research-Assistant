@@ -107,4 +107,3 @@ async def test_health_probe_pings_once() -> None:
     service = _service(fake)
     assert await service._ensure_connected() is True
     assert fake.pings == 1
-

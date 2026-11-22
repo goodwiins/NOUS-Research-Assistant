@@ -25,7 +25,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypedDict
+from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, TypedDict
 
 from src.core.neo4j_auth import get_neo4j_auth
 
@@ -655,7 +655,7 @@ Response (JSON array only):"""
 
                         papers_buffer = []
                 finally:
-                    papers_iter.close()
+                    _close_papers_iter(papers_iter)
 
                 # Process remaining papers
                 if papers_buffer and total_stats["processed"] < self.max_papers:
@@ -694,7 +694,7 @@ Response (JSON array only):"""
 
 def _iter_papers(
     json_file: Path, categories: Optional[List[str]]
-) -> Iterator[Dict[str, Any]]:
+) -> Generator[Dict[str, Any], None, None]:
     """Yield snapshot papers, filtered by category. Blocking: drive it from a
     worker thread (``_take``), never from the event loop."""
     with open(json_file, "r") as f:
@@ -705,6 +705,20 @@ def _iter_papers(
                 if not any(cat in paper_cats for cat in categories):
                     continue
             yield paper
+
+
+def _close_papers_iter(papers: Generator[Dict[str, Any], None, None]) -> None:
+    """Close the snapshot reader, even if a cancelled batch is still running.
+
+    After a cancellation the worker thread can still be inside the generator,
+    and ``close()`` then raises ValueError ("generator already executing"),
+    masking the CancelledError. Once that thread finishes nothing references
+    the generator, so it is collected and its file closed.
+    """
+    try:
+        papers.close()
+    except ValueError:
+        logger.debug("snapshot reader still busy in a worker thread; left to GC")
 
 
 def _take(papers: Iterator[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
