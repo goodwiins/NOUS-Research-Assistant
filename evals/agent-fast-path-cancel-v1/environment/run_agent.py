@@ -516,12 +516,14 @@ def annotate_client_token_log(
     server_index = 0
     for token in client_tokens:
         match_end: str | None = None
-        while server_index < len(server_tokens):
-            server = server_tokens[server_index]
-            server_index += 1
+        # Search forward from the last match without consuming the history:
+        # an unmatched token must not hide every later token from the search.
+        for index in range(server_index, len(server_tokens)):
+            server = server_tokens[index]
             if server.get("sequence") == token.get("sequence") and server.get(
                 "content"
             ) == token.get("content"):
+                server_index = index + 1
                 match_end = "".join(t["content"] for t in server_tokens[:server_index])
                 break
         if match_end is not None:

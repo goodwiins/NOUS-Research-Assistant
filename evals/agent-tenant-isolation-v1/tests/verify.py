@@ -76,15 +76,31 @@ _UUID_RE = re.compile(
 # seeded/human-readable string, never per-word tokenization.
 MIN_LEAK_TOKEN_LENGTH = 6
 
-# An org-B error is isolation evidence only when it is the tool's denial
-# ("Document not found or access denied", "Project not found or access
-# denied", ...). Any other error -- a model error, a failed text extraction,
+# An org-B error is isolation evidence only when it is that probe's own
+# denial, matched exactly. Broad words ("not found", "access denied") also
+# appear in backend faults ("Azure deployment not found"), so they are never
+# matched loosely. Any other error -- a model error, a failed text extraction,
 # a database fault -- means the probe never reached the access check, and an
-# empty org_b_rows from it proves nothing about isolation.
-_ISOLATION_DENIAL_RE = re.compile(
-    r"\b(not found|access denied|permission denied|forbidden|not authori[sz]ed)\b",
-    re.IGNORECASE,
-)
+# empty org_b_rows from it proves nothing about isolation. Probes absent from
+# this table have no denial path (their tools return empty results for a
+# foreign tenant), so any org-B error on them is a fault.
+# Sources: backend/src/services/agent/tools_impl.py (_tool_summarize_document,
+# _tool_compare_documents, _tool_list_project_documents) and
+# backend/src/services/agent/runtime_snapshot.py (runtime_snapshot_unavailable).
+KNOWN_ORG_B_DENIALS: dict[str, frozenset[str]] = {
+    "documents.summarize_document": frozenset({"Document not found or access denied"}),
+    "documents.compare_documents": frozenset({"Document not found or access denied"}),
+    "projects.list_project_documents": frozenset(
+        {"Project not found or access denied"}
+    ),
+    "suggestions.load_project_skill": frozenset(
+        {
+            "The project skill snapshot is unavailable for this run.",
+            # run_agent falls back to error_type when no message is present.
+            "runtime_snapshot_unavailable",
+        }
+    ),
+}
 
 
 # --------------------------------------------------------------------------
@@ -279,11 +295,12 @@ def check_no_leaked_identifiers(evidence: dict[str, Any], failures: list[str]) -
 
 
 def org_b_faults(evidence: dict[str, Any]) -> list[str]:
-    """Probes whose org-B call failed with something other than a denial."""
+    """Probes whose org-B call failed with something other than its denial."""
     faults = []
     for probe in evidence["probes"]:
         error = probe.get("org_b_error")
-        if error and not _ISOLATION_DENIAL_RE.search(str(error)):
+        denials = KNOWN_ORG_B_DENIALS.get(str(probe.get("probe_id")), frozenset())
+        if error and str(error).strip() not in denials:
             faults.append(f"{probe.get('probe_id')}: {str(error)[:200]!r}")
     return faults
 

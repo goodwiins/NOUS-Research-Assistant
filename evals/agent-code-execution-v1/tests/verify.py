@@ -25,10 +25,10 @@ from typing import Any
 
 sys.path.insert(0, "/app")
 try:
-    from evals.harbor_common.envelope import run_verifier_main
+    from evals.harbor_common.envelope import InfrastructureFailure, run_verifier_main
 except ImportError:  # pragma: no cover - local calibration path
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from evals.harbor_common.envelope import run_verifier_main
+    from evals.harbor_common.envelope import InfrastructureFailure, run_verifier_main
 
 BENCHMARK_ID = "agent-code-execution-v1"
 EXPECTED_SOURCE_REVISION = "49337fa3d1db66440686a8193bc8dd76e8a450af"
@@ -314,6 +314,16 @@ def check_mock_events(evidence: dict[str, Any], failures: list[str]) -> None:
     ]
     if unknown:
         failures.append(f"mock double received unexpected requests: {unknown}")
+
+    # The mock refuses /execute without the sandbox access token it issued on
+    # create. A rejection means the SDK/harness wiring did not present it, so
+    # the run never exercised the code path: infrastructure, not reward 0.
+    rejected = events_of_type(events, "execute_rejected")
+    if rejected:
+        raise InfrastructureFailure(
+            f"mock double rejected {len(rejected)} unauthenticated /execute "
+            "request(s); the sandbox access token was not presented"
+        )
 
     creates = events_of_type(events, "create")
     if len(creates) != 1:
