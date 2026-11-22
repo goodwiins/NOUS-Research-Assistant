@@ -305,3 +305,68 @@ async def test_export_user_behavior_as_csv(monkeypatch: pytest.MonkeyPatch) -> N
     assert patterns == [
         {"pattern": "power_users", "user_id": USER, "name": "A B", "session_count": "9"}
     ]
+
+
+# ---- CSV cells are safe to open in a spreadsheet (GOO-691) ------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['=HYPERLINK("http://x")', "+1+1", "-2+3", "@SUM(A1)", "\tcmd", "\rcmd"],
+)
+def test_csv_prefixes_formula_cells_with_a_quote(value: str) -> None:
+    # A title or name starting with = + - @ TAB CR runs as a formula in Excel,
+    # LibreOffice and Sheets; the leading quote makes it literal text.
+    rows = list(csv.DictReader(io.StringIO(ub._csv_table([{"title": value}]))))
+
+    assert rows == [{"title": "'" + value}]
+
+
+def test_csv_leaves_plain_text_and_numbers_alone() -> None:
+    table = ub._csv_table([{"title": "a=b", "delta": -3, "rate": -0.5, "n": None}])
+
+    rows = list(csv.DictReader(io.StringIO(table)))
+    assert rows == [{"title": "a=b", "delta": "-3", "rate": "-0.5", "n": ""}]
+
+
+async def test_export_user_behavior_csv_sanitizes_user_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trends = AsyncMock(return_value={"session_trends": []})
+    patterns = AsyncMock(
+        return_value={"power_users": [{"user_id": USER, "name": "=cmd|' /C calc'!A0"}]}
+    )
+    monkeypatch.setattr(ub.user_behavior_service, "get_behavior_trends", trends)
+    monkeypatch.setattr(
+        ub.user_behavior_service, "identify_behavior_patterns", patterns
+    )
+
+    resp = await _export(_req(format="csv"))
+
+    rows = list(csv.DictReader(io.StringIO(resp["data"]["patterns"])))
+    assert rows[0]["name"] == "'=cmd|' /C calc'!A0"
+
+
+# ---- json is the export default (GOO-691) -----------------------------------
+
+
+def _default_format_request() -> AnalyticsExportRequest:
+    end = datetime(2026, 11, 21)
+    return AnalyticsExportRequest(
+        data_type="user_behavior", start_date=end - timedelta(days=7), end_date=end
+    )
+
+
+def test_export_request_defaults_to_json() -> None:
+    assert _default_format_request().format == "json"
+
+
+async def test_export_without_format_returns_structured_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_behavior(monkeypatch)
+
+    resp = await _export(_default_format_request())
+
+    assert resp["format"] == "json"
+    assert resp["data"] == {"trends": TRENDS, "patterns": PATTERNS}

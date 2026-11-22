@@ -510,6 +510,7 @@ class UserBehaviorService:
                     AVG(CASE WHEN e.user_rating IS NOT NULL THEN e.user_rating END) as avg_satisfaction
                 FROM search_sessions s
                 LEFT JOIN search_events e ON s.id = e.session_id
+                    AND e.organization_id = :org_id
                 WHERE s.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
                     AND s.start_time < :end_date
@@ -583,6 +584,7 @@ class UserBehaviorService:
                     AVG(CASE WHEN e.clicked_results > 0 THEN 1 ELSE 0 END) as success_rate
                 FROM search_sessions s
                 LEFT JOIN search_events e ON s.id = e.session_id
+                    AND e.organization_id = :org_id
                 WHERE s.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
             """),
@@ -600,6 +602,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY e.query
                 ORDER BY search_count DESC
@@ -618,6 +621,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY e.search_type
                 ORDER BY count DESC
@@ -634,6 +638,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY hour
                 ORDER BY search_count DESC
@@ -719,6 +724,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                     AND e.user_rating IS NOT NULL
             """),
@@ -734,6 +740,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
             """),
                 {"org_id": organization_id, "cutoff_date": cutoff_date},
@@ -1021,7 +1028,9 @@ class UserBehaviorService:
                     avg_rating=user.avg_rating,
                 )
 
-                patterns[pattern.value].append(
+                # Response buckets are plural ("power_users"); the enum value
+                # alone raised KeyError for every classified user (GOO-691).
+                patterns[f"{pattern.value}s"].append(
                     {
                         "user_id": str(user.id),
                         "name": f"{user.first_name} {user.last_name}",

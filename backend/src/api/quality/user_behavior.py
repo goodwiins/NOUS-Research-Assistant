@@ -52,9 +52,9 @@ async def _off_loop(
 router = APIRouter()
 
 _EXPORT_DATA_TYPES = frozenset({"user_behavior", "content_usage"})
-# Formats the export actually produces. "csv" (the schema default) returns
-# each table as CSV text; anything else is rejected instead of being echoed
-# back over JSON data.
+# Formats the export actually produces. "json" (the schema default) returns
+# the structured rows; "csv" returns each table as CSV text. Anything else is
+# rejected instead of being echoed back over JSON data.
 _EXPORT_FORMATS = frozenset({"json", "csv"})
 # Same ceiling as the routes' ``days_back`` query parameter (le=365), plus a
 # day of slack for calendar-aligned windows.
@@ -68,6 +68,20 @@ def _naive_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+# A spreadsheet runs a cell that starts with one of these as a formula.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> Any:
+    """Make user-controlled text (titles, names) literal in a spreadsheet.
+
+    Only strings are prefixed, so a negative number stays a number (GOO-691).
+    """
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
 def _csv_table(rows: List[Dict[str, Any]]) -> str:
     """Flat rows as CSV text, one column per key seen; "" if there are none."""
     if not rows:
@@ -76,7 +90,9 @@ def _csv_table(rows: List[Dict[str, Any]]) -> str:
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=fieldnames, lineterminator="\n")
     writer.writeheader()
-    writer.writerows(rows)
+    writer.writerows(
+        {key: _csv_cell(value) for key, value in row.items()} for row in rows
+    )
     return out.getvalue()
 
 
