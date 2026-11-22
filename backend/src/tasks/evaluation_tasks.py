@@ -318,9 +318,9 @@ def run_rag_triad_evaluation(self, job_id: str):
                 metrics = None
                 if not evaluation_input.retrieved_context:
                     # No context: the search pipeline retrieves, answers and
-                    # judges the item, and saves its rows for this job. Judging
-                    # it again here cost four more LLM calls and saved a
-                    # second set of rows (GOO-696).
+                    # judges the item, and saves its rows for this job. It used
+                    # to be judged again here, which cost four more LLM calls
+                    # per item (GOO-696).
                     search_results = run_async(
                         rag_evaluation_service.evaluate_search_pipeline(
                             [question],

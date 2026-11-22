@@ -965,13 +965,14 @@ async def evaluation_health_check():
 
         return health_status
 
-    except Exception as e:
-        logger.error(f"Evaluation health check failed: {e}")
+    except Exception:
+        # Public errors use a fixed message; the detail stays in the log.
+        logger.exception("Evaluation health check failed")
         return JSONResponse(
             status_code=503,
             content={
                 "status": "unhealthy",
-                "error": str(e),
+                "error": "Evaluation service health check failed",
                 "timestamp": datetime.utcnow().isoformat(),
             },
         )

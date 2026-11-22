@@ -109,6 +109,34 @@ ORCHESTRATION_TEST_DATABASE_URL="${DISPOSABLE_PG_URL:?}" .venv/bin/python -m pyt
 | Pipeline passes `commit=False` with a caller session (`rag_evaluation_service.py:724`) | the argument removed | `test_pipeline_with_a_caller_session_flushes_and_leaves_it_open` |
 | Pipeline rolls back the caller session on a failed query (`rag_evaluation_service.py:729`) | `db.rollback()` removed | `test_pipeline_rolls_back_the_caller_session_when_a_query_fails` |
 | 64-bit lock key (`evaluation_tasks.py:212`) | `hashtext(:key)` | `test_real_time_lock_uses_the_64_bit_hash` |
-| Real-time lock taken at all (`evaluation_tasks.py:207`) | lock made a no-op | `test_two_concurrent_real_time_deliveries_create_one_job` (Postgres, run alone): two jobs and two judgements. Also the GOO-689 lock tests. |
+| Real-time lock taken at all (`evaluation_tasks.py:207`) | lock made a no-op | Also killed by the GOO-689 lock unit tests. The race test is measured on its own in the amendment below. |
 
 All 14 mutants failed at least one test, and every restore was green.
+
+### Amendment, 2026-11-22: the race test on its own
+
+Review of #2240 found that the first version of
+`test_two_concurrent_real_time_deliveries_create_one_job` did not catch a
+removed lock: it passed 13/13 against three lock mutants. One thread reused
+the pooled connection and finished before the other one connected, so the
+deliveries never overlapped. The first claim here ("run alone: two jobs") came
+from a single run and was wrong.
+
+The test now syncs on things every mutant still goes through. Each delivery
+opens its session and runs `SELECT 1`, so it holds a real connection, before a
+shared barrier. `EvaluationJob.start_job` then sleeps 0.3s, between the job
+lookup and the commit that creates the job. Only the race test was run,
+against the throwaway PostgreSQL 14 cluster, in two rounds (5 and 10 runs per
+mutant):
+
+| Mutation | Race test result |
+|---|---|
+| none (real code) | passed 30/30 |
+| `_lock_real_time_delivery` returns early | failed 15/15 |
+| lock SQL replaced by `SELECT 1` | failed 15/15 |
+| the call at `evaluation_tasks.py:645` deleted | failed 15/15 |
+
+Also in this push: the `/health` 503 body returned `str(e)`. It now returns a
+fixed message and logs the exception.
+`tests/unit/api/test_evaluation_health_safe_error.py` fails (1/1) when the raw
+text is put back.

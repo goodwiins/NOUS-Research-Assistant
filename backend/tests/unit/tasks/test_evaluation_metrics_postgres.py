@@ -220,20 +220,40 @@ def test_failed_batch_summary_rolls_back_the_querys_service_rows(
 def test_two_concurrent_real_time_deliveries_create_one_job(
     judged: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both deliveries of one task id start together; whoever takes the lock
-    holds it a moment before looking for a job. Without the lock both find
-    none and each creates a job and pays for a judgement."""
+    """Two deliveries of one task id really overlap: each opens its session
+    and holds a connection before either goes on (else one thread can reuse
+    the pooled connection and finish before the other starts), and the window
+    between the job lookup and the commit that creates the job is widened.
+    With the lock the second delivery waits, then finds the first one's job.
+    Without it both find none and each creates a job and pays for a
+    judgement.
+
+    The sync points are the session and ``start_job``, not the lock helper,
+    so the test still races when the lock call itself is removed.
+    """
     with _schema() as s:
-        monkeypatch.setattr(et, "SessionLocal", s.factory)
         barrier = threading.Barrier(2)
-        take_lock = et._lock_real_time_delivery
+        opened: list[Session] = []
+        opened_guard = threading.Lock()
 
-        def racing_lock(db: Any, task_id: str) -> None:
-            barrier.wait(timeout=10)
-            take_lock(db, task_id)
-            time.sleep(0.3)  # widen the window between lock and lookup
+        def racing_session() -> Session:
+            db = s.factory()
+            with opened_guard:
+                first_two = len(opened) < 2
+                opened.append(db)
+            if first_two:  # the two deliveries; any later session is free
+                db.execute(text("SELECT 1"))  # hold a real connection
+                barrier.wait(timeout=10)
+            return db
 
-        monkeypatch.setattr(et, "_lock_real_time_delivery", racing_lock)
+        monkeypatch.setattr(et, "SessionLocal", racing_session)
+        start_job = EvaluationJob.start_job
+
+        def slow_start_job(job: EvaluationJob) -> None:
+            start_job(job)
+            time.sleep(0.3)  # after the lookup, before the creating commit
+
+        monkeypatch.setattr(EvaluationJob, "start_job", slow_start_job)
         states: list[str] = []
 
         def deliver() -> None:
