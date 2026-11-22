@@ -138,6 +138,10 @@ backend:
     # PLATFORM_OPERATOR_USER_IDS key in Infisical app-secrets, never here: an
     # env literal (even "") would override envFrom and would publish user ids
     # in this public repo. GOO-673; see docs/engineering/gotchas.md.
+    # NOTE: live dev never sees this copy. values-aws.yaml replaces the whole
+    # backend.env list (Helm does not merge lists), so only its own
+    # PLATFORM_OPERATOR_USER_IDS entry reaches the pods. This one is only for
+    # base-file-only renders; keep the two in sync.
     - name: PLATFORM_OPERATOR_USER_IDS
       valueFrom:
         secretKeyRef:

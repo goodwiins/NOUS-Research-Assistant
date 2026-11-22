@@ -36,6 +36,19 @@ put the ids in a values file: the repo is public, and an `env` literal (even
 `""`) would override the `envFrom` secret. `tests/deployment_consistency_render_test.py`
 asserts this wiring.
 
+Adding or changing the key does not reach running pods by itself. Env vars are
+read once, at container start. Reloader only watches the
+`aws-database-credentials` secret, not `app-secrets`. Once the Infisical sync has
+updated `app-secrets`, an operator must restart the backend, celery-worker and
+celery-beat Deployments by hand, with `kubectl -n multimodal-rag-system rollout restart deployment/<name>`
+for each one. That is an authorized operational mutation, like any restart. The
+next release rollout also picks the key up. Until the restart, every pod keeps the
+old value.
+
+Only the `values-aws.yaml` entry reaches the live dev pods: Helm replaces lists
+instead of merging them, so `values-aws.yaml`'s `backend.env` replaces the one in
+`values.yaml`. The `values.yaml` copy covers renders that use the base file alone.
+
 ## Database migrations
 
 AWS enables `backend.migrations.enabled` and disables
