@@ -45,13 +45,15 @@ exit 0
 # - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT;
 # - any other psql call stores its stdin in $STUB_PSQL_STDIN;
 # - `cp` copies its source to $STUB_CP_OUT.
+# $STUB_FAIL lists steps that exit 1 instead: probe, load, cp.
 KUBECTL_STUB = """#!/bin/sh
 echo "kubectl $*" >> "$STUB_LOG"
+fails() { case " ${STUB_FAIL:-} " in *" $1 "*) return 0 ;; esac; return 1; }
 case "$*" in
     *"get pods"*"app=redis"*) printf '%s' "${STUB_REDIS_POD:-}"; exit 0 ;;
-    *psql*-tAc*) echo "${STUB_TABLE_COUNT:-0}"; exit 0 ;;
-    *psql*) cat > "$STUB_PSQL_STDIN"; exit 0 ;;
-    cp\\ *) cp "$2" "$STUB_CP_OUT"; exit 0 ;;
+    *psql*-tAc*) fails probe && exit 1; echo "${STUB_TABLE_COUNT:-0}"; exit 0 ;;
+    *psql*) cat > "$STUB_PSQL_STDIN"; fails load && exit 1; exit 0 ;;
+    cp\\ *) fails cp && exit 1; cp "$2" "$STUB_CP_OUT"; exit 0 ;;
 esac
 exit 0
 """
@@ -70,6 +72,8 @@ if [ "$1" = "s3" ] && [ "$2" = "sync" ]; then
                 printf 'not gzip' > "$d/postgres/postgres_backup_${STUB_BACKUP_ID}.sql.gz" ;;
             redis) mkdir -p "$d/redis"
                 printf 'REDIS0011' | gzip > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
+            badredis) mkdir -p "$d/redis"
+                printf 'not gzip' > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
             neo4j) mkdir -p "$d/neo4j"
                 printf 'dump' | gzip > "$d/neo4j/neo4j_backup_${STUB_BACKUP_ID}.dump.gz" ;;
         esac
@@ -163,7 +167,57 @@ def test_restore_pipes_the_dump_into_psql_with_on_error_stop(tmp_path: Path) -> 
     load = [
         line for line in calls.splitlines() if "psql" in line and "-tAc" not in line
     ]
-    assert len(load) == 1 and "ON_ERROR_STOP=1" in load[0], calls
+    assert len(load) == 1, calls
+    assert "ON_ERROR_STOP=1" in load[0] and "--single-transaction" in load[0]
+
+
+def test_emptiness_probe_counts_only_base_tables(tmp_path: Path) -> None:
+    _result, calls, _output = _restore(tmp_path, "postgres")
+    probe = next(line for line in calls.splitlines() if "-tAc" in line)
+    # Views and extension-owned tables must not make a fresh DB look populated.
+    assert "relkind IN ('r', 'p')" in probe and "deptype = 'e'" in probe
+
+
+def test_failed_psql_load_fails_the_restore(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "postgres", STUB_FAIL="load")
+    assert result.returncode != 0, output
+    assert "PostgreSQL restore failed" in output
+    assert "Restored 1 component" not in output
+
+
+def test_failed_emptiness_probe_restores_nothing(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "postgres", STUB_FAIL="probe")
+    assert result.returncode != 0, output
+    assert "Cannot query the target PostgreSQL database" in output
+    # It stops at the probe, not later at the emptiness comparison.
+    assert "not empty" not in output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_corrupt_redis_snapshot_leaves_postgres_untouched(tmp_path: Path) -> None:
+    result, _calls, output = _restore(
+        tmp_path, "postgres badredis", STUB_REDIS_POD="redis-0"
+    )
+    assert result.returncode != 0, output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_later_failure_says_postgres_was_already_restored(tmp_path: Path) -> None:
+    result, _calls, output = _restore(
+        tmp_path, "postgres redis", STUB_REDIS_POD="redis-0", STUB_FAIL="cp"
+    )
+    assert result.returncode != 0, output
+    assert _psql_stdin(tmp_path) == DUMP_SQL
+    assert "PostgreSQL WAS ALREADY RESTORED" in output
+
+
+def test_missing_expected_components_are_reported(tmp_path: Path) -> None:
+    result, _calls, output = _restore(tmp_path, "postgres")
+    assert result.returncode == 0, output
+    missing = [line for line in output.splitlines() if "MISSING" in line]
+    assert any("redis" in line for line in missing), output
+    assert any("neo4j" in line for line in missing), output
+    assert not any("postgres" in line for line in missing), output
 
 
 def test_restore_refuses_a_populated_database(tmp_path: Path) -> None:

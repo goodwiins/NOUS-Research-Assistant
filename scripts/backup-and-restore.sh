@@ -388,6 +388,14 @@ restore_backup() {
         return 1
     fi
 
+    # A full backup has all three; say loudly which ones this one lacks.
+    local component
+    for component in postgres redis neo4j; do
+        if ! find "$restore_dir/$component" -type f -name "*_${backup_id}.*" 2>/dev/null | grep -q .; then
+            log_warning "MISSING from backup $backup_id: $component (it will not be restored)"
+        fi
+    done
+
     local pg_file="$restore_dir/postgres/postgres_backup_${backup_id}.sql.gz"
     local redis_file="$restore_dir/redis/redis_backup_${backup_id}.rdb.gz"
     local redis_pod=""
@@ -402,17 +410,18 @@ restore_backup() {
         fi
         # The dump is a plain pg_dump without --clean: loading it into a
         # populated database collides with existing objects. Require an empty
-        # target instead of guessing what to drop.
+        # target instead of guessing what to drop. Count base and partitioned
+        # tables only: views and extension-owned tables do not make it populated.
         local table_count
         if ! table_count=$(kubectl exec -n "$NAMESPACE" deployment/postgres -- \
             psql -U raguser -d ragdb -tAc \
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"); then
+            "SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')"); then
             log_error "Cannot query the target PostgreSQL database; nothing restored"
             return 1
         fi
         table_count="${table_count//[[:space:]]/}"
         if [ "$table_count" != "0" ]; then
-            log_error "Target database ragdb is not empty ($table_count tables). The dump has no DROP statements: drop and recreate ragdb, then re-run. Nothing restored."
+            log_error "Target database ragdb is not empty ($table_count tables). The dump has no DROP statements: scale the backend, workers and migrate job to 0, drop and recreate ragdb (see RUNBOOKS.md), then re-run. Nothing restored."
             return 1
         fi
     fi
@@ -449,7 +458,11 @@ restore_backup() {
         local redis_target="/tmp/redis_restore_${backup_id}.rdb"
         gunzip -c "$redis_file" > "$redis_rdb"
         if ! kubectl cp "$redis_rdb" "$NAMESPACE/$redis_pod:$redis_target"; then
-            log_error "Copying the Redis snapshot into $redis_pod failed"
+            if [ "$restored" -gt 0 ]; then
+                log_error "Copying the Redis snapshot into $redis_pod failed. PostgreSQL WAS ALREADY RESTORED from $backup_id; do not re-run the restore against it. Copy the Redis snapshot by hand."
+            else
+                log_error "Copying the Redis snapshot into $redis_pod failed"
+            fi
             return 1
         fi
         log_warning "Redis snapshot copied to $redis_pod:$redis_target but NOT loaded: stop Redis, replace dump.rdb in its data dir, then restart it."
