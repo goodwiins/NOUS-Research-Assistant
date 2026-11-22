@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Iterator
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, cast
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -21,7 +22,7 @@ import pytest
 from src.api.quality import performance_dashboard as pd
 from src.core import dependencies
 from src.core.dependencies import require_platform_operator
-from src.models.user import UserRole
+from src.models.user import User, UserRole
 from src.services.quality.performance_dashboard_service import MetricTimeRange
 
 pytestmark = pytest.mark.unit
@@ -39,12 +40,13 @@ def _overview() -> Dict[str, Any]:
     }
 
 
-def _user(role: UserRole) -> SimpleNamespace:
-    return SimpleNamespace(id=uuid4(), organization_id=uuid4(), role=role)
+def _user(role: UserRole) -> User:
+    # The routes only read id / organization_id / role.
+    return cast(User, SimpleNamespace(id=uuid4(), organization_id=uuid4(), role=role))
 
 
 @pytest.fixture
-def overview_mock():  # type: ignore[no-untyped-def]
+def overview_mock() -> Iterator[Dict[str, Any]]:
     cached = _overview()
     with patch.object(
         pd.performance_dashboard_service,
@@ -54,14 +56,16 @@ def overview_mock():  # type: ignore[no-untyped-def]
         yield cached
 
 
-def _make_operator(monkeypatch: pytest.MonkeyPatch, user: SimpleNamespace) -> None:
+def _make_operator(monkeypatch: pytest.MonkeyPatch, user: User) -> None:
     monkeypatch.setattr(
         dependencies.settings, "PLATFORM_OPERATOR_USER_IDS", str(user.id)
     )
 
 
 @pytest.mark.asyncio
-async def test_member_overview_omits_host_and_engagement(overview_mock) -> None:  # type: ignore[no-untyped-def]
+async def test_member_overview_omits_host_and_engagement(
+    overview_mock: Dict[str, Any],
+) -> None:
     body = await pd.get_dashboard_overview(
         time_range=MetricTimeRange.LAST_24H, current_user=_user(UserRole.USER)
     )
@@ -73,7 +77,9 @@ async def test_member_overview_omits_host_and_engagement(overview_mock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_member_export_omits_host_and_engagement(overview_mock) -> None:  # type: ignore[no-untyped-def]
+async def test_member_export_omits_host_and_engagement(
+    overview_mock: Dict[str, Any],
+) -> None:
     body = await pd.export_dashboard_data(
         format="json",
         time_range=MetricTimeRange.LAST_24H,
@@ -86,7 +92,9 @@ async def test_member_export_omits_host_and_engagement(overview_mock) -> None:  
 
 
 @pytest.mark.asyncio
-async def test_member_csv_export_omits_host_and_engagement(overview_mock) -> None:  # type: ignore[no-untyped-def]
+async def test_member_csv_export_omits_host_and_engagement(
+    overview_mock: Dict[str, Any],
+) -> None:
     response = await pd.export_dashboard_data(
         format="csv",
         time_range=MetricTimeRange.LAST_24H,
@@ -98,7 +106,9 @@ async def test_member_csv_export_omits_host_and_engagement(overview_mock) -> Non
 
 
 @pytest.mark.asyncio
-async def test_org_admin_gets_engagement_but_not_host_metrics(overview_mock) -> None:  # type: ignore[no-untyped-def]
+async def test_org_admin_gets_engagement_but_not_host_metrics(
+    overview_mock: Dict[str, Any],
+) -> None:
     body = await pd.get_dashboard_overview(
         time_range=MetricTimeRange.LAST_24H, current_user=_user(UserRole.ADMIN)
     )
@@ -108,7 +118,7 @@ async def test_org_admin_gets_engagement_but_not_host_metrics(overview_mock) -> 
 
 @pytest.mark.asyncio
 async def test_platform_operator_gets_host_metrics(
-    overview_mock, monkeypatch: pytest.MonkeyPatch  # type: ignore[no-untyped-def]
+    overview_mock: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     operator = _user(UserRole.USER)
     _make_operator(monkeypatch, operator)
@@ -126,5 +136,5 @@ def test_system_health_route_requires_platform_operator() -> None:
 
 def test_tenant_admin_is_not_a_platform_operator() -> None:
     with pytest.raises(Exception) as exc:
-        require_platform_operator(current_user=_user(UserRole.ADMIN))  # type: ignore[arg-type]
+        require_platform_operator(current_user=_user(UserRole.ADMIN))
     assert getattr(exc.value, "status_code", None) == 403
