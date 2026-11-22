@@ -153,6 +153,76 @@ async def test_full_slots_reject_instead_of_queueing(
     assert await service.extract_region(_doc(path), 1, 0, 0, 10, 10) == {"ok": True}
 
 
+def test_one_extraction_at_a_time_per_process() -> None:
+    """PyMuPDF and PDFium are not thread-safe: never two extractions at once."""
+    assert mod.MAX_CONCURRENT_EXTRACTIONS == 1
+
+
+async def test_cancelled_request_keeps_the_slot_until_the_thread_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client disconnect cancels the await, not the thread: the slot must
+    stay held while the PDF work is still running."""
+    path = str(tmp_path / "a.pdf")
+    _pdf(path)
+    service = mod.TableExtractionService()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked(*_args: Any) -> dict:
+        entered.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "_extract_region_sync", _blocked)
+    task = asyncio.create_task(service.extract_region(_doc(path), 1, 0, 0, 10, 10))
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The thread is still inside PyMuPDF: a new request must be refused.
+    with pytest.raises(mod.ExtractionBusyError):
+        await service.extract_region(_doc(path), 1, 0, 0, 10, 10)
+
+    release.set()
+    for _ in range(100):  # the worker frees the slot when it finishes
+        if mod._extraction_slots.acquire(blocking=False):
+            mod._extraction_slots.release()
+            break
+        await asyncio.sleep(0.02)
+    else:
+        pytest.fail("slot never released after the worker finished")
+
+
+async def test_cancelled_before_the_thread_starts_frees_the_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: List[bool] = []
+    gate = threading.Event()
+
+    # Occupy the default executor so the bounded call queues behind it.
+    loop = asyncio.get_running_loop()
+    from concurrent.futures import ThreadPoolExecutor
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    blocker = loop.run_in_executor(None, gate.wait, 5)
+    try:
+        task = asyncio.create_task(mod._run_bounded(lambda: ran.append(True)))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert mod._extraction_slots.acquire(blocking=False), "slot leaked"
+        mod._extraction_slots.release()
+    finally:
+        gate.set()
+        await blocker
+    await asyncio.sleep(0.05)
+    assert ran == []  # the abandoned call never runs once the executor frees
+
+
 class _Result:
     def __init__(self, document: Any) -> None:
         self._document = document

@@ -19,7 +19,9 @@ logger = structlog.get_logger()
 # bounded in size, pages and concurrency.
 MAX_EXTRACTION_PDF_BYTES = 50 * 1024 * 1024
 MAX_TABLE_PAGES = 30
-MAX_CONCURRENT_EXTRACTIONS = 2
+# PyMuPDF and PDFium (Camelot) are not thread-safe, so one extraction at a
+# time per process.
+MAX_CONCURRENT_EXTRACTIONS = 1
 _extraction_slots = threading.BoundedSemaphore(MAX_CONCURRENT_EXTRACTIONS)
 
 _T = TypeVar("_T")
@@ -47,13 +49,36 @@ async def _run_bounded(fn: Callable[..., _T], *args: Any) -> _T:
 
     Rejects instead of queueing when the slots are full, so a burst cannot
     pile up threads (and Ghostscript processes) behind a slow PDF.
+
+    The worker releases the slot when the PDF work actually ends. Cancelling
+    the request (client disconnect) stops only the await; releasing there
+    would let a second extraction start while the first is still inside
+    PyMuPDF. If the call is cancelled before the thread ever starts, the
+    awaiting side releases it and the queued call becomes a no-op.
     """
     if not _extraction_slots.acquire(blocking=False):
         raise ExtractionBusyError("table extraction is busy")
+    handoff = threading.Lock()
+    state = {"started": False, "abandoned": False}
+
+    def _in_worker() -> _T:
+        with handoff:
+            if state["abandoned"]:
+                raise asyncio.CancelledError()  # nobody awaits this result
+            state["started"] = True
+        try:
+            return fn(*args)
+        finally:
+            _extraction_slots.release()
+
     try:
-        return await asyncio.to_thread(fn, *args)
-    finally:
-        _extraction_slots.release()
+        return await asyncio.to_thread(_in_worker)
+    except BaseException:
+        with handoff:
+            if not state["started"]:
+                state["abandoned"] = True
+                _extraction_slots.release()
+        raise
 
 
 class TableExtractionService:
