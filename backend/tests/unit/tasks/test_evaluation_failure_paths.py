@@ -362,6 +362,7 @@ def test_real_time_locks_its_task_id_before_looking_for_a_job(
     db.get_bind.return_value.dialect.name = "postgresql"
     calls: list[str] = []
     db.execute.side_effect = lambda stmt, params=None: calls.append(f"execute:{params}")
+
     def query(*_: Any) -> MagicMock:
         calls.append("query")
         return MagicMock(**{"filter.return_value.first.return_value": None})
