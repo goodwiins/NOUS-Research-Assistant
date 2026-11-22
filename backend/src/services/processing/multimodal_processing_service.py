@@ -69,6 +69,7 @@ from src.models.document import Document, DocumentType, ProcessingStatus
 from src.models.processing import JobStatus, JobType, ProcessingJob
 from src.services.documents.storage_utils import local_file_for_document
 from src.services.embedding.embedding_service import EmbeddingService
+from src.services.processing import pdf_lock
 from src.services.processing.entity_extraction_service import EntityExtractionService
 
 logger = logging.getLogger(__name__)
@@ -306,18 +307,23 @@ class MultimodalProcessingService:
             with local_file_for_document(document) as file_path:
                 # Extract text using PyMuPDF
                 try:
-                    pdf_document = fitz.open(file_path)
-                    results["page_count"] = len(pdf_document)
+                    # PyMuPDF is not thread-safe (GOO-695).
+                    with pdf_lock.PYMUPDF_LOCK:
+                        pdf_document = fitz.open(file_path)
+                        try:
+                            results["page_count"] = len(pdf_document)
 
-                    text_content = []
-                    for page_num in range(len(pdf_document)):
-                        page = pdf_document.load_page(page_num)
-                        text_content.append(page.get_text())
+                            text_content = []
+                            for page_num in range(len(pdf_document)):
+                                page = pdf_document.load_page(page_num)
+                                text_content.append(page.get_text())
+
+                            # Extract metadata
+                            metadata = pdf_document.metadata
+                        finally:
+                            pdf_document.close()
 
                     results["text_content"] = "\n".join(text_content)
-
-                    # Extract metadata
-                    metadata = pdf_document.metadata
                     results["metadata"] = {
                         "title": metadata.get("title", ""),
                         "author": metadata.get("author", ""),
@@ -327,8 +333,6 @@ class MultimodalProcessingService:
                         "creation_date": metadata.get("creationDate", ""),
                         "modification_date": metadata.get("modDate", ""),
                     }
-
-                    pdf_document.close()
 
                 except Exception as e:
                     logger.error(f"PyMuPDF processing failed: {str(e)}")
@@ -374,17 +378,23 @@ class MultimodalProcessingService:
                     import pytesseract
                     from PIL import Image
 
-                    pdf_document = fitz.open(file_path)
+                    # Every fitz call holds PYMUPDF_LOCK (not thread-safe,
+                    # GOO-695); the OCR itself runs outside it, so a slow
+                    # page does not stall every other PDF path.
+                    with pdf_lock.PYMUPDF_LOCK:
+                        pdf_document = fitz.open(file_path)
+                        page_count = len(pdf_document)
                     ocr_text_pages = []
 
-                    for page_num in range(len(pdf_document)):
-                        page = pdf_document.load_page(page_num)
+                    for page_num in range(page_count):
+                        with pdf_lock.PYMUPDF_LOCK:
+                            page = pdf_document.load_page(page_num)
 
-                        # Convert page to image
-                        pix = page.get_pixmap(
-                            matrix=fitz.Matrix(2, 2)
-                        )  # 2x zoom for better OCR
-                        img_data = pix.tobytes("png")
+                            # Convert page to image
+                            pix = page.get_pixmap(
+                                matrix=fitz.Matrix(2, 2)
+                            )  # 2x zoom for better OCR
+                            img_data = pix.tobytes("png")
 
                         # Perform OCR
                         image = Image.open(io.BytesIO(img_data))
@@ -405,7 +415,8 @@ class MultimodalProcessingService:
                     results["ocr_text"] = "\n".join(ocr_text_pages)
                     results["processing_time"] = time.time() - start_time
 
-                    pdf_document.close()
+                    with pdf_lock.PYMUPDF_LOCK:
+                        pdf_document.close()
 
                 except Exception as e:
                     logger.error(f"OCR processing failed: {str(e)}")

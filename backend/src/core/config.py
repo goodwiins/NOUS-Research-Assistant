@@ -929,6 +929,10 @@ class Settings(BaseSettings):
     RECONCILER_MAX_DOCS_PER_RUN: int = 25
     # Page size for the org-scoped keyset iteration inside one run.
     RECONCILER_BATCH_SIZE: int = 100
+    # A document whose Neo4j re-drive keeps failing is retried this many
+    # times, then marked neo4j_index_status='abandoned' and left alone
+    # (GOO-695). Without a cap it was retried every run forever.
+    RECONCILER_NEO4J_MAX_ATTEMPTS: int = 5
 
     # Per-turn append-only iteration ledger (K-Dense rowan-autosearch
     # pattern). When AGENT_LEDGER_DIR is set, every memory_save_node turn

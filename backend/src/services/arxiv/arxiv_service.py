@@ -10,6 +10,7 @@ import json
 import logging
 import multiprocessing
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -276,17 +277,53 @@ def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
 # Upper bound for one pypdf parse of an arXiv PDF (at most _MAX_PDF_BYTES).
 _PDF_PARSE_TIMEOUT_SECONDS = 120.0
 
+# Parse threads one process may have running in the thread fallback, counting
+# ones whose caller already timed out (GOO-695). A thread cannot be killed, so
+# a timeout there only abandons the await; the slot is released by the thread
+# itself when the parse really ends, which bounds how many abandoned parses
+# can pile up.
+_MAX_THREAD_PARSES = 2
+_thread_parse_slots = threading.BoundedSemaphore(_MAX_THREAD_PARSES)
+
+
+class _ParseSlotsBusy(Exception):
+    """Every thread-fallback parse slot is held by a parse still running."""
+
+
+def _parse_in_thread_slot(slots: threading.BoundedSemaphore, pdf_content: bytes):
+    try:
+        return _extract_pdf_content_sync(pdf_content)
+    finally:
+        slots.release()
+
 
 async def _parse_pdf_off_loop(pdf_content: bytes) -> Dict[str, Any]:
     """Run ``_extract_pdf_content_sync`` without blocking the event loop.
 
     pypdf is pure Python, so a thread still holds the GIL; a worker process
     (the bounded, per-call one ``arxiv_fulltext`` uses) keeps the API loop
-    free. A daemonic process (a Celery prefork worker) may not start
-    children, so there the parse falls back to a thread.
+    free, and is killed if the call times out or is cancelled. A daemonic
+    process (a Celery prefork worker) may not start children, so there the
+    parse falls back to a thread, which a timeout cannot stop: at most
+    ``_MAX_THREAD_PARSES`` such threads run per process, and a parse that
+    finds them all busy fails at once instead of starting another.
     """
     if multiprocessing.current_process().daemon:
-        return await asyncio.to_thread(_extract_pdf_content_sync, pdf_content)
+        slots = _thread_parse_slots
+        if not slots.acquire(blocking=False):
+            raise _ParseSlotsBusy(
+                f"{_MAX_THREAD_PARSES} earlier PDF parses are still running"
+            )
+        try:
+            # run_in_executor submits now, so the slot is always released by
+            # the thread, even if this await is cancelled straight away.
+            future = asyncio.get_running_loop().run_in_executor(
+                None, _parse_in_thread_slot, slots, pdf_content
+            )
+        except BaseException:
+            slots.release()
+            raise
+        return await future
     from src.services.integrations.arxiv_fulltext import run_in_subprocess
 
     return await run_in_subprocess(_extract_pdf_content_sync, pdf_content)
@@ -893,12 +930,24 @@ class ArXivIngestionService:
             Dictionary with extracted content
         """
         try:
-            # A stuck parse must not hold its worker slot forever: the
-            # timeout cancels the call, which kills the per-call worker
-            # process (arxiv_fulltext.run_in_subprocess) and frees the slot.
+            # A stuck parse must not hold its caller forever. In a worker
+            # process (arxiv_fulltext.run_in_subprocess) the timeout kills
+            # the process and frees its slot. In the thread fallback (Celery
+            # prefork) it only stops waiting: the thread runs on, holding one
+            # of the bounded thread slots until it ends (_parse_pdf_off_loop).
             return await asyncio.wait_for(
                 _parse_pdf_off_loop(pdf_content), _PDF_PARSE_TIMEOUT_SECONDS
             )
+        except asyncio.TimeoutError:
+            logger.error(
+                "PDF extraction timed out after %.0fs", _PDF_PARSE_TIMEOUT_SECONDS
+            )
+            raise IngestionError(
+                f"PDF extraction timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+            )
+        except _ParseSlotsBusy as e:
+            logger.error(f"PDF extraction refused: {e}")
+            raise IngestionError(f"PDF extraction refused: {e}")
         except Exception as e:
             logger.error(f"Failed to extract PDF content: {e}")
             raise IngestionError(f"PDF extraction failed: {e}")
