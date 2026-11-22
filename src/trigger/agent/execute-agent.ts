@@ -1,5 +1,6 @@
 import { logger, task, wait, metadata } from "@trigger.dev/sdk";
 import { backendClient, BackendApiError } from "../_lib/backend-client";
+import { deterministicUuid, withClientMessageId } from "../_lib/idempotency";
 import {
   JobStartResponseSchema,
   JobStatusResponseSchema,
@@ -105,15 +106,21 @@ export const executeAgent = task({
     maxTimeoutInMs: 30000,
     factor: 2,
   },
-  run: async (payload: AgentExecutePayload) => {
+  run: async (payload: AgentExecutePayload, { ctx }) => {
     const { accessToken, userId, ...requestFields } = payload;
+    // ctx.run.id is shared by every attempt of this run, so a task-level
+    // retry re-sends the same key and the backend returns the job it already
+    // created instead of starting a second agent run.
+    const clientMessageId = deterministicUuid(
+      `trigger:execute-agent:${ctx.run.id}`,
+    );
 
     logger.info("Starting durable agent execution", { userId });
     metadata.set("status", "running");
     metadata.set("userId", userId);
 
     const backendRequest = {
-      messages: requestFields.messages,
+      messages: withClientMessageId(requestFields.messages, clientMessageId),
       page_context: requestFields.pageContext,
       model: requestFields.model ?? "",
       use_rag: requestFields.useRag ?? true,
@@ -126,6 +133,7 @@ export const executeAgent = task({
       backendRequest,
       JobStartResponseSchema,
       userAuth(accessToken),
+      { idempotent: true },
     );
 
     metadata.set("backendJobId", job_id);

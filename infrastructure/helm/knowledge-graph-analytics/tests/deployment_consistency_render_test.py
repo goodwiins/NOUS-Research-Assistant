@@ -135,6 +135,39 @@ class DeploymentConsistency(unittest.TestCase):
                     self.assertEqual(env["ENVIRONMENT"], "override")
                     self.assertEqual(env["PYTHONPATH"], "/override")
 
+    def test_platform_operator_ids_come_only_from_the_secret_store(self) -> None:
+        """GOO-673: the backend gates host metrics on PLATFORM_OPERATOR_USER_IDS.
+
+        It must be wired from Infisical ``app-secrets`` as an optional key
+        (unset, therefore deny-all, until the owner adds real ids there) and
+        never carry a literal value: an ``env`` literal, even ``""``, would
+        override the ``envFrom`` secret and would publish user ids in git.
+        """
+        wanted = {"backend", "celery-worker", "celery-beat"}
+        seen = set()
+        for _doc, pod in pod_specs(render()):
+            for container in pod.get("containers", []):
+                if container["name"] not in wanted:
+                    continue
+                entries = [
+                    e
+                    for e in container.get("env", [])
+                    if e["name"] == "PLATFORM_OPERATOR_USER_IDS"
+                ]
+                self.assertEqual(len(entries), 1, container["name"])
+                entry = entries[0]
+                self.assertNotIn("value", entry, container["name"])
+                self.assertEqual(
+                    entry["valueFrom"]["secretKeyRef"],
+                    {
+                        "name": "app-secrets",
+                        "key": "PLATFORM_OPERATOR_USER_IDS",
+                        "optional": True,
+                    },
+                )
+                seen.add(container["name"])
+        self.assertEqual(seen, wanted)
+
 
 if __name__ == "__main__":
     unittest.main()

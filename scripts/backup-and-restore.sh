@@ -8,12 +8,21 @@
 
 set -euo pipefail
 
+# Backups hold database contents and Helm values: keep every local file
+# owner-only. Kubernetes Secrets are never backed up here; they are restored
+# from the secret manager, not from backups.
+umask 077
+
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAMESPACE="${NAMESPACE:-knowledge-graph-analytics}"
-BACKUP_DIR="${BACKUP_DIR:-/tmp/knowledge-graph-backups}"
+BACKUP_DIR="${BACKUP_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/kg-backups.XXXXXX")}"
+mkdir -p "$BACKUP_DIR"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+S3_BUCKET="${S3_BUCKET:-knowledge-graph-analytics-backups}"
+# Optional customer-managed key; without it S3 uses the aws/s3 KMS key.
+BACKUP_KMS_KEY_ID="${BACKUP_KMS_KEY_ID:-}"
 LOG_FILE="$BACKUP_DIR/backup_${TIMESTAMP}.log"
 
 # Colors for output
@@ -42,6 +51,16 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+# Upload one file to S3 with server-side KMS encryption.
+s3_upload() {
+    local src="$1" key="$2"
+    local kms_args=()
+    if [ -n "$BACKUP_KMS_KEY_ID" ]; then
+        kms_args=(--sse-kms-key-id "$BACKUP_KMS_KEY_ID")
+    fi
+    aws s3 cp "$src" "s3://$S3_BUCKET/$key" --sse aws:kms "${kms_args[@]+"${kms_args[@]}"}"
 }
 
 # Check dependencies
@@ -106,7 +125,7 @@ backup_postgresql() {
         # Upload to S3 if AWS credentials are available
         if aws sts get-caller-identity &>/dev/null; then
             local s3_key="backups/postgres/postgres_backup_${TIMESTAMP}.sql.gz"
-            aws s3 cp "${backup_file}.gz" "s3://knowledge-graph-analytics-backups/$s3_key"
+            s3_upload "${backup_file}.gz" "$s3_key"
             log_success "PostgreSQL backup uploaded to S3: $s3_key"
         fi
     else
@@ -147,7 +166,7 @@ backup_redis() {
         # Upload to S3 if AWS credentials are available
         if aws sts get-caller-identity &>/dev/null; then
             local s3_key="backups/redis/redis_backup_${TIMESTAMP}.rdb.gz"
-            aws s3 cp "${backup_file}.gz" "s3://knowledge-graph-analytics-backups/$s3_key"
+            s3_upload "${backup_file}.gz" "$s3_key"
             log_success "Redis backup uploaded to S3: $s3_key"
         fi
     else
@@ -188,7 +207,7 @@ backup_neo4j() {
         # Upload to S3 if AWS credentials are available
         if aws sts get-caller-identity &>/dev/null; then
             local s3_key="backups/neo4j/neo4j_backup_${TIMESTAMP}.dump.gz"
-            aws s3 cp "${backup_file}.gz" "s3://knowledge-graph-analytics-backups/$s3_key"
+            s3_upload "${backup_file}.gz" "$s3_key"
             log_success "Neo4j backup uploaded to S3: $s3_key"
         fi
     else
@@ -204,9 +223,10 @@ backup_kubernetes_configs() {
     local config_dir="$BACKUP_DIR/k8s_configs_${TIMESTAMP}"
     mkdir -p "$config_dir"
 
-    # Backup all resources in namespace
-    log_info "Backing up all resources in namespace: $NAMESPACE"
-    kubectl get all,configmaps,secrets,pvc,ingress,roles,rolebindings -n "$NAMESPACE" -o yaml > "$config_dir/all_resources.yaml"
+    # Backup resources in namespace. Secrets are deliberately excluded: a
+    # backup must never become a second, plaintext copy of every credential.
+    log_info "Backing up resources (excluding Secrets) in namespace: $NAMESPACE"
+    kubectl get all,configmaps,pvc,ingress,roles,rolebindings -n "$NAMESPACE" -o yaml > "$config_dir/all_resources.yaml"
 
     # Backup specific application configurations
     log_info "Backing up Helm releases"
@@ -230,10 +250,11 @@ backup_kubernetes_configs() {
 
     # Create archive and upload to S3
     tar -czf "$BACKUP_DIR/k8s_configs_${TIMESTAMP}.tar.gz" -C "$BACKUP_DIR" "k8s_configs_${TIMESTAMP}"
+    rm -r -- "$config_dir"
 
     if aws sts get-caller-identity &>/dev/null; then
         local s3_key="backups/kubernetes/k8s_configs_${TIMESTAMP}.tar.gz"
-        aws s3 cp "$BACKUP_DIR/k8s_configs_${TIMESTAMP}.tar.gz" "s3://knowledge-graph-analytics-backups/$s3_key"
+        s3_upload "$BACKUP_DIR/k8s_configs_${TIMESTAMP}.tar.gz" "$s3_key"
         log_success "Kubernetes configuration backup uploaded to S3: $s3_key"
     fi
 }
@@ -288,7 +309,7 @@ backup_application_files() {
         # Upload to S3 if AWS credentials are available
         if aws sts get-caller-identity &>/dev/null; then
             local s3_key="backups/files/uploads_backup_${TIMESTAMP}.tar.gz"
-            aws s3 cp "$BACKUP_DIR/uploads_backup_${TIMESTAMP}.tar.gz" "s3://knowledge-graph-analytics-backups/$s3_key"
+            s3_upload "$BACKUP_DIR/uploads_backup_${TIMESTAMP}.tar.gz" "$s3_key"
             log_success "Application files backup uploaded to S3: $s3_key"
         fi
     else
@@ -339,11 +360,11 @@ restore_backup() {
     # List available backups
     if aws sts get-caller-identity &>/dev/null; then
         log_info "Available backups in S3:"
-        aws s3 ls s3://knowledge-graph-analytics-backups/backups/ --recursive
+        aws s3 ls "s3://$S3_BUCKET/backups/" --recursive
 
         # Download backup files
         log_info "Downloading backup files for: $backup_id"
-        aws s3 sync "s3://knowledge-graph-analytics-backups/backups/$backup_id" "$restore_dir/"
+        aws s3 sync "s3://$S3_BUCKET/backups/$backup_id" "$restore_dir/"
     else
         log_error "AWS credentials not configured for restore"
         return 1
@@ -378,7 +399,7 @@ list_backups() {
 
     if aws sts get-caller-identity &>/dev/null; then
         echo "=== S3 Backups ==="
-        aws s3 ls s3://knowledge-graph-analytics-backups/backups/ --recursive | head -20
+        aws s3 ls "s3://$S3_BUCKET/backups/" --recursive | head -20
 
         if command -v velero &> /dev/null; then
             echo
@@ -400,7 +421,7 @@ cleanup_old_backups() {
         # Clean up S3 backups
         local cutoff_date=$(date -d "$retention_days days ago" +%Y%m%d)
 
-        aws s3 ls s3://knowledge-graph-analytics-backups/backups/ --recursive | \
+        aws s3 ls "s3://$S3_BUCKET/backups/" --recursive | \
         while read -r line; do
             local date_str=$(echo "$line" | awk '{print $1}')
             local file_path=$(echo "$line" | awk '{print $4}')
@@ -410,7 +431,7 @@ cleanup_old_backups() {
 
             if [ "$file_date" -lt "$cutoff_date" ]; then
                 log_info "Deleting old backup: $file_path"
-                aws s3 rm "s3://knowledge-graph-analytics-backups/$file_path"
+                aws s3 rm "s3://$S3_BUCKET/$file_path"
             fi
         done
 
@@ -476,11 +497,18 @@ Components backed up:
     - PostgreSQL database
     - Redis cache
     - Neo4j graph database
-    - Kubernetes configurations
+    - Kubernetes configurations (Secrets are NOT included; restore them
+      from the secret manager)
     - Application files
     - Velero cluster backup
 
+Environment:
+    BACKUP_DIR           Local staging dir (default: a fresh mktemp -d, mode 0700)
+    S3_BUCKET            Destination bucket (default: knowledge-graph-analytics-backups)
+    BACKUP_KMS_KEY_ID    KMS key for SSE-KMS uploads (default: the aws/s3 key)
+
 Important:
+    - Every upload uses S3 server-side KMS encryption (--sse aws:kms)
     - Ensure AWS credentials are configured for S3 operations
     - Verify backups are created successfully
     - Test restore procedures regularly

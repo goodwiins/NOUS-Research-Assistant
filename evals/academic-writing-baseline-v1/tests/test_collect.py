@@ -551,6 +551,32 @@ def test_latex_body_must_match_retained_draft(tmp_path: Path) -> None:
         COLLECT._verify_success_artifacts(bundle_path, trial)
 
 
+def test_expected_latex_converts_headings_and_escapes_only_text() -> None:
+    """TD2B-40: a literal oracle, not the collector checked against itself.
+
+    Escaping the whole draft first turned "## " into "\\#\\# " so headings never
+    became \\section{}, and a correct production export failed the check.
+    """
+    markdown = (
+        "## Costs & Results\n"
+        "\n"
+        "## 2. Methods_v2\n"
+        "### Sub #1\n"
+        "Rate is 5% for $x_1$ [Doc 3]."
+    )
+    expected_body = (
+        "\\section{Costs \\& Results}\n"
+        "\n"
+        "\\section{Methods\\_v2}\n"
+        "\\subsection{Sub \\#1}\n"
+        "Rate is 5\\% for \\$x\\_1\\$ \\cite{doc3}."
+    )
+    document = COLLECT._expected_latex_document(markdown)
+    assert "\\title{Costs \\& Results}" in document
+    assert f"\\maketitle\n\n{expected_body}\n\n\\bibliographystyle" in document
+    assert "\\#\\#" not in document
+
+
 def test_duplicate_citation_indices_are_rejected(tmp_path: Path) -> None:
     bundle_path, trial = _success_bundle(tmp_path)
     record = trial["artifacts"]["citations"]

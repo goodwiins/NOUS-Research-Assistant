@@ -793,15 +793,26 @@ def _verify_objective_artifacts(
     _verify_invalid_revision(bundle_path, trial.get("invalid_revision"), draft)
 
 
+def _latex_escape(text: str) -> str:
+    return re.sub(r"([\\{}$&%#^_~])", r"\\\1", text)
+
+
 def _expected_latex_document(markdown_content: str) -> str:
-    escaped = re.sub(r"([\\{}$&%#^_~])", r"\\\1", markdown_content)
-    latex = re.sub(
-        r"^## (\d+\.\s)?(.+)$", r"\\section{\2}", escaped, flags=re.MULTILINE
-    )
-    latex = re.sub(r"^### (.+)$", r"\\subsection{\1}", latex, flags=re.MULTILINE)
-    latex = re.sub(r"\[Doc (\d+)\]", r"\\cite{doc\1}", latex)
-    title = markdown_content.split("\n")[0].replace("## ", "")
-    title = re.sub(r"([\\{}$&%#^_~])", r"\\\1", title)
+    # Headings are recognised on the raw markdown line and only their text is
+    # escaped. Escaping the whole document first turned "## " into "\#\# ",
+    # so no heading ever converted and a correct export failed this check.
+    lines = []
+    for line in markdown_content.split("\n"):
+        subsection = re.match(r"^### (.+)$", line)
+        section = re.match(r"^## (\d+\.\s)?(.+)$", line)
+        if subsection:
+            lines.append(f"\\subsection{{{_latex_escape(subsection.group(1))}}}")
+        elif section:
+            lines.append(f"\\section{{{_latex_escape(section.group(2))}}}")
+        else:
+            lines.append(_latex_escape(line))
+    latex = re.sub(r"\[Doc (\d+)\]", r"\\cite{doc\1}", "\n".join(lines))
+    title = _latex_escape(markdown_content.split("\n")[0].replace("## ", ""))
     return f"""\\documentclass{{article}}
 \\usepackage{{natbib}}
 \\usepackage{{hyperref}}

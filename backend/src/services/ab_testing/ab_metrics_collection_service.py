@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, desc, func, or_
 from sqlalchemy.orm import Session
 
+from src.core.background_tasks import spawn
 from src.core.config import settings
 from src.core.database import get_db
 from src.models.ab_testing import (
@@ -110,9 +111,9 @@ class MetricsCollectionService:
             logger.info("Metrics collection service initialized with Redis")
 
             # Start background processors
-            asyncio.create_task(self._batch_processor())
-            asyncio.create_task(self._flush_processor())
-            asyncio.create_task(self._cleanup_processor())
+            spawn(self._batch_processor())
+            spawn(self._flush_processor())
+            spawn(self._cleanup_processor())
 
         except Exception as e:
             logger.warning(f"Redis not available for metrics collection: {e}")

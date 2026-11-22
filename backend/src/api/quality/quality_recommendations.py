@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
-from src.core.dependencies import get_current_user
+from src.core.dependencies import get_current_user, is_platform_operator
 from src.models.user import User
 from src.schemas.quality_metrics import RecommendationItem
 from src.services.quality.quality_recommendations_service import (
@@ -72,6 +72,7 @@ async def get_quality_recommendations(
                 focus_areas=focus_areas,
                 priority_filter=priority_filter,
                 days_back=days_back,
+                include_host_metrics=is_platform_operator(current_user),
             )
         )
 
@@ -244,7 +245,9 @@ async def get_recommendations_summary(
         # Get all recommendations
         recommendations = (
             await quality_recommendations_service.generate_recommendations(
-                organization_id=str(current_user.organization_id), days_back=days_back
+                organization_id=str(current_user.organization_id),
+                days_back=days_back,
+                include_host_metrics=is_platform_operator(current_user),
             )
         )
 
@@ -508,6 +511,7 @@ async def generate_custom_recommendations(
                 focus_areas=focus_areas,
                 priority_filter=priority_filter,
                 days_back=days_back,
+                include_host_metrics=is_platform_operator(current_user),
             )
         )
 

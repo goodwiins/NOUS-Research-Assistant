@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import re
-import threading
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Literal, Optional
 
@@ -71,10 +70,6 @@ _WEAK_KEYWORD_MIN_CONFIDENCE = 0.34
 _CLASSIFIER_LLM_TIMEOUT_SECONDS = 25.0  # bumped from 10s for headroom after
 # max_tokens 256→4096 lets gpt-5-mini reason longer before emitting output.
 
-# Cache the classifier LLM at module scope (rebuilding the client per call
-# costs ~50ms and creates pointless connection churn).
-_CLASSIFIER_LLM = None
-_CLASSIFIER_LLM_LOCK = threading.Lock()
 _RETRY_FOLLOWUP_RE = re.compile(
     r"\s*(?:try again|retry|do it again|one more time|again)[.!?]*\s*",
     re.IGNORECASE,
@@ -126,23 +121,18 @@ class ClassificationResult:
 
 
 def _build_classifier_llm():
-    """Return a cached lightweight LLM for intent classification."""
+    """Return the lightweight LLM for intent classification."""
     from src.services.agent.llm_factory import build_lightweight_llm
 
-    global _CLASSIFIER_LLM
-    if _CLASSIFIER_LLM is not None:
-        return _CLASSIFIER_LLM
-    with _CLASSIFIER_LLM_LOCK:
-        if _CLASSIFIER_LLM is not None:  # re-check inside lock
-            return _CLASSIFIER_LLM
-        # 4096 tokens: gpt-5-mini reasoning model uses internal reasoning_tokens
-        # against max_completion_tokens budget. Observed traces show 2752+ reasoning
-        # tokens consumed before output — 256 cap caused LengthFinishReasonError.
-        _CLASSIFIER_LLM = build_lightweight_llm(
-            max_tokens=4096,
-            request_timeout=_CLASSIFIER_LLM_TIMEOUT_SECONDS,
-        )
-    return _CLASSIFIER_LLM
+    # No module-level cache: the factory caches by credential_fingerprint(),
+    # so a rotated Azure key/endpoint gets a fresh client (audit AG-1).
+    # 4096 tokens: gpt-5-mini reasoning model uses internal reasoning_tokens
+    # against max_completion_tokens budget. Observed traces show 2752+ reasoning
+    # tokens consumed before output — 256 cap caused LengthFinishReasonError.
+    return build_lightweight_llm(
+        max_tokens=4096,
+        request_timeout=_CLASSIFIER_LLM_TIMEOUT_SECONDS,
+    )
 
 
 # ---------------------------------------------------------------------------

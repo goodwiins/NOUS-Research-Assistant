@@ -28,6 +28,7 @@ from prometheus_client import (
     generate_latest,
 )
 
+from src.core.background_tasks import spawn
 from src.core.config import settings
 from src.shared.exceptions import (
     AuthenticationError,
@@ -430,8 +431,8 @@ async def startup_event():
         health_checker.add_check(f"service_{service_name}", check_service_health)
 
     # Start background tasks
-    asyncio.create_task(health_check_loop())
-    asyncio.create_task(metrics_collection_loop())
+    spawn(health_check_loop())
+    spawn(metrics_collection_loop())
 
 
 async def health_check_loop():

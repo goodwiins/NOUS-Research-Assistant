@@ -25,6 +25,8 @@ export class NativeExitUnconfirmed extends TransportLoss {
   }
 }
 const TERMINATION_GRACE_MS = 250;
+/** Pending calls are capped at 32; leave room for callback responses. */
+const MAX_QUEUED_WRITES = 64;
 const EXIT_CONFIRMATION_MS = 1000;
 
 /** A single producer/consumer queue. Awaiting push pauses stdout reads. */
@@ -95,7 +97,8 @@ export class JsonRpcProcess {
     }
   >();
   private failure?: Error;
-  private writing = false;
+  private writeTail: Promise<void> = Promise.resolve();
+  private queuedWrites = 0;
   private incoming: (message: RpcMessage) => Promise<void>;
   private onFailure: (e: Error) => void;
   constructor(
@@ -174,22 +177,36 @@ export class JsonRpcProcess {
     }
     throw new TransportLoss(pending.length ? "EOF within frame" : "stdout EOF");
   }
+  /**
+   * Frames are written one at a time, in call order. Overlapping writes (an
+   * RPC call racing a callback response, say) are ordinary contention, not a
+   * lost transport: they wait their turn. The wait is bounded — at most
+   * MAX_QUEUED_WRITES frames — and an overflow rejects only that write with a
+   * plain Error, never TransportLoss. Only a real stdin failure is transport
+   * loss.
+   */
   private async write(message: object): Promise<void> {
     if (this.failure) throw this.failure;
     const data = JSON.stringify(message) + "\n";
     if (Buffer.byteLength(data) > MAX_FRAME_BYTES)
       throw new Error("RPC frame exceeds 1 MiB");
-    // Reject concurrent saturation instead of retaining an unbounded write queue.
-    if (this.writing) throw new TransportLoss("stdin backpressure");
-    this.writing = true;
-    try {
-      await new Promise<void>((resolve, reject) =>
+    if (this.queuedWrites >= MAX_QUEUED_WRITES)
+      throw new Error("RPC write queue full");
+    this.queuedWrites++;
+    const turn = this.writeTail.then(() => {
+      if (this.failure) throw this.failure;
+      return new Promise<void>((resolve, reject) =>
         this.child.stdin.write(data, (error) =>
           error ? reject(new TransportLoss("stdin failed")) : resolve(),
         ),
       );
+    });
+    // The next writer waits for this one to settle, whatever its outcome.
+    this.writeTail = turn.catch(() => {});
+    try {
+      await turn;
     } finally {
-      this.writing = false;
+      this.queuedWrites--;
     }
   }
   async call(method: string, params: object): Promise<unknown> {
@@ -212,9 +229,16 @@ export class JsonRpcProcess {
           30_000,
         );
         this.pending.set(id, { resolve, reject, timer });
-        void this.write({ id, method, params }).catch((error) =>
-          this.fail(error),
-        );
+        void this.write({ id, method, params }).catch((error: Error) => {
+          // A lost transport fails the session. Any other write error (an
+          // oversized frame, a full write queue) fails only this call: the
+          // frame was never handed to stdin, so nothing ran natively.
+          if (error instanceof TransportLoss || this.failure) this.fail(error);
+          else if (this.pending.delete(id)) {
+            clearTimeout(timer);
+            reject(error);
+          }
+        });
       });
     } catch (error) {
       // Pending RPCs fail immediately internally, but callers may only retry

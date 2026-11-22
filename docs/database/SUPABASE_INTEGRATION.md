@@ -214,7 +214,14 @@ Supabase Storage replaces local filesystem uploads. The system supports **dual s
 | `video`     | MP4, WebM, AVI                         | 500 MB     |
 | `processed` | Processed/extracted content            | 500 MB     |
 
-All buckets are **private** with RLS policies scoped by `organization_id`.
+All buckets are **private**. The backend reaches them only with the
+`service_role` key. No `storage.objects` RLS policies are deployed (none were
+live on `nous-platform` as of 2026-11-21). Any future Storage RLS must be
+written as a tracked migration in `supabase/migrations/` and must authorize on
+`app_metadata` or a server-side membership table, never on user-editable
+`user_metadata` (see GOO-632 / GOO-579). The old standalone
+`setup_supabase_storage.py` script was removed because its policies trusted
+`raw_user_meta_data`.
 
 ### Storage Path Format
 
@@ -274,7 +281,6 @@ python backend/migrations/migrate_files_to_storage.py --execute --verify --clean
 - `backend/src/core/supabase_client.py` — StorageHelper class
 - `backend/src/services/documents/file_service.py` — FileService
 - `backend/src/services/documents/storage_utils.py` — Transparent local/Supabase abstraction
-- `backend/migrations/setup_supabase_storage.py` — Bucket creation + RLS policies
 - `backend/migrations/add_storage_columns.py` — Schema migration
 - `backend/migrations/migrate_files_to_storage.py` — File migration script
 
@@ -370,7 +376,6 @@ open http://localhost:54323  # Open admin dashboard
 | `backend/src/core/supabase_client.py`                | Supabase client singleton + StorageHelper  |
 | `backend/src/services/documents/file_service.py`     | FileService with bucket mapping            |
 | `backend/src/services/documents/storage_utils.py`    | Local/Supabase transparent abstraction     |
-| `backend/migrations/setup_supabase_storage.py`       | Bucket creation + RLS policies             |
 | `backend/migrations/add_storage_columns.py`          | Add storage_path/storage_backend columns   |
 | `backend/migrations/migrate_files_to_storage.py`     | Migrate local files to Supabase Storage    |
 | `frontend/src/lib/supabase.ts`                       | Frontend Supabase client                   |

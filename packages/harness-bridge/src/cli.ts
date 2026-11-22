@@ -412,7 +412,7 @@ export async function connect(
   const fetchFn = options.fetchFn ?? fetch;
   const announce = options.announce ?? console.log;
   const store = new CredentialStore(options.stateDir);
-  const previous = storedConnection(await store.readLocal("connection").catch(() => null));
+  const previous = storedConnection(await store.readLocalIfPresent("connection"));
   let sameApi = false;
   try {
     sameApi = previous !== null && apiBase(previous.apiUrl) === base;
@@ -536,17 +536,27 @@ export async function connect(
         continue;
       }
       const workspaceId = randomUUID();
-      await request(
-        fetchFn,
-        base,
-        folderRoute(device.id, projectId),
-        token,
-        {
-          workspace_id: workspaceId,
-          label: old.label,
-          ...(projectId !== undefined ? { project_id: projectId } : {}),
-        },
-      );
+      // Best effort per folder: NOUS has already issued the new grant and its
+      // credential is saved, so one failed re-registration must not abort the
+      // connect and orphan both. The folder is reported and can be added again.
+      try {
+        await request(
+          fetchFn,
+          base,
+          folderRoute(device.id, projectId),
+          token,
+          {
+            workspace_id: workspaceId,
+            label: old.label,
+            ...(projectId !== undefined ? { project_id: projectId } : {}),
+          },
+        );
+      } catch (error) {
+        announce(
+          `Could not re-register workspace root ${root}: ${error instanceof Error ? error.message : String(error)}. Register it again if needed.`,
+        );
+        continue;
+      }
       carried.push({
         id: workspaceId,
         root,
@@ -561,20 +571,27 @@ export async function connect(
       "Registered local folders were not carried over: workspace connections are MCP-only. Register them again after reconnecting with --project.",
     );
   }
-  await store.writeLocal("connection", {
-    apiUrl: base,
-    deviceId: device.id,
-    ...(target === "project"
-      ? { projectId }
-      : target === "workspace"
-        ? { workspaceId: options.workspaceId }
-        : { account: true as const }),
-    ...(options.threadId ? { threadId: options.threadId } : {}),
-    label: options.label,
-    credentialHandle,
-    scopes,
-    workspaces: carried,
-  } satisfies LocalState);
+  try {
+    await store.writeLocal("connection", {
+      apiUrl: base,
+      deviceId: device.id,
+      ...(target === "project"
+        ? { projectId }
+        : target === "workspace"
+          ? { workspaceId: options.workspaceId }
+          : { account: true as const }),
+      ...(options.threadId ? { threadId: options.threadId } : {}),
+      label: options.label,
+      credentialHandle,
+      scopes,
+      workspaces: carried,
+    } satisfies LocalState);
+  } catch (error) {
+    // The connection file still names the previous credential; do not leave
+    // the new one behind as an orphan.
+    await store.removeLocal(credentialHandle).catch(() => {});
+    throw error;
+  }
   // Only after persisting the new connection can its superseded credential go,
   // including a full reconnect to the same binding after expiry/scope changes.
   // Its server-side grant and consent stay valid until `disconnect` or expiry.
@@ -610,7 +627,7 @@ export async function disconnect(
   options: ClientOptions,
 ): Promise<{ revoked: boolean }> {
   const store = new CredentialStore(options.stateDir);
-  const value = await store.readLocal("connection").catch(() => null);
+  const value = await store.readLocalIfPresent("connection");
   if (!record(value) || typeof value.apiUrl !== "string" || typeof value.credentialHandle !== "string")
     throw new Error("this device is not connected");
   const state = value as LocalState;
@@ -854,7 +871,7 @@ export async function rc(options: RcOptions): Promise<void> {
   announce(`NOUS: ${base}`);
   const store = new CredentialStore(options.stateDir);
   const previous = storedConnection(
-    await store.readLocal("connection").catch(() => null),
+    await store.readLocalIfPresent("connection"),
   );
   let sameApi = false;
   try {
@@ -930,7 +947,7 @@ export async function rc(options: RcOptions): Promise<void> {
   });
   // Name the device and folder as the web chat lists them: the stored labels.
   const stored = storedConnection(
-    await store.readLocal("connection").catch(() => null),
+    await store.readLocalIfPresent("connection"),
   );
   const device = stored?.label ?? label;
   const folder =
@@ -1124,6 +1141,40 @@ export async function acquireStateLock(
   }
   throw new Error(`could not lock ${stateDir}; try again`);
 }
+/** Close and forget the given runs' adapters; each close is isolated. */
+async function closeAdapters(
+  adapters: Map<string, HarnessAdapter>,
+  runIds: Iterable<string>,
+): Promise<void> {
+  for (const runId of runIds) {
+    const adapter = adapters.get(runId);
+    adapters.delete(runId);
+    try {
+      await adapter?.closeSession();
+    } catch (error) {
+      console.error(
+        `Could not close the Codex session for run ${runId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+/**
+ * Close adapters whose run no longer holds a workspace lock. An unlocked run
+ * has no command in flight (its terminal was delivered or it was released),
+ * so its app-server child is idle; without this a long-lived `run`/`rc`
+ * process keeps one child per finished run. Runs between bridge connections
+ * only, never while a connection may be dispatching to an adapter.
+ */
+export async function pruneIdleAdapters(
+  adapters: Map<string, HarnessAdapter>,
+  journal: Pick<Journal, "activeCommands">,
+): Promise<void> {
+  const active = new Set(journal.activeCommands().map((c) => c.runId));
+  await closeAdapters(
+    adapters,
+    [...adapters.keys()].filter((runId) => !active.has(runId)),
+  );
+}
 /** One local reconciliation pass over the locked runs, without the network. */
 export async function reconcileLocal(
   journal: Journal,
@@ -1198,6 +1249,7 @@ export async function runBridge(
       // Local native evidence and the expiry watchdog must work even while the
       // network is unavailable or authentication cannot open a new connection.
       await reconcileLocal(journal, adapterFor);
+      await pruneIdleAdapters(adapters, journal);
       try {
         await connectBridge({
           url: url.href,
@@ -1227,8 +1279,12 @@ export async function runBridge(
   } finally {
     stopRenewal();
     // No local unlock on shutdown: app-server children may outlive this process.
-    for (const adapter of adapters.values()) await adapter.closeSession();
-    journal.close();
+    // One failing close must not skip the rest or leave the journal open.
+    try {
+      await closeAdapters(adapters, [...adapters.keys()]);
+    } finally {
+      journal.close();
+    }
   }
 }
 function mcpSession(
@@ -1381,7 +1437,7 @@ export async function status(options: {
     count("rejected") ? `${count("rejected")} rejected` : "",
   ].filter(Boolean);
   const queueLine = `Pending handoffs: ${count("pending")}${extra.length ? ` (${extra.join(", ")})` : ""}`;
-  const state = storedConnection(await store.readLocal("connection").catch(() => null));
+  const state = storedConnection(await store.readLocalIfPresent("connection"));
   if (state === null) {
     announce(["This device is not connected (run nous-harness connect).", ...(entries.length ? [queueLine] : [])].join("\n"));
     return;
@@ -1426,7 +1482,7 @@ async function handoffContext(
   scope: "handoff:read" | "handoff:write",
 ): Promise<{ binding: Binding; queue: HandoffQueue; client: HandoffHttpClient; announce: (m: string) => void }> {
   const store = new CredentialStore(options.stateDir);
-  const state = storedConnection(await store.readLocal("connection").catch(() => null));
+  const state = storedConnection(await store.readLocalIfPresent("connection"));
   if (state === null) throw new Error("connect this device first");
   // A handoff belongs to one chat of one project; neither a workspace nor an
   // account connection has one.

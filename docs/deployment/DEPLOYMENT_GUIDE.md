@@ -89,7 +89,7 @@ cp .env.example .env.development
 cp .env.example .env.staging
 
 # Production
-cp .env.example .env.production
+cp .env.example .env.prod
 ```
 
 ### 3. Configure Environment Variables
@@ -163,7 +163,7 @@ The deployment script provides a simple, automated way to deploy the system:
 ./scripts/deploy.sh deploy
 
 # Deploy to production
-ENVIRONMENT=production ./scripts/deploy.sh deploy
+ENVIRONMENT=production CONFIRM_PRODUCTION=yes ./scripts/deploy.sh deploy
 
 # Blue-green deployment
 ./scripts/deploy.sh deploy-blue-green
@@ -339,17 +339,21 @@ python3 ./scripts/backup/backup_vector_store.py
 4. **Verification**: Validate system integrity
 5. **Monitoring**: Enhanced monitoring post-recovery
 
-#### Automated Recovery
+#### Scripted Recovery (docker-compose / systemd hosts)
+
+`scripts/backup/disaster_recovery.py` is a manual, destructive tool.
+`--components` is required (`database`, `uploads`, `services`). The script
+validates the backup with `pg_restore --list` before it stops services or
+drops the database, and exits non-zero unless every named component
+succeeded. Neo4j restore is not implemented: `knowledge_graph` always fails
+and leaves the graph untouched, so restore Neo4j by hand with `neo4j-admin`.
 
 ```bash
-# Full disaster recovery
-python3 ./scripts/backup/disaster_recovery.py
+# Show what would run
+python3 ./scripts/backup/disaster_recovery.py --components database uploads --dry-run
 
-# Component-specific recovery
-python3 ./scripts/backup/disaster_recovery.py --components database vector_store
-
-# Dry run (simulation)
-python3 ./scripts/backup/disaster_recovery.py --dry-run
+# Restore the database and uploads (asks for confirmation; --yes skips it)
+python3 ./scripts/backup/disaster_recovery.py --components database uploads
 ```
 
 #### Recovery Time Objectives (RTO)
