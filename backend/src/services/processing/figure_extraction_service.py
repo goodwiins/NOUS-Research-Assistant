@@ -7,6 +7,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 import fitz
+
+from src.services.processing import pdf_lock
 import structlog
 from sqlalchemy.orm import Session
 
@@ -173,11 +175,12 @@ def extract_figures_for_document(db: Session, document: Document) -> Dict[str, A
         return {"skipped": "not_pdf"}
 
     with local_file_for_document(document) as pdf_path:
-        pdf_doc = fitz.open(pdf_path)
-        try:
-            candidates = _collect_candidates(pdf_doc)
-        finally:
-            pdf_doc.close()
+        with pdf_lock.PYMUPDF_LOCK:  # PyMuPDF is not thread-safe
+            pdf_doc = fitz.open(pdf_path)
+            try:
+                candidates = _collect_candidates(pdf_doc)
+            finally:
+                pdf_doc.close()
 
     helper = None
     try:
