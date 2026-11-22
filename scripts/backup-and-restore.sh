@@ -18,6 +18,8 @@ umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAMESPACE="${NAMESPACE:-knowledge-graph-analytics}"
+# Velero's CLI --namespace is where Velero itself runs, not the app namespace.
+VELERO_NAMESPACE="${VELERO_NAMESPACE:-velero}"
 BACKUP_DIR="${BACKUP_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/kg-backups.XXXXXX")}"
 mkdir -p "$BACKUP_DIR"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -101,10 +103,21 @@ create_backup_dir() {
     log_success "Backup directory created"
 }
 
+# On AWS the database is RDS: the chart creates the ExternalSecret
+# aws-database-credentials (templates/aws-rds-secret.yaml) in the app
+# namespace. Check the ExternalSecret, never the Secret's data.
+uses_rds() {
+    kubectl get externalsecret aws-database-credentials -n "$NAMESPACE" >/dev/null 2>&1
+}
+
 # Backup PostgreSQL database
 backup_postgresql() {
     log_info "Starting PostgreSQL database backup..."
 
+    if uses_rds; then
+        log_error "PostgreSQL in $NAMESPACE is Amazon RDS; this script only dumps in-cluster Postgres. Rely on RDS automated backups and snapshots instead."
+        return 1
+    fi
     local pod_name=$(kubectl get pods -n "$NAMESPACE" -l app=postgres -o jsonpath='{.items[0].metadata.name}')
     if [ -z "$pod_name" ]; then
         log_error "PostgreSQL pod not found"
@@ -327,7 +340,7 @@ create_velero_backup() {
 
         log_info "Running Velero backup: $backup_name"
         velero create backup "$backup_name" \
-            --namespace "$NAMESPACE" \
+            --namespace "$VELERO_NAMESPACE" \
             --include-namespaces "$NAMESPACE" \
             --exclude-resources secrets \
             --default-volumes-to-restic=false \
@@ -341,6 +354,16 @@ create_velero_backup() {
         fi
     else
         log_warning "Velero not available, skipping Velero backup"
+    fi
+}
+
+# Report a failure that happened after PostgreSQL may have been loaded.
+fail_after_postgres() {
+    local restored="$1" backup_id="$2" message="$3"
+    if [ "$restored" -gt 0 ]; then
+        log_error "$message. PostgreSQL WAS ALREADY RESTORED from $backup_id; do not re-run the restore against it. Finish the Redis step by hand."
+    else
+        log_error "$message"
     fi
 }
 
@@ -392,7 +415,11 @@ restore_backup() {
     local component
     for component in postgres redis neo4j; do
         if ! find "$restore_dir/$component" -type f -name "*_${backup_id}.*" 2>/dev/null | grep -q .; then
-            log_warning "MISSING from backup $backup_id: $component (it will not be restored)"
+            if [ "$component" = "neo4j" ]; then
+                log_warning "MISSING from backup $backup_id: neo4j (this script never restores neo4j; there is no dump to restore by hand either)"
+            else
+                log_warning "MISSING from backup $backup_id: $component (it will not be restored)"
+            fi
         fi
     done
 
@@ -404,6 +431,16 @@ restore_backup() {
     # so a failure cannot leave a half-restored system.
     log_info "Checking restore preconditions..."
     if [ -f "$pg_file" ]; then
+        # This restores in-cluster Postgres only. On AWS the database is RDS,
+        # which is restored from its own snapshots, not from this dump.
+        if uses_rds; then
+            log_error "PostgreSQL in $NAMESPACE is Amazon RDS (ExternalSecret aws-database-credentials exists). This script does not restore RDS: use an RDS snapshot or point-in-time restore. Nothing restored."
+            return 1
+        fi
+        if ! kubectl get deployment postgres -n "$NAMESPACE" >/dev/null 2>&1; then
+            log_error "No in-cluster deployment/postgres in $NAMESPACE; nothing restored"
+            return 1
+        fi
         if ! gzip -t "$pg_file"; then
             log_error "PostgreSQL dump is corrupt: $pg_file; nothing restored"
             return 1
@@ -456,13 +493,12 @@ restore_backup() {
     if [ -f "$redis_file" ]; then
         local redis_rdb="$restore_dir/redis/redis_backup_${backup_id}.rdb"
         local redis_target="/tmp/redis_restore_${backup_id}.rdb"
-        gunzip -c "$redis_file" > "$redis_rdb"
+        if ! gunzip -c "$redis_file" > "$redis_rdb"; then
+            fail_after_postgres "$restored" "$backup_id" "Decompressing the Redis snapshot failed"
+            return 1
+        fi
         if ! kubectl cp "$redis_rdb" "$NAMESPACE/$redis_pod:$redis_target"; then
-            if [ "$restored" -gt 0 ]; then
-                log_error "Copying the Redis snapshot into $redis_pod failed. PostgreSQL WAS ALREADY RESTORED from $backup_id; do not re-run the restore against it. Copy the Redis snapshot by hand."
-            else
-                log_error "Copying the Redis snapshot into $redis_pod failed"
-            fi
+            fail_after_postgres "$restored" "$backup_id" "Copying the Redis snapshot into $redis_pod failed"
             return 1
         fi
         log_warning "Redis snapshot copied to $redis_pod:$redis_target but NOT loaded: stop Redis, replace dump.rdb in its data dir, then restart it."
@@ -481,7 +517,7 @@ restore_backup() {
         log_error "No component was restored for backup $backup_id"
         return 1
     fi
-    log_success "Restored $restored component(s) from backup $backup_id. Re-create Secrets from the secret manager, then verify the application."
+    log_success "Restored $restored component(s) from backup $backup_id. Re-create the infisical-universal-auth Secret (infrastructure/kubernetes/infisical-bootstrap.md) so the Infisical operator re-syncs the app Secrets, then verify the application."
 }
 
 # List available backups
@@ -495,7 +531,7 @@ list_backups() {
         if command -v velero &> /dev/null; then
             echo
             echo "=== Velero Backups ==="
-            velero get backups --namespace "$NAMESPACE"
+            velero get backups --namespace "$VELERO_NAMESPACE"
         fi
     else
         log_error "AWS credentials not configured"
