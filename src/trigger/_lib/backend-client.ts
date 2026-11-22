@@ -30,6 +30,7 @@ async function request<T>(
     schema?: z.ZodType<T>;
     headers?: Record<string, string>;
     timeoutMs?: number;
+    idempotent?: boolean;
   } = {},
 ): Promise<T> {
   const url = `${BACKEND_API_URL}${path}`;
@@ -38,11 +39,18 @@ async function request<T>(
     schema,
     headers = {},
     timeoutMs = REQUEST_TIMEOUT_MS,
+    idempotent = method === "GET",
   } = options;
+
+  // A timeout or 5xx on a write is ambiguous: the backend may already have
+  // committed it. Only retry when repeating the request cannot create a second
+  // side effect. Non-idempotent writes are retried at one layer only — the
+  // Trigger.dev task retry — and only with a backend idempotency contract.
+  const maxRetries = idempotent ? MAX_RETRIES : 0;
 
   let lastError: Error | undefined;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
       const delay = RETRY_DELAY_MS * Math.pow(2, attempt - 1);
       logger.info(`Retrying ${method} ${path} (attempt ${attempt + 1})`, {
@@ -67,7 +75,7 @@ async function request<T>(
 
       clearTimeout(timeout);
 
-      if (res.status >= 500 && attempt < MAX_RETRIES) {
+      if (res.status >= 500 && attempt < maxRetries) {
         lastError = new BackendApiError(res.status, await res.text(), url);
         continue;
       }
@@ -84,11 +92,11 @@ async function request<T>(
       if (err instanceof BackendApiError) throw err;
 
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt === MAX_RETRIES) break;
+      if (attempt === maxRetries) break;
     }
   }
 
-  throw lastError ?? new Error(`Failed after ${MAX_RETRIES + 1} attempts`);
+  throw lastError ?? new Error(`Failed after ${maxRetries + 1} attempts`);
 }
 
 function authHeaders(): Record<string, string> {
@@ -109,16 +117,23 @@ export const backendClient = {
     });
   },
 
+  /**
+   * POST once. A failed or ambiguous write is not retried here; pass
+   * `{ idempotent: true }` only when repeating the request is safe (a read
+   * over POST, or an endpoint that dedupes on a key the caller sends).
+   */
   post<T>(
     path: string,
     body: unknown,
     schema?: z.ZodType<T>,
     extraHeaders?: Record<string, string>,
+    options: { idempotent?: boolean } = {},
   ) {
     return request<T>("POST", path, {
       body,
       schema,
       headers: { ...authHeaders(), ...extraHeaders },
+      idempotent: options.idempotent ?? false,
     });
   },
 
