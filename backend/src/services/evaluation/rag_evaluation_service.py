@@ -189,12 +189,15 @@ class RAGEvaluationService:
         job_id: Optional[str],
         organization_id: str,
         db: Session,
+        *,
+        commit: bool = True,
     ) -> RAGTriadMetrics:
         """
         Calculate RAG Triad metrics for a single evaluation.
 
         With a ``job_id`` the four metric rows are saved for that job; without
-        one the scores are only returned.
+        one the scores are only returned. ``commit=False`` only flushes the
+        rows, so the caller can commit them with its own writes.
         """
         start_time = time.time()
 
@@ -359,7 +362,10 @@ class RAGEvaluationService:
 
             db.add(hallucination_metric)
 
-            db.commit()
+            if commit:
+                db.commit()
+            else:
+                db.flush()
 
             return result
 
@@ -623,16 +629,30 @@ class RAGEvaluationService:
         search_type: str = "hybrid",
         limit: int = 5,
         job_id: Optional[str] = None,
+        *,
+        db: Optional[Session] = None,
+        reference_answers: Optional[List[Optional[str]]] = None,
     ) -> List[RAGTriadMetrics]:
         """
         Evaluate the search pipeline end-to-end with provided queries.
 
         ``job_id`` is the evaluation job the per-query metric rows belong to;
         without it nothing is written (see ``run_rag_triad_evaluation``).
+
+        With a caller ``db`` the rows are only flushed into that session, so
+        the caller commits (or rolls back) them together with its own writes;
+        a query that fails rolls the session back. Without one each query
+        commits in a session of its own. ``reference_answers`` lines up with
+        ``queries``.
         """
         results = []
 
-        for query in queries:
+        for index, query in enumerate(queries):
+            reference_answer = (
+                reference_answers[index]
+                if reference_answers and index < len(reference_answers)
+                else None
+            )
             try:
                 # Perform search
                 search_request = SearchQuery(
@@ -665,6 +685,7 @@ class RAGEvaluationService:
                     query=query,
                     generated_answer=generated_answer,
                     retrieved_context=retrieved_context,
+                    reference_answer=reference_answer,
                     document_ids=[
                         result.document_id for result in search_response.results
                     ],
@@ -693,14 +714,30 @@ class RAGEvaluationService:
                 # method runs from sync Celery task contexts via
                 # `loop.run_until_complete`, so it needs its own plain sync
                 # session, not the ASGI request's async one.
-                db = SessionLocal()
+                if db is not None:
+                    try:
+                        metrics = await self.run_rag_triad_evaluation(
+                            evaluation_input,
+                            job_id,
+                            organization_id,
+                            db,
+                            commit=False,
+                        )
+                    except Exception:
+                        # Don't leave this query's half-added rows for the
+                        # caller's next commit (GOO-696).
+                        db.rollback()
+                        raise
+                    results.append(metrics)
+                    continue
+                own_db = SessionLocal()
                 try:
                     metrics = await self.run_rag_triad_evaluation(
-                        evaluation_input, job_id, organization_id, db
+                        evaluation_input, job_id, organization_id, own_db
                     )
                     results.append(metrics)
                 finally:
-                    db.close()
+                    own_db.close()
 
             except SoftTimeLimitExceeded:
                 # The task's time limit, not a per-query error: stop here so

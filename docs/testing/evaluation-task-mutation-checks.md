@@ -76,3 +76,39 @@ ORCHESTRATION_TEST_DATABASE_URL="${DISPOSABLE_PG_URL:?}" .venv/bin/python -m pyt
 | Metric commit inside its `try`, with rollback (`evaluation_tasks.py:532`) | `db.rollback()` removed | `test_batch_metric_commit_failure_is_rolled_back_and_the_run_continues` |
 
 All 7 mutants failed at least one test, and every restore was green.
+
+## GOO-696 (review of #2235), 2026-11-22
+
+Same throwaway local PostgreSQL 14 cluster as GOO-689. The new unit tests are
+in `tests/unit/tasks/test_evaluation_followups.py`. The two new Postgres tests
+in `test_evaluation_metrics_postgres.py` are
+`test_failed_batch_summary_rolls_back_the_querys_service_rows` and
+`test_two_concurrent_real_time_deliveries_create_one_job`.
+
+```sh
+# from backend/
+ORCHESTRATION_TEST_DATABASE_URL="${DISPOSABLE_PG_URL:?}" .venv/bin/python -m pytest -q -x -p no:cacheprovider \
+  tests/unit/tasks/test_evaluation_followups.py \
+  tests/unit/tasks/test_evaluation_failure_paths.py \
+  tests/unit/tasks/test_evaluation_time_limits.py \
+  tests/unit/tasks/test_evaluation_worker_lost.py \
+  tests/unit/tasks/test_evaluation_metrics_postgres.py
+```
+
+| Guard (line) | Mutation | Observed mutant failure |
+|---|---|---|
+| Fixed job message for unexpected errors (`evaluation_tasks.py:64`) | `return str(exc)` | `test_failure_message_hides_unexpected_error_text`, `test_rag_triad_job_stores_a_safe_message_and_logs_the_detail` |
+| The task's own `EvaluationFailure` text is kept (`evaluation_tasks.py:64`) | the branch removed | `test_failure_message_keeps_the_tasks_own_messages`, `test_rag_triad_no_items_keeps_its_specific_message` |
+| No-context item reuses the pipeline scores (`evaluation_tasks.py:336`) | the reuse removed | `test_rag_triad_no_context_item_reuses_the_pipeline_scores`: judged a second time |
+| Rag-triad pipeline writes in the task session (`evaluation_tasks.py:332`) | `db=db` removed | `test_rag_triad_no_context_item_reuses_the_pipeline_scores` |
+| Reference answer reaches the pipeline (`evaluation_tasks.py`, `rag_evaluation_service.py:688`) | either side removed | `test_rag_triad_no_context_item_reuses_the_pipeline_scores`, `test_pipeline_with_a_caller_session_flushes_and_leaves_it_open` |
+| Rag-triad item rollback (`evaluation_tasks.py:375`) | `db.rollback()` removed | `test_rag_triad_item_commit_failure_is_rolled_back_and_the_run_continues` |
+| Item counted only after its commit (`evaluation_tasks.py:359`) | count, then commit (the old order) | `test_rag_triad_item_commit_failure_is_rolled_back_and_the_run_continues`: the failed item was averaged in |
+| Batch pipeline writes in the task session (`evaluation_tasks.py:518`) | `db=db` removed | `test_failed_batch_summary_rolls_back_the_querys_service_rows` (Postgres): q1 kept 4 orphan rows. Also `test_batch_pipeline_writes_into_the_task_session`. |
+| Service flushes instead of committing (`rag_evaluation_service.py:365`) | always `commit()` | `test_pipeline_with_a_caller_session_flushes_and_leaves_it_open` |
+| Pipeline passes `commit=False` with a caller session (`rag_evaluation_service.py:724`) | the argument removed | `test_pipeline_with_a_caller_session_flushes_and_leaves_it_open` |
+| Pipeline rolls back the caller session on a failed query (`rag_evaluation_service.py:729`) | `db.rollback()` removed | `test_pipeline_rolls_back_the_caller_session_when_a_query_fails` |
+| 64-bit lock key (`evaluation_tasks.py:212`) | `hashtext(:key)` | `test_real_time_lock_uses_the_64_bit_hash` |
+| Real-time lock taken at all (`evaluation_tasks.py:207`) | lock made a no-op | `test_two_concurrent_real_time_deliveries_create_one_job` (Postgres, run alone): two jobs and two judgements. Also the GOO-689 lock tests. |
+
+All 14 mutants failed at least one test, and every restore was green.
