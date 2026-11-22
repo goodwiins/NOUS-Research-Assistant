@@ -28,6 +28,14 @@ do not decode secret values into logs or patch generated Secrets as a routine
 verification step. Secret changes and workload restarts are operational
 mutations requiring explicit authorization.
 
+`PLATFORM_OPERATOR_USER_IDS` (comma-separated user UUIDs that may see
+host-wide metrics) is read from the optional `PLATFORM_OPERATOR_USER_IDS` key
+of `app-secrets` for the backend, worker and beat. It is unset, which means
+nobody, until the owner adds that key in Infisical for the environment. Never
+put the ids in a values file: the repo is public, and an `env` literal (even
+`""`) would override the `envFrom` secret. `tests/deployment_consistency_render_test.py`
+asserts this wiring.
+
 ## Database migrations
 
 AWS enables `backend.migrations.enabled` and disables
