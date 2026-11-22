@@ -493,5 +493,10 @@ def test_failed_extraction_keeps_existing_entities(session_factory, monkeypatch)
 
     check = Session()
     names = [e.name for e in check.query(Entity).filter(Entity.document_id == doc_id)]
+    doc = check.query(Document).filter(Document.id == doc_id).one()
+    graph_status = doc.neo4j_index_status
     check.close()
     assert names == ["Ada Lovelace"]
+    # GOO-688: marked failed so the reconciler re-extracts it, instead of
+    # silently "completed with 0 entities".
+    assert graph_status == "failed"

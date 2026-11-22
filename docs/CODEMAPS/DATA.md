@@ -37,30 +37,12 @@ Run migrations: `cd backend && alembic upgrade head`
 Create new: `alembic revision --rev-id xx01_short_slug -m "describe_change"`, then write `upgrade()`/`downgrade()` by hand (no `--autogenerate`; see `backend/alembic/README.md`)  
 Roll back one: `alembic downgrade -1`
 
-### Raw SQL migrations (`database/migrations/`)
+### Standalone SQL (`database/`)
 
-Legacy standalone SQL that no runner applies; none of it applies to a clean database, because it assumes tables Alembic creates. The integration harness builds its schema with `alembic upgrade head`. The unreferenced files were deleted on 2026-11-22 (GOO-681); see [`database/README.md`](../../database/README.md) for why the rest are kept.
-
-Key files:
-
-| File | Purpose |
-|---|---|
-| `006_document_upload_schema.sql` | Document storage columns |
-| `007_analytics_schema.sql` | Analytics event tables |
-| `009_realtime_status_optimizations.sql` | Realtime status indexes |
-
-Also in `database/`:
-
-| File | Purpose |
-|---|---|
-| `indexing_strategy.sql` | Index creation guidelines + DDL |
-| `partitioning_strategy.sql` | Table partitioning (analytics events) |
-| `performance_optimization.sql` | PG tuning queries |
-| `monitoring_schema.sql` | Monitoring/metrics tables |
-| `data_retention_policies.sql` | TTL + cleanup jobs |
-| `triggers/` | PG trigger functions |
-| `views/` | Materialized + regular views |
-| `procedures/` | Stored procedures |
+There are no raw SQL migrations: the schema comes only from Alembic. The legacy
+`database/migrations/` SQL was deleted on 2026-11-22 (GOO-681, GOO-685); none of
+it applied to a real database. What remains in `database/` and who reads it is
+listed in [`database/README.md`](../../database/README.md).
 
 ## Neo4j schema
 

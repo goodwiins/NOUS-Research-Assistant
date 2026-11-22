@@ -138,12 +138,12 @@ class Settings:
 
 #### PostgreSQL
 ```bash
-# Apply database migrations
+# Apply database migrations (from backend/). This creates the whole schema,
+# including the document upload tables.
 python -m alembic upgrade head
-
-# Apply document upload schema
-psql -h localhost -U postgres -d rag_system -f database/migrations/006_document_upload_schema.sql
 ```
+
+The standalone `006_document_upload_schema.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
 
 #### Neo4j
 ```bash
@@ -235,7 +235,8 @@ services:
       - POSTGRES_PASSWORD=postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/migrations:/docker-entrypoint-initdb.d
+      # No init scripts: create the schema with `alembic upgrade head`
+      # once the database is up.
     ports:
       - "5432:5432"
 

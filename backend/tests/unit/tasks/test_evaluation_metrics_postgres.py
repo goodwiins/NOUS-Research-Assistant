@@ -1,0 +1,177 @@
+"""Real-Postgres proof for evaluation metric writes (GOO-689).
+
+``evaluation_metrics.job_id`` is NOT NULL. ``evaluate_search_pipeline`` called
+``run_rag_triad_evaluation`` with ``job_id=None``, which added four metric rows
+and committed. On Postgres that commit raised ``NotNullViolation``, the
+pipeline's per-query handler swallowed it, and every query was dropped: a batch
+evaluation could only ever end "No queries were successfully evaluated".
+SQLite unit tests with a mocked session never saw it.
+
+Also proves the real-time task's advisory lock on its Celery task id: a second
+delivery cannot take it while the first holds it.
+
+Needs ``ORCHESTRATION_TEST_DATABASE_URL`` (a disposable database; each test
+uses its own schema).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import uuid
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any, Iterator
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+import src.models  # noqa: F401  register every table on Base.metadata
+from src.models.base import Base
+from src.models.evaluation import (
+    EvaluationJob,
+    EvaluationMetric,
+    EvaluationStatus,
+    EvaluationThreshold,
+    EvaluationType,
+)
+from src.models.organization import Organization
+from src.models.user import User
+from src.services.evaluation import rag_evaluation_service as svc_mod
+from src.tasks import evaluation_tasks as et
+
+pytestmark = [pytest.mark.integration, pytest.mark.requires_postgres]
+
+
+def _dsn() -> str:
+    dsn = os.getenv("ORCHESTRATION_TEST_DATABASE_URL") or ""
+    if not dsn:
+        pytest.skip("ORCHESTRATION_TEST_DATABASE_URL is not configured")
+    for prefix in ("postgresql+asyncpg://", "postgresql+psycopg://", "postgresql://"):
+        if dsn.startswith(prefix):
+            return "postgresql+psycopg2://" + dsn[len(prefix) :]
+    raise ValueError("ORCHESTRATION_TEST_DATABASE_URL must be a PostgreSQL URL")
+
+
+@contextmanager
+def _schema() -> Iterator[SimpleNamespace]:
+    """Isolated schema with one organization and one RUNNING batch job."""
+    schema = "eval_metrics_" + uuid.uuid4().hex
+    admin = create_engine(_dsn())
+    with admin.begin() as conn:
+        conn.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+    engine = create_engine(_dsn(), connect_args={"options": f"-csearch_path={schema}"})
+    try:
+        Base.metadata.create_all(
+            engine,
+            tables=[
+                Organization.__table__,
+                User.__table__,
+                EvaluationJob.__table__,
+                EvaluationMetric.__table__,
+                EvaluationThreshold.__table__,
+            ],
+        )
+        factory = sessionmaker(engine, autocommit=False, autoflush=False)
+        org_id, job_id = uuid.uuid4(), uuid.uuid4()
+        with factory() as db:
+            db.add(Organization(id=org_id, name="Org", storage_limit_bytes=10_000))
+            db.flush()
+            db.add(
+                EvaluationJob(
+                    id=job_id,
+                    name="batch",
+                    evaluation_type=EvaluationType.BATCH_EVALUATION.value,
+                    status=EvaluationStatus.RUNNING.value,
+                    organization_id=org_id,
+                    parameters={},
+                )
+            )
+            db.commit()
+        yield SimpleNamespace(factory=factory, org_id=org_id, job_id=job_id)
+    finally:
+        engine.dispose()
+        with admin.begin() as conn:
+            conn.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
+        admin.dispose()
+
+
+@pytest.fixture
+def judged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deterministic judge scores and one search hit; no model or index calls."""
+    service = svc_mod.rag_evaluation_service
+    for name in (
+        "_calculate_answer_relevancy",
+        "_calculate_faithfulness",
+        "_calculate_contextual_relevancy",
+        "_calculate_hallucination_rate",
+    ):
+        monkeypatch.setattr(service, name, AsyncMock(return_value=0.8))
+    hit = SimpleNamespace(content_preview="ctx", document_id="d1")
+    response = SimpleNamespace(
+        results=[hit], search_time_ms=1.0, model_dump=lambda: {"results": []}
+    )
+    monkeypatch.setattr(
+        svc_mod.hybrid_search_service, "search", MagicMock(return_value=response)
+    )
+
+
+def _metric_job_ids(factory: sessionmaker[Session]) -> list[Any]:
+    with factory() as db:
+        return [row[0] for row in db.query(EvaluationMetric.job_id).all()]
+
+
+def test_pipeline_with_a_job_writes_its_metrics(
+    judged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _schema() as s:
+        monkeypatch.setattr(svc_mod, "SessionLocal", s.factory)
+
+        results = asyncio.run(
+            svc_mod.rag_evaluation_service.evaluate_search_pipeline(
+                ["q1", "q2"], str(s.org_id), "anonymous", job_id=str(s.job_id)
+            )
+        )
+
+        assert len(results) == 2  # develop: 0 (every query dropped)
+        job_ids = _metric_job_ids(s.factory)
+        assert len(job_ids) == 8  # four triad metrics per query
+        assert set(job_ids) == {s.job_id}
+
+
+def test_pipeline_without_a_job_returns_scores_and_writes_nothing(
+    judged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _schema() as s:
+        monkeypatch.setattr(svc_mod, "SessionLocal", s.factory)
+
+        results = asyncio.run(
+            svc_mod.rag_evaluation_service.evaluate_search_pipeline(
+                ["q1"], str(s.org_id), "anonymous"
+            )
+        )
+
+        assert [r.overall_score for r in results] == [pytest.approx(0.8)]
+        assert _metric_job_ids(s.factory) == []
+
+
+def test_real_time_task_lock_blocks_a_second_delivery() -> None:
+    with _schema() as s:
+        with s.factory() as first, s.factory() as second:
+            et._lock_real_time_delivery(first, "task-A")
+
+            second.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            with pytest.raises(OperationalError):
+                et._lock_real_time_delivery(second, "task-A")
+            second.rollback()
+
+            # A different delivery is not blocked, and committing releases A.
+            et._lock_real_time_delivery(second, "task-B")
+            second.rollback()
+            first.commit()
+            second.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            et._lock_real_time_delivery(second, "task-A")  # no longer blocked
+            second.rollback()

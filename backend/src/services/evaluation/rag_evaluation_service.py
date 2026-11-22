@@ -186,12 +186,15 @@ class RAGEvaluationService:
     async def run_rag_triad_evaluation(
         self,
         evaluation_input: RAGEvaluationInput,
-        job_id: str,
+        job_id: Optional[str],
         organization_id: str,
         db: Session,
     ) -> RAGTriadMetrics:
         """
-        Calculate RAG Triad metrics for a single evaluation
+        Calculate RAG Triad metrics for a single evaluation.
+
+        With a ``job_id`` the four metric rows are saved for that job; without
+        one the scores are only returned.
         """
         start_time = time.time()
 
@@ -226,6 +229,22 @@ class RAGEvaluationService:
 
             # Calculate response time
             response_time_ms = (time.time() - start_time) * 1000
+
+            result = RAGTriadMetrics(
+                answer_relevancy=answer_relevancy,
+                faithfulness=faithfulness,
+                contextual_relevancy=contextual_relevancy,
+                overall_score=overall_score,
+                hallucination_rate=hallucination_rate,
+                response_time_ms=response_time_ms,
+                metadata=evaluation_input.metadata,
+            )
+            if job_id is None:
+                # Scoring only (chat traces, real-time quality, the search
+                # pipeline outside a job). evaluation_metrics.job_id is NOT
+                # NULL, so writing these rows without a job failed the commit
+                # on Postgres and discarded scores that were already paid for.
+                return result
 
             # Create metrics record
             metric = EvaluationMetric(
@@ -342,15 +361,7 @@ class RAGEvaluationService:
 
             db.commit()
 
-            return RAGTriadMetrics(
-                answer_relevancy=answer_relevancy,
-                faithfulness=faithfulness,
-                contextual_relevancy=contextual_relevancy,
-                overall_score=overall_score,
-                hallucination_rate=hallucination_rate,
-                response_time_ms=response_time_ms,
-                metadata=evaluation_input.metadata,
-            )
+            return result
 
         except Exception as e:
             logger.error(f"Error calculating RAG triad metrics: {e}")
@@ -611,9 +622,13 @@ class RAGEvaluationService:
         user_id: str,
         search_type: str = "hybrid",
         limit: int = 5,
+        job_id: Optional[str] = None,
     ) -> List[RAGTriadMetrics]:
         """
-        Evaluate the search pipeline end-to-end with provided queries
+        Evaluate the search pipeline end-to-end with provided queries.
+
+        ``job_id`` is the evaluation job the per-query metric rows belong to;
+        without it nothing is written (see ``run_rag_triad_evaluation``).
         """
         results = []
 
@@ -681,7 +696,7 @@ class RAGEvaluationService:
                 db = SessionLocal()
                 try:
                     metrics = await self.run_rag_triad_evaluation(
-                        evaluation_input, None, organization_id, db
+                        evaluation_input, job_id, organization_id, db
                     )
                     results.append(metrics)
                 finally:

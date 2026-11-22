@@ -11,6 +11,7 @@ import structlog
 
 from src.core.config import settings
 from src.services.documents.storage_utils import local_file_for_document
+from src.services.processing import pdf_lock
 
 logger = structlog.get_logger()
 
@@ -167,20 +168,21 @@ class TableExtractionService:
         with local_file_for_document(document) as pdf_path:
             if getattr(document, "storage_backend", "local") == "local":
                 pdf_path = self._safe_pdf_path(pdf_path)
-            doc = fitz.open(pdf_path)
-            try:
-                if page > len(doc):
-                    raise ValueError(
-                        f"Page {page} exceeds document length ({len(doc)})"
-                    )
+            with pdf_lock.PYMUPDF_LOCK:
+                doc = fitz.open(pdf_path)
+                try:
+                    if page > len(doc):
+                        raise ValueError(
+                            f"Page {page} exceeds document length ({len(doc)})"
+                        )
 
-                pdf_page = doc[page - 1]  # 0-indexed
-                rect = fitz.Rect(x1, y1, x2, y2)
+                    pdf_page = doc[page - 1]  # 0-indexed
+                    rect = fitz.Rect(x1, y1, x2, y2)
 
-                # Try text extraction first
-                text = pdf_page.get_text("text", clip=rect).strip()
-            finally:
-                doc.close()
+                    # Try text extraction first
+                    text = pdf_page.get_text("text", clip=rect).strip()
+                finally:
+                    doc.close()
 
         if text:
             return {
@@ -212,7 +214,7 @@ class TableExtractionService:
         """Camelot page spec covering at most ``MAX_TABLE_PAGES`` pages."""
         import fitz  # PyMuPDF - lazy import
 
-        with fitz.open(pdf_path) as doc:
+        with pdf_lock.PYMUPDF_LOCK, fitz.open(pdf_path) as doc:
             page_count = len(doc)
         return f"1-{max(1, min(page_count, MAX_TABLE_PAGES))}"
 
