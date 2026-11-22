@@ -656,7 +656,7 @@ async def health_check(_current_user=Depends(get_current_user)):
 
     try:
         # Check cache service
-        cache_connected = cache_service._ensure_connected()
+        cache_connected = await cache_service._ensure_connected()
 
         return {
             "status": "healthy",
