@@ -229,14 +229,14 @@ def call_llm(messages: list[dict], doc_title: str) -> dict:
                 logger.error(
                     f"Failed to parse LLM output for '{doc_title}' after 3 attempts"
                 )
-                return {"entities": [], "relationships": [], "usage": {}}
+                return {"entities": [], "relationships": [], "usage": {}, "error": True}
         except Exception as e:
             err_str = str(e)
             if "content_filter" in err_str or "ContentFilter" in err_str:
                 logger.warning(
                     f"Content filter triggered for '{doc_title}' chunk, skipping"
                 )
-                return {"entities": [], "relationships": [], "usage": {}}
+                return {"entities": [], "relationships": [], "usage": {}, "error": True}
             if "429" in err_str or "rate" in err_str.lower():
                 wait = 2 ** (attempt + 1)
                 logger.warning(f"Rate limited, waiting {wait}s...")
@@ -244,10 +244,15 @@ def call_llm(messages: list[dict], doc_title: str) -> dict:
             else:
                 logger.error(f"Azure OpenAI error for '{doc_title}': {e}")
                 if attempt == 2:
-                    return {"entities": [], "relationships": [], "usage": {}}
+                    return {
+                        "entities": [],
+                        "relationships": [],
+                        "usage": {},
+                        "error": True,
+                    }
                 time.sleep(2)
 
-    return {"entities": [], "relationships": [], "usage": {}}
+    return {"entities": [], "relationships": [], "usage": {}, "error": True}
 
 
 def extract_from_chunk(text: str, doc_title: str) -> dict:
@@ -482,7 +487,9 @@ def probe_llm() -> None:
         return await azure_openai_service.chat_completion(
             messages=[{"role": "user", "content": "Reply with OK."}],
             temperature=0.0,
-            max_tokens=5,
+            # Reasoning deployments spend part of the budget before answering;
+            # the service sends this as max_completion_tokens for them.
+            max_tokens=256,
         )
 
     result = asyncio.run(_call())
@@ -511,7 +518,7 @@ def run(
     *,
     load: Optional[Callable[[str], list[dict]]] = None,
     wipe: Optional[Callable[[], None]] = None,
-    rebuild: Optional[Callable[[list[dict]], int]] = None,
+    rebuild: Optional[Callable[[list[dict]], tuple[int, int]]] = None,
     probe: Optional[Callable[[], None]] = None,
 ) -> int:
     """Validate the source, then (only with --yes) wipe and rebuild. Returns an exit code."""
@@ -551,20 +558,30 @@ def run(
         return 1
 
     wipe()
-    total_entities = rebuild(documents)
+    total_entities, failed_chunks = rebuild(documents)
     if total_entities == 0:
         logger.error(
             "Rebuild extracted 0 entities: Neo4j was wiped and is now empty. "
             "Check the LLM deployment and re-run."
         )
         return 1
+    if failed_chunks:
+        logger.error(
+            f"PARTIAL REBUILD: {failed_chunks} chunk(s) failed extraction after "
+            "the wipe, so the graph is incomplete. Re-run with --yes."
+        )
+        return 1
     return 0
 
 
-def rebuild_documents(documents: list[dict]) -> int:
-    """Extract and insert every document; return the number of entities inserted."""
+def rebuild_documents(documents: list[dict]) -> tuple[int, int]:
+    """Extract and insert every document.
+
+    Returns (entities inserted, chunks whose extraction failed).
+    """
     # Step 3: Process each document
     total_entities = 0
+    failed_chunks = 0
     total_relationships = 0
     total_input_tokens = 0
     total_output_tokens = 0
@@ -589,6 +606,8 @@ def rebuild_documents(documents: list[dict]) -> int:
         for j, chunk in enumerate(chunks, 1):
             logger.info(f"  Extracting chunk {j}/{len(chunks)}...")
             result = extract_from_chunk(chunk, doc_title)
+            if result.get("error"):
+                failed_chunks += 1
 
             all_entities.extend(result["entities"])
             all_relationships.extend(result["relationships"])
@@ -633,6 +652,7 @@ def rebuild_documents(documents: list[dict]) -> int:
     logger.info("=" * 60)
     logger.info(f"Documents processed: {len(documents)}")
     logger.info(f"Total entities:      {total_entities}")
+    logger.info(f"Failed chunks:       {failed_chunks}")
     logger.info(f"Total relationships: {total_relationships}")
     logger.info(f"Time elapsed:        {elapsed:.1f}s")
     logger.info(
@@ -642,7 +662,7 @@ def rebuild_documents(documents: list[dict]) -> int:
         f"Estimated cost:      ${total_cost:.2f} (${input_cost:.2f} input + ${output_cost:.2f} output)"
     )
     logger.info("=" * 60)
-    return total_entities
+    return total_entities, failed_chunks
 
 
 def main() -> None:

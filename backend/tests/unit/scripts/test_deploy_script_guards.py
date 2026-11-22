@@ -94,6 +94,32 @@ def test_every_prod_spelling_requires_explicit_confirmation(
     assert calls == "", "nothing may run before the production gate"
 
 
+def test_production_without_env_file_is_refused(tmp_path: Path) -> None:
+    # Even with the required variables in the shell, prod must not deploy
+    # without its .env.prod file (renamed from .env.production).
+    assert not (REPO_ROOT / ".env.prod").exists()
+    result, calls = _run(
+        tmp_path,
+        ["deploy"],
+        {
+            "ENVIRONMENT": "production",
+            "CONFIRM_PRODUCTION": "yes",
+            "SECRET_KEY": "x",
+            "DATABASE_URL": "postgresql://stub/db",
+            "REDIS_URL": "redis://stub",
+        },
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert ".env.prod" in output
+    assert calls == "", "nothing may run when the prod env file is missing"
+
+
+def test_ci_environment_is_allowed() -> None:
+    assert (REPO_ROOT / "docker-compose.ci.yml").is_file()
+    assert re.search(r"^\s*ci\)", _code(), re.M)
+
+
 def test_unknown_environment_is_refused(tmp_path: Path) -> None:
     result, calls = _run(tmp_path, ["deploy"], {"ENVIRONMENT": "prd"})
     assert result.returncode != 0

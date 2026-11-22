@@ -14,8 +14,9 @@ case "$(printf '%s' "${ENVIRONMENT:-staging}" | tr '[:upper:]' '[:lower:]')" in
     prod|production) ENVIRONMENT="prod"; IS_PRODUCTION="true" ;;
     staging) ENVIRONMENT="staging"; IS_PRODUCTION="false" ;;
     dev|development) ENVIRONMENT="development"; IS_PRODUCTION="false" ;;
+    ci) ENVIRONMENT="ci"; IS_PRODUCTION="false" ;;
     *)
-        echo "ERROR: unknown ENVIRONMENT='${ENVIRONMENT:-}'. Use staging, development or prod." >&2
+        echo "ERROR: unknown ENVIRONMENT='${ENVIRONMENT:-}'. Use staging, development, ci or prod." >&2
         exit 2
         ;;
 esac
@@ -81,6 +82,8 @@ load_env() {
         source "$env_file"
         set +a
         log "Loaded environment from: $env_file"
+    elif [[ "$IS_PRODUCTION" == "true" ]]; then
+        error_exit "Production environment file not found: $env_file (production reads .env.prod, not .env.production)"
     else
         warning "Environment file not found: $env_file"
     fi

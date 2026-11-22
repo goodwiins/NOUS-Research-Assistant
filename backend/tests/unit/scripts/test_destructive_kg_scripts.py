@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Tuple
 
 import pytest
 
@@ -38,10 +38,13 @@ def rebuild() -> Any:
 
 
 class Calls:
-    def __init__(self, entities: int = 5, probe_error: str = "") -> None:
+    def __init__(
+        self, entities: int = 5, probe_error: str = "", failed_chunks: int = 0
+    ) -> None:
         self.events: List[str] = []
         self.entities = entities
         self.probe_error = probe_error
+        self.failed_chunks = failed_chunks
 
     def probe(self) -> None:
         self.events.append("probe")
@@ -51,9 +54,9 @@ class Calls:
     def wipe(self) -> None:
         self.events.append("wipe")
 
-    def rebuild(self, docs: list[dict]) -> int:
+    def rebuild(self, docs: list[dict]) -> Tuple[int, int]:
         self.events.append(f"rebuild:{len(docs)}")
-        return self.entities
+        return self.entities, self.failed_chunks
 
 
 DOCS = [{"id": "d1", "title": "t", "filename": "f", "content_text": "x"}]
@@ -253,6 +256,47 @@ def test_rebuild_that_extracts_nothing_exits_non_zero(
         probe=calls.probe,
     )
     assert code != 0
+
+
+def test_rebuild_with_failed_chunks_exits_non_zero(
+    rebuild: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KG_DATABASE_URL", "postgresql://scratch/db")
+    calls = Calls(entities=40, failed_chunks=2)
+    code = rebuild.run(
+        ["--yes"],
+        load=lambda _url: DOCS,
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
+    )
+    assert code != 0, "a partial extraction after the wipe must not report success"
+
+
+def test_llm_failures_are_marked_as_errors(
+    rebuild: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(**_kwargs: Any) -> dict:
+        raise RuntimeError("500 internal error")
+
+    monkeypatch.setattr(rebuild.azure_openai_service, "chat_completion", broken)
+    monkeypatch.setattr(rebuild.time, "sleep", lambda _s: None)
+    result = rebuild.call_llm([{"role": "user", "content": "x"}], "doc")
+    assert result["entities"] == [] and result.get("error") is True
+
+
+def test_probe_budget_leaves_room_for_reasoning_tokens(
+    rebuild: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict = {}
+
+    async def fake(**kwargs: Any) -> dict:
+        seen.update(kwargs)
+        return {"content": "OK"}
+
+    monkeypatch.setattr(rebuild.azure_openai_service, "chat_completion", fake)
+    rebuild.probe_llm()
+    assert seen["max_tokens"] >= 256
 
 
 def test_rebuild_with_yes_wipes_after_validation(

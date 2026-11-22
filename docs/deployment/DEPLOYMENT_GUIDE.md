@@ -89,7 +89,7 @@ cp .env.example .env.development
 cp .env.example .env.staging
 
 # Production
-cp .env.example .env.production
+cp .env.example .env.prod
 ```
 
 ### 3. Configure Environment Variables
