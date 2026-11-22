@@ -109,17 +109,21 @@ kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser
 
 # If corruption detected, restore from backup. The restore loads only into
 # an EMPTY ragdb: the dump has no DROP statements. If any component's
-# precondition fails, it changes nothing.
+# precondition fails, it changes nothing. This is for in-cluster Postgres
+# only: on AWS the database is RDS and the script refuses, so use an RDS
+# snapshot or point-in-time restore instead.
 NS=knowledge-graph-analytics   # the script's NAMESPACE
 
 # 1. Stop every writer first, or the boot migrations (the migrate Job and the
 #    backend's run-migrations init container) repopulate ragdb before the
 #    restore. Turn off Argo CD auto-sync for the app first (Argo CD UI, or
 #    `argocd app set <app> --sync-policy none`); otherwise self-heal scales
-#    everything back and re-runs the migrate Job. Pause KEDA so it does not
-#    scale the workers back up.
-kubectl annotate scaledobject --all -n "$NS" \
-  autoscaling.keda.sh/paused-replicas="0" --overwrite
+#    everything back and re-runs the migrate Job. If KEDA is installed
+#    (it is off on AWS), pause it so it does not scale the workers back up.
+if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+  kubectl annotate scaledobject --all -n "$NS" \
+    autoscaling.keda.sh/paused-replicas="0" --overwrite
+fi
 kubectl scale deployment -n "$NS" --replicas=0 \
   -l 'app.kubernetes.io/component in (backend,celery-worker,celery-beat)'
 kubectl delete job -n "$NS" -l app.kubernetes.io/component=migrations \
@@ -136,10 +140,12 @@ kubectl exec -n "$NS" deployment/postgres -- psql -U raguser -d postgres \
 cd scripts
 ./backup-and-restore.sh restore <backup_id>
 
-# 4. Bring the writers back: remove the KEDA pause and re-enable auto-sync.
-#    Argo CD restores the replicas and re-runs the migrate Job, which applies
-#    only the revisions newer than the backup.
-kubectl annotate scaledobject --all -n "$NS" autoscaling.keda.sh/paused-replicas-
+# 4. Bring the writers back: remove the KEDA pause (if KEDA is installed) and
+#    re-enable auto-sync. Argo CD restores the replicas and re-runs the
+#    migrate Job, which applies only the revisions newer than the backup.
+if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+  kubectl annotate scaledobject --all -n "$NS" autoscaling.keda.sh/paused-replicas-
+fi
 ```
 
 If a step fails after PostgreSQL was loaded, the script says
