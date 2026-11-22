@@ -17,6 +17,7 @@ from src.core.config import settings
 from src.core.database import get_db_sync
 from src.models.organization import Organization
 from src.models.quality_metrics import SearchEvent, SearchSession
+from src.models.search import SearchQuery
 from src.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -88,46 +89,93 @@ class UserBehaviorService:
         search_type: str,
         results_count: int,
         response_time: float,
-        user_id: Optional[str] = None,
+        user_id: str,
+        organization_id: Optional[str],
         search_query_id: Optional[str] = None,
         page_number: int = 1,
         filters_applied: Optional[Dict[str, Any]] = None,
         sort_order: Optional[str] = None,
-    ) -> SearchEvent:
-        """Track a search event for behavior analysis"""
+    ) -> Optional[SearchEvent]:
+        """Track a search event for behavior analysis.
+
+        ``session_id`` is the client token that ``POST /sessions`` returned
+        (``SearchSession.session_id``), not the row's primary key. The session
+        must belong to the caller (same user and organization); otherwise
+        ``None`` is returned and nothing is written. The event carries the
+        caller's ``organization_id`` (NOT NULL on ``search_events``) and points
+        at the session row's primary key.
+        """
+
+        if not organization_id:
+            return None
+        # Validate client-supplied ids before opening a session: a malformed
+        # value is the caller's error (the route maps ValueError to 422).
+        org_uuid = uuid.UUID(str(organization_id))
+        user_uuid = uuid.UUID(str(user_id))
+        query_uuid = uuid.UUID(str(search_query_id)) if search_query_id else None
 
         db = next(get_db_sync())
 
         try:
-            # Create search event
+            session = (
+                db.query(SearchSession)
+                .filter(
+                    SearchSession.session_id == session_id,
+                    SearchSession.user_id == user_uuid,
+                    SearchSession.organization_id == org_uuid,
+                )
+                .first()
+            )
+            if session is None:
+                return None
+
+            # ``search_events.search_query_id`` has no FK, and content-usage
+            # analytics joins through it, so a foreign id would plant this
+            # event in another org's analytics. Accept only the caller's own.
+            if query_uuid is not None:
+                own_query = (
+                    db.query(SearchQuery)
+                    .filter(
+                        SearchQuery.id == query_uuid,
+                        SearchQuery.organization_id == org_uuid,
+                    )
+                    .first()
+                )
+                if own_query is None:
+                    return None
+
             search_event = SearchEvent(
-                session_id=(
-                    uuid.UUID(session_id) if isinstance(session_id, str) else session_id
-                ),
+                session_id=session.id,
                 query=query,
                 search_type=search_type,
                 results_count=results_count,
                 response_time=response_time,
-                user_id=uuid.UUID(user_id) if user_id else None,
-                search_query_id=uuid.UUID(search_query_id) if search_query_id else None,
+                user_id=user_uuid,
+                organization_id=org_uuid,
+                search_query_id=query_uuid,
                 page_number=page_number,
                 filters_applied=filters_applied,
                 sort_order=sort_order,
             )
-
             db.add(search_event)
+
+            session.search_count = (session.search_count or 0) + 1
+            session.total_response_time = (
+                session.total_response_time or 0.0
+            ) + response_time
+            session.avg_response_time = (
+                session.total_response_time / session.search_count
+            )
+
             db.commit()
             db.refresh(search_event)
 
-            # Update session metrics
-            await self._update_session_metrics(session_id, search_event, db)
-
-            logger.info(f"Tracked search event: {query} for user {user_id}")
+            logger.info("Tracked search event for user %s", user_id)
             return search_event
 
-        except Exception as e:
+        except Exception:
             db.rollback()
-            logger.error(f"Failed to track search event: {e}")
+            logger.error("Failed to track search event", exc_info=True)
             raise
         finally:
             db.close()
@@ -969,26 +1017,6 @@ class UserBehaviorService:
             )
 
         return report
-
-    async def _update_session_metrics(
-        self, session_id: str, event: SearchEvent, db: Session
-    ):
-        """Update session metrics when a new event is added"""
-
-        session = (
-            db.query(SearchSession)
-            .filter(SearchSession.session_id == session_id)
-            .first()
-        )
-
-        if session:
-            session.search_count += 1
-            session.total_response_time += event.response_time
-            session.avg_response_time = (
-                session.total_response_time / session.search_count
-            )
-
-            db.commit()
 
     def _calculate_behavior_metrics(
         self,

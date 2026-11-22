@@ -7,13 +7,13 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, func, or_
-from sqlalchemy.orm import Session
+from fastapi import Depends
+from sqlalchemy import and_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
 from src.exceptions.analytics_exceptions import (
     ConfigurationException,
-    InsufficientDataException,
     PermissionDeniedException,
 )
 from src.middleware.multi_tenancy import get_current_user_role
@@ -25,28 +25,38 @@ logger = logging.getLogger(__name__)
 
 
 class TenantService:
-    """Service for managing tenant operations and quotas"""
+    """Service for managing tenant operations and quotas.
 
-    def __init__(self, db: Session = None):
-        self.db = db or next(get_db())
+    Runs on the request's ``AsyncSession``. It used to default to
+    ``next(get_db())``, but ``get_db`` is an async generator, so building the
+    dependency raised ``TypeError`` and every ``/tenants`` route failed.
+    """
 
-    def create_organization(
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def _load_organization(self, organization_id: str) -> Optional[Organization]:
+        result = await self.db.execute(
+            select(Organization).where(Organization.id == organization_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def create_organization(
         self, name: str, storage_tier: StorageTier = StorageTier.FREE
     ) -> Organization:
         """Create a new organization with default settings"""
         try:
             # Check if organization name already exists
-            existing_org = (
-                self.db.query(Organization).filter(Organization.name == name).first()
+            existing = await self.db.execute(
+                select(Organization.id).where(Organization.name == name)
             )
-            if existing_org:
+            if existing.first() is not None:
                 raise ConfigurationException(
                     config_key="organization_name",
                     config_value=name,
                     reason="Organization name already exists",
                 )
 
-            # Create new organization
             organization = Organization(
                 name=name,
                 storage_tier=storage_tier,
@@ -58,25 +68,23 @@ class TenantService:
             )
 
             self.db.add(organization)
-            self.db.commit()
-            self.db.refresh(organization)
+            await self.db.commit()
+            await self.db.refresh(organization)
 
-            logger.info(f"Created organization: {name} with tier: {storage_tier.value}")
+            logger.info(
+                "Created organization %s with tier %s", name, storage_tier.value
+            )
             return organization
 
-        except Exception as e:
-            self.db.rollback()
-            logger.error(f"Failed to create organization {name}: {e}")
+        except Exception:
+            await self.db.rollback()
+            logger.error("Failed to create organization %s", name, exc_info=True)
             raise
 
-    def get_organization(self, organization_id: str) -> Optional[Organization]:
+    async def get_organization(self, organization_id: str) -> Optional[Organization]:
         """Get organization by ID with tenant validation"""
-        from src.middleware.multi_tenancy import (
-            get_current_tenant_id,
-            validate_tenant_access,
-        )
+        from src.middleware.multi_tenancy import validate_tenant_access
 
-        # Validate tenant access
         if not validate_tenant_access(organization_id):
             raise PermissionDeniedException(
                 required_permission="organization_read",
@@ -84,20 +92,14 @@ class TenantService:
                 details={"organization_id": organization_id},
             )
 
-        return (
-            self.db.query(Organization)
-            .filter(Organization.id == organization_id)
-            .first()
-        )
+        return await self._load_organization(organization_id)
 
-    def update_organization(self, organization_id: str, **kwargs) -> Organization:
+    async def update_organization(
+        self, organization_id: str, **kwargs: Any
+    ) -> Organization:
         """Update organization settings with tenant validation"""
-        from src.middleware.multi_tenancy import (
-            get_current_tenant_id,
-            validate_tenant_access,
-        )
+        from src.middleware.multi_tenancy import validate_tenant_access
 
-        # Validate tenant access
         if not validate_tenant_access(organization_id):
             raise PermissionDeniedException(
                 required_permission="organization_update",
@@ -105,11 +107,7 @@ class TenantService:
                 details={"organization_id": organization_id},
             )
 
-        organization = (
-            self.db.query(Organization)
-            .filter(Organization.id == organization_id)
-            .first()
-        )
+        organization = await self._load_organization(organization_id)
         if not organization:
             raise ConfigurationException(
                 config_key="organization_id",
@@ -143,17 +141,17 @@ class TenantService:
             organization.storage_tier = new_tier
             organization.storage_limit_bytes = new_limit
 
-        self.db.commit()
-        self.db.refresh(organization)
+        await self.db.commit()
+        await self.db.refresh(organization)
 
-        logger.info(f"Updated organization: {organization_id}")
+        logger.info("Updated organization %s", organization_id)
         return organization
 
-    def upgrade_storage_tier(
+    async def upgrade_storage_tier(
         self, organization_id: str, new_tier: StorageTier
     ) -> Organization:
         """Upgrade organization storage tier"""
-        organization = self.get_organization(organization_id)
+        organization = await self.get_organization(organization_id)
         if not organization:
             raise ConfigurationException(
                 config_key="organization_id",
@@ -173,14 +171,14 @@ class TenantService:
                 raise ConfigurationException(
                     config_key="storage_tier_downgrade",
                     config_value=new_tier.value,
-                    reason=f"Current usage exceeds new tier limit",
+                    reason="Current usage exceeds new tier limit",
                 )
 
-        return self.update_organization(organization_id, storage_tier=new_tier)
+        return await self.update_organization(organization_id, storage_tier=new_tier)
 
-    def get_storage_quota_status(self, organization_id: str) -> Dict[str, Any]:
+    async def get_storage_quota_status(self, organization_id: str) -> Dict[str, Any]:
         """Get detailed storage quota status for organization"""
-        organization = self.get_organization(organization_id)
+        organization = await self.get_organization(organization_id)
         if not organization:
             raise ConfigurationException(
                 config_key="organization_id",
@@ -188,8 +186,7 @@ class TenantService:
                 reason="Organization not found",
             )
 
-        # Get additional storage analytics
-        document_stats = self._get_document_storage_stats(organization_id)
+        document_stats = await self._get_document_storage_stats(organization_id)
 
         quota_status = organization.check_storage_quota()
         quota_status.update(
@@ -206,59 +203,59 @@ class TenantService:
 
         return quota_status
 
-    def _get_document_storage_stats(self, organization_id: str) -> Dict[str, Any]:
+    async def _get_document_storage_stats(self, organization_id: str) -> Dict[str, Any]:
         """Get detailed document storage statistics"""
         try:
-            # Document count
             doc_count = (
-                self.db.query(func.count(Document.id))
-                .filter(Document.organization_id == organization_id)
-                .scalar()
-                or 0
-            )
-
-            # File type breakdown
-            file_type_stats = (
-                self.db.query(
-                    Document.file_type,
-                    func.count(Document.id).label("count"),
-                    func.sum(Document.file_size_bytes).label("total_size"),
+                await self.db.scalar(
+                    select(func.count(Document.id)).where(
+                        Document.organization_id == organization_id
+                    )
                 )
-                .filter(Document.organization_id == organization_id)
-                .group_by(Document.file_type)
-                .all()
-            )
+            ) or 0
+
+            # File type breakdown (Document has no ``file_type``; MIME type is it)
+            file_type_rows = (
+                await self.db.execute(
+                    select(
+                        Document.mime_type,
+                        func.count(Document.id).label("count"),
+                        func.sum(Document.file_size_bytes).label("total_size"),
+                    )
+                    .where(Document.organization_id == organization_id)
+                    .group_by(Document.mime_type)
+                )
+            ).all()
 
             file_type_breakdown = {
-                stat.file_type: {
-                    "count": stat.count,
-                    "total_size_mb": (stat.total_size or 0) / (1024 * 1024),
+                row.mime_type: {
+                    "count": row.count,
+                    "total_size_mb": (row.total_size or 0) / (1024 * 1024),
                 }
-                for stat in file_type_stats
+                for row in file_type_rows
             }
 
-            # Average and largest file sizes
             size_stats = (
-                self.db.query(
-                    func.avg(Document.file_size_bytes).label("avg_size"),
-                    func.max(Document.file_size_bytes).label("max_size"),
+                await self.db.execute(
+                    select(
+                        func.avg(Document.file_size_bytes).label("avg_size"),
+                        func.max(Document.file_size_bytes).label("max_size"),
+                    ).where(
+                        Document.organization_id == organization_id,
+                        Document.file_size_bytes.isnot(None),
+                    )
                 )
-                .filter(
-                    Document.organization_id == organization_id,
-                    Document.file_size_bytes.isnot(None),
-                )
-                .first()
-            )
+            ).first()
 
             return {
                 "document_count": doc_count,
                 "file_type_breakdown": file_type_breakdown,
-                "average_file_size_mb": (size_stats.avg_size or 0) / (1024 * 1024),
+                "average_file_size_mb": float(size_stats.avg_size or 0) / (1024 * 1024),
                 "largest_file_size_mb": (size_stats.max_size or 0) / (1024 * 1024),
             }
 
-        except Exception as e:
-            logger.error(f"Error getting document storage stats: {e}")
+        except Exception:
+            logger.error("Error getting document storage stats", exc_info=True)
             return {
                 "document_count": 0,
                 "file_type_breakdown": {},
@@ -282,14 +279,13 @@ class TenantService:
                 stats["average_file_size_mb"] / 10, 1.0
             )  # Optimal around 10MB
 
-            # Calculate efficiency score
             efficiency = (file_type_diversity * 30) + (avg_file_size_score * 70)
             return min(efficiency, 100.0)
 
         except Exception:
             return 50.0  # Default middle score
 
-    def get_user_count(self, organization_id: str) -> int:
+    async def get_user_count(self, organization_id: str) -> int:
         """Get number of users in organization"""
         from src.middleware.multi_tenancy import validate_tenant_access
 
@@ -301,13 +297,14 @@ class TenantService:
             )
 
         return (
-            self.db.query(func.count(User.id))
-            .filter(User.organization_id == organization_id)
-            .scalar()
-            or 0
-        )
+            await self.db.scalar(
+                select(func.count(User.id)).where(
+                    User.organization_id == organization_id
+                )
+            )
+        ) or 0
 
-    def get_organization_users(
+    async def get_organization_users(
         self, organization_id: str, limit: int = 50, offset: int = 0
     ) -> List[User]:
         """Get paginated list of users in organization"""
@@ -320,15 +317,16 @@ class TenantService:
                 details={"organization_id": organization_id},
             )
 
-        return (
-            self.db.query(User)
-            .filter(User.organization_id == organization_id)
+        result = await self.db.execute(
+            select(User)
+            .where(User.organization_id == organization_id)
+            .order_by(User.id)
             .offset(offset)
             .limit(limit)
-            .all()
         )
+        return list(result.scalars().all())
 
-    def get_organization_analytics(
+    async def get_organization_analytics(
         self, organization_id: str, days: int = 30
     ) -> Dict[str, Any]:
         """Get organization analytics summary"""
@@ -346,34 +344,29 @@ class TenantService:
         start_date = datetime.utcnow() - timedelta(days=days)
 
         try:
-            # Analytics events count
             events_count = (
-                self.db.query(func.count(AnalyticsEvent.id))
-                .filter(
-                    and_(
-                        AnalyticsEvent.organization_id == organization_id,
-                        AnalyticsEvent.created_at >= start_date,
+                await self.db.scalar(
+                    select(func.count(AnalyticsEvent.id)).where(
+                        and_(
+                            AnalyticsEvent.organization_id == organization_id,
+                            AnalyticsEvent.created_at >= start_date,
+                        )
                     )
                 )
-                .scalar()
-                or 0
-            )
+            ) or 0
 
-            # Active sessions count
             active_sessions = (
-                self.db.query(func.count(UserSession.id))
-                .filter(
-                    and_(
-                        UserSession.organization_id == organization_id,
-                        UserSession.created_at >= start_date,
+                await self.db.scalar(
+                    select(func.count(UserSession.id)).where(
+                        and_(
+                            UserSession.organization_id == organization_id,
+                            UserSession.created_at >= start_date,
+                        )
                     )
                 )
-                .scalar()
-                or 0
-            )
+            ) or 0
 
-            # Storage growth
-            storage_growth = self._calculate_storage_growth(organization_id, days)
+            storage_growth = await self._calculate_storage_growth(organization_id, days)
 
             return {
                 "period_days": days,
@@ -387,8 +380,8 @@ class TenantService:
                 },
             }
 
-        except Exception as e:
-            logger.error(f"Error getting organization analytics: {e}")
+        except Exception:
+            logger.error("Error getting organization analytics", exc_info=True)
             return {
                 "period_days": days,
                 "analytics_events_count": 0,
@@ -399,42 +392,34 @@ class TenantService:
                     "sessions_per_day": 0,
                     "storage_growth_per_day_mb": 0,
                 },
-                "error": str(e),
             }
 
-    def _calculate_storage_growth(self, organization_id: str, days: int) -> float:
+    async def _calculate_storage_growth(self, organization_id: str, days: int) -> float:
         """Calculate storage growth in MB over specified period"""
         try:
-            # This is a simplified calculation
-            # In production, you'd track historical storage usage
-            current_usage = (
-                self.db.query(func.sum(Document.file_size_bytes))
-                .filter(Document.organization_id == organization_id)
-                .scalar()
-                or 0
-            )
-
-            # Estimate growth based on recent uploads
+            # Simplified: bytes uploaded within the window.
             recent_uploads = (
-                self.db.query(func.sum(Document.file_size_bytes))
-                .filter(
-                    and_(
-                        Document.organization_id == organization_id,
-                        Document.created_at >= datetime.utcnow() - timedelta(days=days),
+                await self.db.scalar(
+                    select(func.sum(Document.file_size_bytes)).where(
+                        and_(
+                            Document.organization_id == organization_id,
+                            Document.created_at
+                            >= datetime.utcnow() - timedelta(days=days),
+                        )
                     )
                 )
-                .scalar()
-                or 0
-            )
+            ) or 0
 
             return recent_uploads / (1024 * 1024)  # Convert to MB
 
         except Exception:
             return 0.0
 
-    def validate_organization_limits(self, organization_id: str) -> Dict[str, Any]:
+    async def validate_organization_limits(
+        self, organization_id: str
+    ) -> Dict[str, Any]:
         """Validate organization against various limits and return status"""
-        organization = self.get_organization(organization_id)
+        organization = await self.get_organization(organization_id)
         if not organization:
             raise ConfigurationException(
                 config_key="organization_id",
@@ -442,8 +427,8 @@ class TenantService:
                 reason="Organization not found",
             )
 
-        user_count = self.get_user_count(organization_id)
-        document_count = self._get_document_storage_stats(organization_id)[
+        user_count = await self.get_user_count(organization_id)
+        document_count = (await self._get_document_storage_stats(organization_id))[
             "document_count"
         ]
 
@@ -505,7 +490,7 @@ class TenantService:
         }
 
         # Determine overall status
-        for limit_type, limit_info in validation_result["limits_status"].items():
+        for limit_info in validation_result["limits_status"].values():
             if limit_info["status"] == "exceeded":
                 validation_result["overall_status"] = "error"
             elif (
@@ -516,24 +501,13 @@ class TenantService:
 
         return validation_result
 
-    def close(self):
-        """Close database session"""
-        if self.db:
-            self.db.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
 
 # Utility functions
 
 
-def get_tenant_service() -> TenantService:
-    """Get tenant service instance"""
-    return TenantService()
+def get_tenant_service(db: AsyncSession = Depends(get_db)) -> TenantService:
+    """FastAPI dependency: a ``TenantService`` bound to the request session."""
+    return TenantService(db)
 
 
 def check_tenant_permission(
