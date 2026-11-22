@@ -2,10 +2,11 @@
 User Behavior Analytics API endpoints
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -25,6 +26,22 @@ from src.schemas.quality_metrics import (
 from src.services.quality.user_behavior_service import user_behavior_service
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+async def _off_loop(
+    fn: Callable[..., Awaitable[_T]], /, *args: Any, **kwargs: Any
+) -> _T:
+    """Run a ``user_behavior_service`` coroutine in a worker thread.
+
+    The service is async in name only: every method opens a sync Session
+    (``next(get_db_sync())``) and queries it inline, with no real async I/O.
+    Awaiting it directly blocked the event loop for every query (GOO-643 /
+    API-5), so each call runs to completion on its own loop in a thread.
+    """
+    return await asyncio.to_thread(lambda: asyncio.run(fn(*args, **kwargs)))
+
 
 router = APIRouter()
 
@@ -97,7 +114,8 @@ async def track_search_event(
     # ``session_id`` is the token ``POST /sessions`` returned; it must be one
     # of the caller's own sessions (the service returns None otherwise).
     try:
-        event = await user_behavior_service.track_search_event(
+        event = await _off_loop(
+            user_behavior_service.track_search_event,
             session_id=event_data["session_id"],
             query=event_data["query"],
             search_type=event_data["search_type"],
@@ -140,7 +158,8 @@ async def track_user_interaction(
 ):
     """Track user interaction with search results"""
     try:
-        success = await user_behavior_service.track_user_interaction(
+        success = await _off_loop(
+            user_behavior_service.track_user_interaction,
             session_id=interaction_data["session_id"],
             event_id=interaction_data["event_id"],
             interaction_type=interaction_data["interaction_type"],
@@ -168,7 +187,8 @@ async def get_my_behavior_analytics(
 ):
     """Get behavior analytics for the current user"""
     try:
-        metrics = await user_behavior_service.analyze_user_behavior(
+        metrics = await _off_loop(
+            user_behavior_service.analyze_user_behavior,
             user_id=str(current_user.id),
             days_back=days_back,
             organization_id=(
@@ -213,7 +233,9 @@ async def get_user_behavior_analytics(
         # Reject when the caller has no org, or the target is missing / in a
         # different org. Guard against None==None: a null-org caller must not
         # read other null-org users' behavior.
-        target_user = db.query(UserModel).filter(UserModel.id == user_id).first()
+        target_user = await asyncio.to_thread(
+            lambda: db.query(UserModel).filter(UserModel.id == user_id).first()
+        )
         if (
             not current_user.organization_id
             or not target_user
@@ -228,7 +250,8 @@ async def get_user_behavior_analytics(
         if str(current_user.id) != user_id and current_user.role.value != "admin":
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        metrics = await user_behavior_service.analyze_user_behavior(
+        metrics = await _off_loop(
+            user_behavior_service.analyze_user_behavior,
             user_id=user_id,
             days_back=days_back,
             organization_id=str(current_user.organization_id),
@@ -263,8 +286,10 @@ async def get_session_analysis(
         # rather than leaking another tenant's session — the admin role no
         # longer crosses the org boundary.
         try:
-            analysis = await user_behavior_service.analyze_session(
-                session_id, organization_id=str(current_user.organization_id)
+            analysis = await _off_loop(
+                user_behavior_service.analyze_session,
+                session_id,
+                organization_id=str(current_user.organization_id),
             )
         except ValueError:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -315,7 +340,8 @@ async def get_organization_behavior_trends(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        trends = await user_behavior_service.get_behavior_trends(
+        trends = await _off_loop(
+            user_behavior_service.get_behavior_trends,
             organization_id=str(current_user.organization_id),
             days_back=days_back,
             group_by=group_by,
@@ -344,8 +370,10 @@ async def get_behavioral_insights(
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
         # Get behavioral insights combining multiple data sources
-        insights = await user_behavior_service.get_behavioral_insights(
-            organization_id=str(current_user.organization_id), days_back=days_back
+        insights = await _off_loop(
+            user_behavior_service.get_behavioral_insights,
+            organization_id=str(current_user.organization_id),
+            days_back=days_back,
         )
 
         # Format response to match notebook expectations
@@ -397,8 +425,10 @@ async def get_organization_behavior_patterns(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        patterns = await user_behavior_service.identify_behavior_patterns(
-            organization_id=str(current_user.organization_id), min_sessions=min_sessions
+        patterns = await _off_loop(
+            user_behavior_service.identify_behavior_patterns,
+            organization_id=str(current_user.organization_id),
+            min_sessions=min_sessions,
         )
 
         return patterns
@@ -431,8 +461,9 @@ async def get_organization_user_behavior(
 
         # Get all users in the organization
 
-        users = db.execute(
-            text("""
+        users = await asyncio.to_thread(
+            lambda: db.execute(
+                text("""
             SELECT DISTINCT u.id
             FROM users u
             WHERE u.organization_id = :org_id
@@ -444,18 +475,20 @@ async def get_organization_user_behavior(
             ORDER BY u.created_at DESC
             LIMIT :limit
         """),
-            {
-                "org_id": current_user.organization_id,
-                "cutoff_date": datetime.utcnow() - timedelta(days=90),
-                "limit": limit * 2,  # Get more to filter
-            },
-        ).fetchall()
+                {
+                    "org_id": current_user.organization_id,
+                    "cutoff_date": datetime.utcnow() - timedelta(days=90),
+                    "limit": limit * 2,  # Get more to filter
+                },
+            ).fetchall()
+        )
 
         user_analytics = []
 
         for user in users:
             try:
-                metrics = await user_behavior_service.analyze_user_behavior(
+                metrics = await _off_loop(
+                    user_behavior_service.analyze_user_behavior,
                     user_id=str(user.id),
                     days_back=90,
                     use_cache=True,
@@ -572,7 +605,7 @@ def _query_content_usage(
 
 
 @router.get("/content-usage")
-async def get_content_usage_analytics(
+def get_content_usage_analytics(
     days_back: int = Query(30, ge=1, le=365, description="Days of history to analyze"),
     limit: int = Query(50, ge=1, le=200, description="Maximum documents to return"),
     current_user: User = Depends(get_current_user),
@@ -626,8 +659,8 @@ async def generate_behavior_report(
             # missing target with the same 403 so this is not an existence oracle.
             from src.models.user import User as UserModel
 
-            target_user = (
-                db.query(UserModel)
+            target_user = await asyncio.to_thread(
+                lambda: db.query(UserModel)
                 .filter(UserModel.id == report_request.user_id)
                 .first()
             )
@@ -640,7 +673,8 @@ async def generate_behavior_report(
             user_id = str(report_request.user_id)
 
         # Generate report
-        report = await user_behavior_service.generate_behavior_report(
+        report = await _off_loop(
+            user_behavior_service.generate_behavior_report,
             user_id=user_id,
             organization_id=str(current_user.organization_id),
             days_back=report_request.days_back,
@@ -682,21 +716,28 @@ async def export_behavior_data(
 
         if export_request.data_type == "user_behavior":
             # Get organization user behavior
-            trends = await user_behavior_service.get_behavior_trends(
+            trends = await _off_loop(
+                user_behavior_service.get_behavior_trends,
                 organization_id=str(current_user.organization_id),
                 days_back=days_back,
                 group_by="day",
             )
             export_data["trends"] = trends
 
-            patterns = await user_behavior_service.identify_behavior_patterns(
-                organization_id=str(current_user.organization_id)
+            patterns = await _off_loop(
+                user_behavior_service.identify_behavior_patterns,
+                organization_id=str(current_user.organization_id),
             )
             export_data["patterns"] = patterns
 
         elif export_request.data_type == "content_usage":
-            export_data["content_usage"] = _query_content_usage(
-                db, current_user.organization_id, days_back, limit=500
+            # Sync Session query: keep it off the event loop (GOO-643 API-5).
+            export_data["content_usage"] = await asyncio.to_thread(
+                _query_content_usage,
+                db,
+                current_user.organization_id,
+                days_back,
+                limit=500,
             )
 
         # Create export response

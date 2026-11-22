@@ -48,7 +48,7 @@ class QueueStatsResponse(BaseModel):
 
 
 @router.get("/status", response_model=WorkerStatsResponse)
-async def get_worker_status(current_user: User = Depends(require_platform_operator)):
+def get_worker_status(current_user: User = Depends(require_platform_operator)):
     """
     Get Celery worker status and statistics
 
@@ -146,7 +146,7 @@ async def get_worker_status(current_user: User = Depends(require_platform_operat
 
 
 @router.get("/queues", response_model=List[QueueStatsResponse])
-async def get_queue_status(current_user: User = Depends(require_platform_operator)):
+def get_queue_status(current_user: User = Depends(require_platform_operator)):
     """
     Get queue statistics (admin only)
 
@@ -222,7 +222,7 @@ async def get_queue_status(current_user: User = Depends(require_platform_operato
 
 
 @router.post("/ping")
-async def ping_workers(current_user: User = Depends(require_platform_operator)):
+def ping_workers(current_user: User = Depends(require_platform_operator)):
     """
     Ping all workers to check connectivity (admin only)
 
@@ -263,7 +263,7 @@ async def ping_workers(current_user: User = Depends(require_platform_operator)):
 
 
 @router.get("/registered-tasks")
-async def get_registered_tasks(
+def get_registered_tasks(
     current_user: User = Depends(require_platform_operator),
 ):
     """
@@ -298,7 +298,7 @@ async def get_registered_tasks(
 
 
 @router.post("/shutdown/{worker_name}")
-async def shutdown_worker(
+def shutdown_worker(
     worker_name: str, current_user: User = Depends(require_platform_operator)
 ):
     """
@@ -326,7 +326,7 @@ async def shutdown_worker(
 
 
 @router.get("/health")
-async def get_workers_health(current_user: User = Depends(require_platform_operator)):
+def get_workers_health(current_user: User = Depends(require_platform_operator)):
     """
     Get overall health status of worker infrastructure
 

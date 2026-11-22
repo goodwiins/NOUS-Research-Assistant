@@ -2,6 +2,7 @@
 Processing pipeline API endpoints
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -410,7 +411,10 @@ async def cancel_processing_job(
         if job.celery_task_id:
             from src.tasks.processing_tasks import current_app
 
-            current_app.control.revoke(job.celery_task_id, terminate=True)
+            # Blocking broker round-trip: worker thread (GOO-643 / API-5).
+            await asyncio.to_thread(
+                current_app.control.revoke, job.celery_task_id, terminate=True
+            )
 
         return {
             "message": "Job cancelled successfully",
