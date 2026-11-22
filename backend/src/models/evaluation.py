@@ -4,6 +4,7 @@ Evaluation models for RAG Triad metrics and evaluation workflows
 
 import uuid
 from datetime import datetime
+from datetime import timezone as dt_timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -64,6 +65,13 @@ class MetricType(Enum):
     CUSTOM = "custom"
 
 
+def _as_utc(value: datetime) -> datetime:
+    """``started_at`` is timestamptz and comes back aware after a commit, but a
+    row on SQLite (unit tests) or an older in-memory value may be naive; treat
+    naive as UTC so the duration subtraction never mixes aware and naive."""
+    return value if value.tzinfo else value.replace(tzinfo=dt_timezone.utc)
+
+
 class EvaluationJob(BaseModel):
     """
     Main evaluation job model for tracking evaluation workflows
@@ -119,15 +127,15 @@ class EvaluationJob(BaseModel):
     def start_job(self):
         """Mark job as started"""
         self.status = EvaluationStatus.RUNNING.value
-        self.started_at = datetime.utcnow()
+        self.started_at = datetime.now(dt_timezone.utc)
 
     def complete_job(self, overall_score: float = None, success_rate: float = None):
         """Mark job as completed"""
         self.status = EvaluationStatus.COMPLETED.value
-        self.completed_at = datetime.utcnow()
+        self.completed_at = datetime.now(dt_timezone.utc)
         if self.started_at:
             self.duration_seconds = (
-                self.completed_at - self.started_at
+                self.completed_at - _as_utc(self.started_at)
             ).total_seconds()
         self.overall_score = overall_score
         self.success_rate = success_rate
@@ -135,20 +143,20 @@ class EvaluationJob(BaseModel):
     def fail_job(self, error_message: str):
         """Mark job as failed"""
         self.status = EvaluationStatus.FAILED.value
-        self.completed_at = datetime.utcnow()
+        self.completed_at = datetime.now(dt_timezone.utc)
         if self.started_at:
             self.duration_seconds = (
-                self.completed_at - self.started_at
+                self.completed_at - _as_utc(self.started_at)
             ).total_seconds()
         self.error_message = error_message
 
     def cancel_job(self):
         """Mark job as cancelled"""
         self.status = EvaluationStatus.CANCELLED.value
-        self.completed_at = datetime.utcnow()
+        self.completed_at = datetime.now(dt_timezone.utc)
         if self.started_at:
             self.duration_seconds = (
-                self.completed_at - self.started_at
+                self.completed_at - _as_utc(self.started_at)
             ).total_seconds()
 
     def update_progress(self, processed_count: int):

@@ -5,29 +5,65 @@ Integration Test Runner for Knowledge Graph Analytics Dashboard
 Comprehensive test runner with environment setup, health checks, and detailed reporting.
 """
 
-import os
-import sys
 import argparse
 import asyncio
-import subprocess
-import time
 import json
 import logging
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timezone
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-import pytest
 import docker
+import pytest
 from docker.errors import DockerException
+
+MIGRATIONS_DIR = Path("database") / "migrations"
+CONTAINER_MIGRATIONS_DIR = "/migrations"
+
+
+def migration_files(directory: Path) -> List[Path]:
+    """Forward migration scripts in apply order; rollback scripts are skipped."""
+    return sorted(
+        path for path in directory.glob("*.sql") if "rollback" not in path.name
+    )
 
 
 class IntegrationTestRunner:
     """Comprehensive integration test runner"""
+
+    def apply_migrations(self, directory: Path) -> bool:
+        """Apply each forward migration with ON_ERROR_STOP=1; False on the first failure."""
+        container = self.containers["postgres"]
+        for path in migration_files(directory):
+            cmd = [
+                "psql",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "--no-psqlrc",
+                "-U",
+                "test_user",
+                "-d",
+                "test_analytics",
+                "-f",
+                f"{CONTAINER_MIGRATIONS_DIR}/{path.name}",
+            ]
+            result = container.exec_run(cmd)
+            if result.exit_code != 0:
+                output = result.output.decode(errors="replace").strip()
+                self.logger.error(
+                    f"Migration {path.name} failed (exit {result.exit_code}): {output}"
+                )
+                return False
+            self.logger.info(f"Applied migration {path.name}")
+        return True
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -42,8 +78,8 @@ class IntegrationTestRunner:
         log_level = getattr(logging, self.args.log_level.upper())
         logging.basicConfig(
             level=log_level,
-            format='%(asctime)s [%(levelname)8s] %(name)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            format="%(asctime)s [%(levelname)8s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
         self.logger = logging.getLogger(__name__)
 
@@ -63,6 +99,10 @@ class IntegrationTestRunner:
 
             # Wait for services to be ready
             if not await self.wait_for_services():
+                return False
+
+            # Apply the legacy analytics SQL, stopping at the first error
+            if not self.apply_migrations(self.project_root / MIGRATIONS_DIR):
                 return False
 
             # Install dependencies
@@ -92,17 +132,20 @@ class IntegrationTestRunner:
                     "POSTGRES_DB": "test_analytics",
                     "POSTGRES_USER": "test_user",
                     "POSTGRES_PASSWORD": "test_password",
-                    "POSTGRES_INITDB_ARGS": "--encoding=UTF-8"
+                    "POSTGRES_INITDB_ARGS": "--encoding=UTF-8",
                 },
                 ports={"5432/tcp": ("127.0.0.1", 5433)},
+                # Mounted read-only and applied explicitly by apply_migrations()
+                # so a failing statement fails setup instead of silently
+                # killing the container during init.
                 volumes={
-                    str(self.project_root / "database/migrations"): {
-                        "bind": "/docker-entrypoint-initdb.d",
-                        "mode": "ro"
+                    str(self.project_root / MIGRATIONS_DIR): {
+                        "bind": CONTAINER_MIGRATIONS_DIR,
+                        "mode": "ro",
                     }
                 },
                 detach=True,
-                remove=True
+                remove=True,
             )
             self.containers["postgres"] = postgres_container
             self.logger.info("PostgreSQL container started")
@@ -113,7 +156,7 @@ class IntegrationTestRunner:
                 name="test_redis_analytics",
                 ports={"6379/tcp": ("127.0.0.1", 6380)},
                 detach=True,
-                remove=True
+                remove=True,
             )
             self.containers["redis"] = redis_container
             self.logger.info("Redis container started")
@@ -159,13 +202,14 @@ class IntegrationTestRunner:
         """Check PostgreSQL health"""
         try:
             import asyncpg
+
             conn = await asyncpg.connect(
                 host="localhost",
                 port=5433,
                 user="test_user",
                 password="test_password",
                 database="test_analytics",
-                timeout=5
+                timeout=5,
             )
             await conn.execute("SELECT 1")
             await conn.close()
@@ -177,6 +221,7 @@ class IntegrationTestRunner:
         """Check Redis health"""
         try:
             import aioredis
+
             redis = aioredis.from_url("redis://localhost:6380/0")
             await redis.ping()
             await redis.close()
@@ -193,12 +238,18 @@ class IntegrationTestRunner:
             requirements_file = self.test_dir / "requirements.txt"
             if requirements_file.exists():
                 cmd = [
-                    sys.executable, "-m", "pip", "install",
-                    "-r", str(requirements_file)
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    str(requirements_file),
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode != 0:
-                    self.logger.error(f"Failed to install Python dependencies: {result.stderr}")
+                    self.logger.error(
+                        f"Failed to install Python dependencies: {result.stderr}"
+                    )
                     return False
                 self.logger.info("Python dependencies installed")
 
@@ -207,12 +258,12 @@ class IntegrationTestRunner:
             if frontend_dir.exists() and (frontend_dir / "package.json").exists():
                 os.chdir(frontend_dir)
                 result = subprocess.run(
-                    ["npm", "install"],
-                    capture_output=True,
-                    text=True
+                    ["npm", "install"], capture_output=True, text=True
                 )
                 if result.returncode != 0:
-                    self.logger.warning(f"Frontend dependencies installation failed: {result.stderr}")
+                    self.logger.warning(
+                        f"Frontend dependencies installation failed: {result.stderr}"
+                    )
                 else:
                     self.logger.info("Frontend dependencies installed")
 
@@ -255,13 +306,15 @@ class IntegrationTestRunner:
 
         # Add coverage
         if self.args.coverage:
-            args.extend([
-                "--cov=src",
-                "--cov-report=html",
-                "--cov-report=xml",
-                "--cov-report=term-missing",
-                f"--cov-fail-under={self.args.coverage_threshold}"
-            ])
+            args.extend(
+                [
+                    "--cov=src",
+                    "--cov-report=html",
+                    "--cov-report=xml",
+                    "--cov-report=term-missing",
+                    f"--cov-fail-under={self.args.coverage_threshold}",
+                ]
+            )
 
         # Add parallel execution
         if self.args.parallel:
@@ -290,8 +343,8 @@ class IntegrationTestRunner:
             "environment": {
                 "python_version": sys.version,
                 "platform": sys.platform,
-                "docker_containers": list(self.containers.keys())
-            }
+                "docker_containers": list(self.containers.keys()),
+            },
         }
 
         # Save report
@@ -329,57 +382,45 @@ def parse_arguments() -> argparse.Namespace:
 
     # Test selection
     parser.add_argument(
-        "--markers", "-m",
-        help="Pytest markers to run (e.g., 'api_contract or performance')"
+        "--markers",
+        "-m",
+        help="Pytest markers to run (e.g., 'api_contract or performance')",
     )
-    parser.add_argument(
-        "--tests",
-        nargs="*",
-        help="Specific test files to run"
-    )
+    parser.add_argument("--tests", nargs="*", help="Specific test files to run")
 
     # Execution options
     parser.add_argument(
-        "--parallel", "-n",
+        "--parallel",
+        "-n",
         type=int,
         default=1,
-        help="Number of parallel workers (default: 1)"
+        help="Number of parallel workers (default: 1)",
     )
     parser.add_argument(
         "--timeout",
         type=int,
         default=300,
-        help="Test timeout in seconds (default: 300)"
+        help="Test timeout in seconds (default: 300)",
     )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Verbose output"
-    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
     # Coverage options
     parser.add_argument(
-        "--coverage",
-        action="store_true",
-        help="Generate coverage report"
+        "--coverage", action="store_true", help="Generate coverage report"
     )
     parser.add_argument(
         "--coverage-threshold",
         type=int,
         default=80,
-        help="Coverage threshold percentage (default: 80)"
+        help="Coverage threshold percentage (default: 80)",
     )
 
     # Environment options
     parser.add_argument(
-        "--skip-setup",
-        action="store_true",
-        help="Skip environment setup"
+        "--skip-setup", action="store_true", help="Skip environment setup"
     )
     parser.add_argument(
-        "--no-cleanup",
-        action="store_true",
-        help="Skip cleanup after tests"
+        "--no-cleanup", action="store_true", help="Skip cleanup after tests"
     )
 
     # Logging options
@@ -387,20 +428,14 @@ def parse_arguments() -> argparse.Namespace:
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
-        help="Logging level (default: INFO)"
+        help="Logging level (default: INFO)",
     )
 
     # Quick test options
     parser.add_argument(
-        "--quick",
-        action="store_true",
-        help="Run quick smoke tests only"
+        "--quick", action="store_true", help="Run quick smoke tests only"
     )
-    parser.add_argument(
-        "--smoke",
-        action="store_true",
-        help="Run smoke tests"
-    )
+    parser.add_argument("--smoke", action="store_true", help="Run smoke tests")
 
     return parser.parse_args()
 

@@ -8,7 +8,6 @@ removed. See [[project_rag_dropped_qdrant]].
 """
 
 import logging
-import threading
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -52,22 +51,14 @@ agent_memories = sa.Table(
 # Service helpers (patchable for testing)
 # ---------------------------------------------------------------------------
 
-_INSIGHTS_LLM = None
-_INSIGHTS_LLM_LOCK = threading.Lock()
-
 
 def _build_insights_llm():
-    """Return a cached lightweight LLM for insight extraction."""
+    """Return the lightweight LLM for insight extraction."""
     from src.services.agent.llm_factory import build_lightweight_llm
 
-    global _INSIGHTS_LLM
-    if _INSIGHTS_LLM is not None:
-        return _INSIGHTS_LLM
-    with _INSIGHTS_LLM_LOCK:
-        if _INSIGHTS_LLM is not None:  # re-check inside lock
-            return _INSIGHTS_LLM
-        _INSIGHTS_LLM = build_lightweight_llm(max_tokens=512)
-    return _INSIGHTS_LLM
+    # No module-level cache: the factory caches by credential_fingerprint(),
+    # so a rotated Azure key/endpoint gets a fresh client (audit AG-1).
+    return build_lightweight_llm(max_tokens=512)
 
 
 # ---------------------------------------------------------------------------

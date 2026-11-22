@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_EXPORT_DATA_TYPES = frozenset({"user_behavior", "content_usage"})
+
 
 @router.post("/sessions", response_model=dict)
 def create_search_session(
@@ -39,19 +41,28 @@ def create_search_session(
     try:
         from src.models.quality_metrics import SearchSession
 
-        # Check if session already exists
+        token = session_data.get("session_id")
+        if not token or not isinstance(token, str):
+            raise HTTPException(status_code=422, detail="session_id is required")
+
+        # ``session_id`` is globally unique, so look it up by token, then only
+        # hand it back if it is the caller's own (same user and organization).
         existing_session = (
-            db.query(SearchSession)
-            .filter(SearchSession.session_id == session_data["session_id"])
-            .first()
+            db.query(SearchSession).filter(SearchSession.session_id == token).first()
         )
 
         if existing_session:
+            if str(existing_session.user_id) != str(current_user.id) or str(
+                existing_session.organization_id
+            ) != str(current_user.organization_id):
+                raise HTTPException(
+                    status_code=409, detail="session_id is already in use"
+                )
             return {"session_id": existing_session.session_id, "status": "existing"}
 
         # Create new session
         session = SearchSession(
-            session_id=session_data["session_id"],
+            session_id=token,
             user_id=current_user.id,
             organization_id=current_user.organization_id,
             user_agent=session_data.get("user_agent"),
@@ -71,6 +82,8 @@ def create_search_session(
             "created_at": session.created_at.isoformat(),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create search session: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -81,6 +94,8 @@ async def track_search_event(
     event_data: Dict[str, Any], current_user: User = Depends(get_current_user)
 ):
     """Track a search event for behavior analysis"""
+    # ``session_id`` is the token ``POST /sessions`` returned; it must be one
+    # of the caller's own sessions (the service returns None otherwise).
     try:
         event = await user_behavior_service.track_search_event(
             session_id=event_data["session_id"],
@@ -89,11 +104,18 @@ async def track_search_event(
             results_count=event_data["results_count"],
             response_time=event_data["response_time"],
             user_id=str(current_user.id),
+            organization_id=(
+                str(current_user.organization_id)
+                if current_user.organization_id
+                else None
+            ),
             search_query_id=event_data.get("search_query_id"),
             page_number=event_data.get("page_number", 1),
             filters_applied=event_data.get("filters_applied"),
             sort_order=event_data.get("sort_order"),
         )
+        if event is None:
+            raise HTTPException(status_code=404, detail="Search session not found")
 
         return {
             "event_id": str(event.id),
@@ -101,6 +123,12 @@ async def track_search_event(
             "status": "tracked",
         }
 
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=422, detail="Missing required event field")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Malformed id in event")
     except Exception as e:
         logger.error(f"Failed to track search event: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -476,6 +504,73 @@ async def get_organization_user_behavior(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _query_content_usage(
+    db: Session, organization_id: Any, days_back: int, limit: int
+) -> List[Dict[str, Any]]:
+    """Per-document usage rows for one organization (shared by two routes)."""
+    # Query content usage from search events
+    content_usage = db.execute(
+        text("""
+        SELECT
+            d.id as document_id,
+            d.title,
+            COUNT(DISTINCT s.user_id) as unique_users,
+            COUNT(DISTINCT se.session_id) as search_appearances,
+            COUNT(CASE WHEN se.clicked_results > 0 THEN 1 END) as total_clicks,
+            AVG(se.results_count) as avg_results_in_search,
+            MAX(se.created_at) as last_accessed
+        FROM documents d
+        JOIN search_results sr ON d.id = sr.document_id
+        JOIN search_queries sq ON sr.search_query_id = sq.id
+        JOIN search_events se ON sq.id = se.search_query_id
+        JOIN search_sessions s ON se.session_id = s.id
+        WHERE d.organization_id = :org_id
+            AND sq.organization_id = :org_id
+            AND se.organization_id = :org_id
+            AND s.organization_id = :org_id
+            AND se.created_at >= :cutoff_date
+        GROUP BY d.id, d.title
+        HAVING COUNT(DISTINCT s.user_id) > 0
+        ORDER BY unique_users DESC, total_clicks DESC
+        LIMIT :limit
+    """),
+        {
+            "org_id": organization_id,
+            "cutoff_date": datetime.utcnow() - timedelta(days=days_back),
+            "limit": limit,
+        },
+    ).fetchall()
+
+    content_analytics = []
+
+    for content in content_usage:
+        # Calculate click-through rate
+        ctr = (
+            content.total_clicks / content.search_appearances
+            if content.search_appearances > 0
+            else 0
+        )
+
+        content_analytics.append(
+            {
+                "document_id": str(content.document_id),
+                "title": content.title,
+                "access_count": content.unique_users,
+                "search_appearances": content.search_appearances,
+                "total_clicks": content.total_clicks,
+                "click_through_rate": float(ctr),
+                "avg_results_in_search": float(content.avg_results_in_search or 0),
+                "last_accessed": (
+                    content.last_accessed.isoformat()
+                    if isinstance(content.last_accessed, datetime)
+                    else content.last_accessed
+                ),
+            }
+        )
+
+    return content_analytics
+
+
 @router.get("/content-usage")
 async def get_content_usage_analytics(
     days_back: int = Query(30, ge=1, le=365, description="Days of history to analyze"),
@@ -491,62 +586,9 @@ async def get_content_usage_analytics(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        # Query content usage from search events
-        content_usage = db.execute(
-            text("""
-            SELECT
-                d.id as document_id,
-                d.title,
-                COUNT(DISTINCT s.user_id) as unique_users,
-                COUNT(DISTINCT se.session_id) as search_appearances,
-                COUNT(CASE WHEN se.clicked_results > 0 THEN 1 END) as total_clicks,
-                AVG(se.results_count) as avg_results_in_search,
-                MAX(se.created_at) as last_accessed
-            FROM documents d
-            JOIN search_results sr ON d.id = sr.document_id
-            JOIN search_queries sq ON sr.search_query_id = sq.id
-            JOIN search_events se ON sq.id = se.search_query_id
-            JOIN search_sessions s ON se.session_id = s.id
-            WHERE d.organization_id = :org_id
-                AND se.created_at >= :cutoff_date
-            GROUP BY d.id, d.title
-            HAVING COUNT(DISTINCT s.user_id) > 0
-            ORDER BY unique_users DESC, total_clicks DESC
-            LIMIT :limit
-        """),
-            {
-                "org_id": current_user.organization_id,
-                "cutoff_date": datetime.utcnow() - timedelta(days=days_back),
-                "limit": limit,
-            },
-        ).fetchall()
-
-        content_analytics = []
-
-        for content in content_usage:
-            # Calculate click-through rate
-            ctr = (
-                content.total_clicks / content.search_appearances
-                if content.search_appearances > 0
-                else 0
-            )
-
-            content_analytics.append(
-                {
-                    "document_id": str(content.document_id),
-                    "title": content.title,
-                    "access_count": content.unique_users,
-                    "search_appearances": content.search_appearances,
-                    "total_clicks": content.total_clicks,
-                    "click_through_rate": float(ctr),
-                    "avg_results_in_search": float(content.avg_results_in_search or 0),
-                    "last_accessed": (
-                        content.last_accessed.isoformat()
-                        if content.last_accessed
-                        else None
-                    ),
-                }
-            )
+        content_analytics = _query_content_usage(
+            db, current_user.organization_id, days_back, limit
+        )
 
         return {
             "content_usage": content_analytics,
@@ -621,6 +663,7 @@ async def export_behavior_data(
     export_request: AnalyticsExportRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db_sync),
 ):
     """Export behavior analytics data"""
     try:
@@ -630,14 +673,18 @@ async def export_behavior_data(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+        if export_request.data_type not in _EXPORT_DATA_TYPES:
+            raise HTTPException(status_code=400, detail="Unsupported data_type")
+
         # Generate export data based on type
         export_data = {}
+        days_back = max((export_request.end_date - export_request.start_date).days, 1)
 
         if export_request.data_type == "user_behavior":
             # Get organization user behavior
             trends = await user_behavior_service.get_behavior_trends(
                 organization_id=str(current_user.organization_id),
-                days_back=(export_request.end_date - export_request.start_date).days,
+                days_back=days_back,
                 group_by="day",
             )
             export_data["trends"] = trends
@@ -648,13 +695,9 @@ async def export_behavior_data(
             export_data["patterns"] = patterns
 
         elif export_request.data_type == "content_usage":
-            # Get content usage
-            content_data = await get_content_usage_analytics(
-                days_back=(export_request.end_date - export_request.start_date).days,
-                limit=500,
-                current_user=current_user,
+            export_data["content_usage"] = _query_content_usage(
+                db, current_user.organization_id, days_back, limit=500
             )
-            export_data["content_usage"] = content_data["content_usage"]
 
         # Create export response
         export_response = AnalyticsExportResponse(

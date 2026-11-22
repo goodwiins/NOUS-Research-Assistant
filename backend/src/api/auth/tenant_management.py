@@ -4,7 +4,7 @@ Provides organization management, quota monitoring, and multi-tenancy operations
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -68,8 +68,18 @@ class OrganizationResponse(BaseModel):
     storage_percentage_used: float
     max_file_size_mb: float
     is_active: bool
-    created_at: str
-    updated_at: str
+    created_at: Optional[str]
+    updated_at: Optional[str]
+
+
+def _organization_response(organization: Any) -> OrganizationResponse:
+    """Serialize an ``Organization``: ``to_dict`` returns a UUID id and datetimes."""
+    data = organization.to_dict()
+    data["id"] = str(data["id"])
+    for key in ("created_at", "updated_at"):
+        value = data.get(key)
+        data[key] = value.isoformat() if value is not None else None
+    return OrganizationResponse(**data)
 
 
 class StorageQuotaResponse(BaseModel):
@@ -190,11 +200,11 @@ async def create_organization(
 ):
     """Create a new organization"""
     try:
-        organization = tenant_service.create_organization(
+        organization = await tenant_service.create_organization(
             name=organization_data.name, storage_tier=organization_data.storage_tier
         )
 
-        return OrganizationResponse(**organization.to_dict())
+        return _organization_response(organization)
 
     except ConfigurationException:
         logger.warning("Invalid organization request", exc_info=True)
@@ -217,15 +227,17 @@ async def get_organization(
 ):
     """Get organization details"""
     try:
-        organization = tenant_service.get_organization(organization_id)
+        organization = await tenant_service.get_organization(organization_id)
 
         if not organization:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found"
             )
 
-        return OrganizationResponse(**organization.to_dict())
+        return _organization_response(organization)
 
+    except HTTPException:
+        raise
     except PermissionDeniedException as e:
         raise create_permission_denied_http_exception(
             required_permission=e.details.get(
@@ -250,11 +262,11 @@ async def update_organization(
     """Update organization settings"""
     try:
         update_data = organization_data.dict(exclude_unset=True)
-        organization = tenant_service.update_organization(
+        organization = await tenant_service.update_organization(
             organization_id, **update_data
         )
 
-        return OrganizationResponse(**organization.to_dict())
+        return _organization_response(organization)
 
     except PermissionDeniedException as e:
         raise create_permission_denied_http_exception(
@@ -287,11 +299,11 @@ async def upgrade_storage_tier(
 ):
     """Upgrade organization storage tier"""
     try:
-        organization = tenant_service.upgrade_storage_tier(
+        organization = await tenant_service.upgrade_storage_tier(
             organization_id, upgrade_data.storage_tier
         )
 
-        return OrganizationResponse(**organization.to_dict())
+        return _organization_response(organization)
 
     except PermissionDeniedException as e:
         raise create_permission_denied_http_exception(
@@ -324,7 +336,7 @@ async def get_storage_quota_status(
 ):
     """Get detailed storage quota status"""
     try:
-        quota_status = tenant_service.get_storage_quota_status(organization_id)
+        quota_status = await tenant_service.get_storage_quota_status(organization_id)
         return StorageQuotaResponse(**quota_status)
 
     except PermissionDeniedException as e:
@@ -357,7 +369,7 @@ async def get_user_count(
 ):
     """Get number of users in organization"""
     try:
-        user_count = tenant_service.get_user_count(organization_id)
+        user_count = await tenant_service.get_user_count(organization_id)
 
         return UserCountResponse(organization_id=organization_id, user_count=user_count)
 
@@ -389,7 +401,9 @@ async def get_organization_analytics(
 ):
     """Get organization analytics summary"""
     try:
-        analytics = tenant_service.get_organization_analytics(organization_id, days)
+        analytics = await tenant_service.get_organization_analytics(
+            organization_id, days
+        )
         return OrganizationAnalyticsResponse(**analytics)
 
     except PermissionDeniedException as e:
@@ -416,7 +430,9 @@ async def validate_organization_limits(
 ):
     """Validate organization against various limits"""
     try:
-        limits_validation = tenant_service.validate_organization_limits(organization_id)
+        limits_validation = await tenant_service.validate_organization_limits(
+            organization_id
+        )
         return OrganizationLimitsResponse(**limits_validation)
 
     except PermissionDeniedException as e:
@@ -452,7 +468,7 @@ async def get_current_tenant_info(
                 detail="Authentication required",
             )
 
-        organization = tenant_service.get_organization(tenant_id)
+        organization = await tenant_service.get_organization(tenant_id)
         if not organization:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -461,7 +477,7 @@ async def get_current_tenant_info(
 
         return {
             "tenant_id": tenant_id,
-            "organization": OrganizationResponse(**organization.to_dict()),
+            "organization": _organization_response(organization),
             "user_role": get_current_user_role(),
             "permissions": _get_user_permissions(get_current_user_role()),
         }

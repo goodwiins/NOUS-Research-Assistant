@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Optional, Set
 
+from src.core.background_tasks import spawn
 from src.core.database import get_db
 from src.models.document import Document
 from src.services.websocket import connection_manager
@@ -73,9 +74,7 @@ class RealTimeQualityMetricsService:
                 self.metrics_history[query_id] = []
 
             # Start the evaluation process
-            asyncio.create_task(
-                self._evaluate_and_broadcast(query_id, websocket_channel)
-            )
+            spawn(self._evaluate_and_broadcast(query_id, websocket_channel))
 
             logger.info(f"Started real-time evaluation for query_id: {query_id}")
 
