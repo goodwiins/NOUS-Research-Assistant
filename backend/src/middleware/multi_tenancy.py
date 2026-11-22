@@ -35,7 +35,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.core.database import AsyncSessionLocal
 from src.core.probes import PROBE_EXEMPT_PATHS
-from src.core.security import TokenData, verify_token
+from src.core.security import TokenData, verify_token, verify_token_async
 from src.core.user_provisioning import SupabaseEmailLookupError, ensure_user_and_org
 from src.exceptions.analytics_exceptions import PermissionDeniedException
 from src.middleware.responses import error_response
@@ -151,13 +151,17 @@ def _is_cors_preflight(request: Request) -> bool:
     )
 
 
-def _verified_token_data(request: Request) -> Optional[TokenData]:
-    """Reject invalid credentials before opening a tenant-validation session."""
+async def _verified_token_data(request: Request) -> Optional[TokenData]:
+    """Reject invalid credentials before opening a tenant-validation session.
+
+    Goes through ``verify_token_async`` so a cold Supabase JWKS fetch runs in
+    a worker thread instead of blocking the event loop (GOO-641).
+    """
     token = _bearer_token(request)
     if token is None:
         return None
     try:
-        token_data = verify_token(token)
+        token_data = await verify_token_async(token, verify=verify_token)
     except Exception:
         return None
     if not token_data or not token_data.user_id:
@@ -205,7 +209,7 @@ class MultiTenancyMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        token_data = _verified_token_data(request)
+        token_data = await _verified_token_data(request)
         if token_data is None:
             return error_response(
                 401,
@@ -307,7 +311,7 @@ class MultiTenancyMiddleware(BaseHTTPMiddleware):
     ) -> Optional[dict]:
         """Extract tenant information by verifying the Bearer JWT and resolving org via DB."""
         if token_data is None:
-            token_data = _verified_token_data(request)
+            token_data = await _verified_token_data(request)
         if token_data is None:
             return None
 

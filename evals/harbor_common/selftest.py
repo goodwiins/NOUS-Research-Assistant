@@ -629,7 +629,36 @@ def test_retry_reminder_includes_offending_reply() -> None:
     ), "reminder must cap the quoted snippet, not embed the full reply"
 
 
+def test_network_probe_semantics() -> None:
+    """TD2C-2: a proxy 5xx is not reachability; a destination 403 is not a block."""
+    import httpx
+
+    from evals.harbor_common.network import (
+        approved_probe_reachable,
+        denied_probe_error_blocked,
+        denied_probe_response_blocked,
+    )
+
+    squid = {"X-Squid-Error": "ERR_ACCESS_DENIED 0"}
+    assert approved_probe_reachable(httpx.Response(404))
+    assert approved_probe_reachable(httpx.Response(401))
+    assert not approved_probe_reachable(httpx.Response(502))
+    assert not approved_probe_reachable(httpx.Response(503, headers=squid))
+    assert not approved_probe_reachable(httpx.Response(403, headers=squid))
+
+    assert denied_probe_response_blocked(httpx.Response(403, headers=squid))
+    assert not denied_probe_response_blocked(httpx.Response(403))
+    assert not denied_probe_response_blocked(httpx.Response(200))
+
+    assert denied_probe_error_blocked(httpx.ProxyError("403 Forbidden"))
+    assert not denied_probe_error_blocked(httpx.ProxyError("502 Bad Gateway"))
+    assert not denied_probe_error_blocked(
+        httpx.ProxyError("upstream 10.0.0.1:4030 refused")
+    )
+
+
 def main() -> None:
+    test_network_probe_semantics()
     test_json_safe_nested_with_datetime()
     test_utc_now()
     with tempfile.TemporaryDirectory() as raw:
