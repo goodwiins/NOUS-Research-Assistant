@@ -25,6 +25,7 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
@@ -133,13 +134,48 @@ async def initial_counts() -> dict[str, Any]:
 # --------------------------------------------------------------------------
 # Redis isolation
 # --------------------------------------------------------------------------
+# The task's own docker-compose service: `redis`, started with persistence off.
+EVAL_REDIS_HOST = "redis"
+
+
+async def assert_eval_owned_redis(client: Any, url: str) -> None:
+    """Refuse to flush any Redis that is not this task's ephemeral service.
+
+    FLUSHDB is destructive. REDIS_URL pointing anywhere else (a shared dev
+    cache, a developer's local Redis) must fail as infrastructure, never be
+    wiped. Two independent checks: the compose host name, and the server's
+    own config matching the compose command (no RDB saves, no AOF).
+    """
+    host = urlparse(url).hostname
+    if host != EVAL_REDIS_HOST:
+        raise InfrastructureFailure(
+            f"refusing to FLUSHDB: REDIS_URL host {host!r} is not the task's "
+            f"own {EVAL_REDIS_HOST!r} service"
+        )
+    try:
+        save = (await client.config_get("save")).get("save")
+        appendonly = (await client.config_get("appendonly")).get("appendonly")
+    except Exception as exc:  # noqa: BLE001 - unverifiable ownership is infra
+        raise InfrastructureFailure(
+            f"refusing to FLUSHDB: cannot read Redis config ({type(exc).__name__})"
+        ) from exc
+    if save != "" or appendonly != "no":
+        raise InfrastructureFailure(
+            "refusing to FLUSHDB: Redis is persistent "
+            f"(save={save!r}, appendonly={appendonly!r}); not the ephemeral "
+            "eval service"
+        )
+
+
 async def reset_redis() -> None:
     import redis.asyncio as aioredis
 
-    client = aioredis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    url = os.environ["REDIS_URL"]
+    client = aioredis.from_url(url, decode_responses=True)
     try:
         if not await client.ping():
             raise InfrastructureFailure("Redis ping returned false")
+        await assert_eval_owned_redis(client, url)
         await client.flushdb()
         active_key = f"agent:stream:active:{THREAD_ID}"
         if await client.get(active_key) is not None:
@@ -451,9 +487,7 @@ def accepted_run_id(frames: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def token_log_from_frames(
-    frames: list[dict[str, Any]], *, client_observation: bool = False
-) -> list[dict[str, Any]]:
+def token_log_from_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize token frames from either the client or Redis replay log."""
     entries = []
     for frame in frames:
@@ -461,11 +495,53 @@ def token_log_from_frames(
         if frame.get("event") == "token" and isinstance(data, dict):
             content = str(data.get("content") or "")
             if content:
-                entry = {"content": content, "sequence": data.get("sequence")}
-                if client_observation:
-                    entry.update({"emit_completed": True, "appended_to_partial": True})
-                entries.append(entry)
+                entries.append({"content": content, "sequence": data.get("sequence")})
     return entries
+
+
+def annotate_client_token_log(
+    client_tokens: list[dict[str, Any]],
+    server_tokens: list[dict[str, Any]],
+    persisted_content: str,
+) -> list[dict[str, Any]]:
+    """Derive Gate 1's per-chunk flags from evidence, never assert them.
+
+    ``emit_completed``: the chunk is in the server's Redis replay history at
+    the same sequence (the server emitted it). ``appended_to_partial``: the
+    persisted partial covers the server history up to and including that
+    chunk; for a chunk the server never emitted, whether its text appears in
+    the persisted partial at all. Either can be False, so the gate can fail.
+    """
+    annotated = []
+    server_index = 0
+    for token in client_tokens:
+        match_end: str | None = None
+        # Search forward from the last match without consuming the history:
+        # an unmatched token must not hide every later token from the search.
+        for index in range(server_index, len(server_tokens)):
+            server = server_tokens[index]
+            if server.get("sequence") == token.get("sequence") and server.get(
+                "content"
+            ) == token.get("content"):
+                server_index = index + 1
+                match_end = "".join(t["content"] for t in server_tokens[:server_index])
+                break
+        if match_end is not None:
+            appended = bool(persisted_content) and persisted_content.startswith(
+                match_end
+            )
+        else:
+            appended = bool(token.get("content")) and token["content"] in (
+                persisted_content or ""
+            )
+        annotated.append(
+            {
+                **token,
+                "emit_completed": match_end is not None,
+                "appended_to_partial": appended,
+            }
+        )
+    return annotated
 
 
 async def capture_active_stream_id() -> str:
@@ -718,10 +794,14 @@ async def run_benchmark() -> dict[str, Any]:
             for m in (observed_db.get("messages") or [])
             if m.get("role") == "assistant"
         ]
+        # Only the row the run itself links is evidence. Falling back to "the
+        # last assistant row" let an unlinked or unrelated row satisfy the
+        # persistence gates; with no linked row the gates now fail.
         persisted_partial = next(
-            (m for m in assistant_rows if m.get("id") == partial_id),
-            assistant_rows[-1] if assistant_rows else {},
+            (m for m in assistant_rows if partial_id and m.get("id") == partial_id),
+            {},
         )
+        server_token_log = token_log_from_frames(redis_frames)
 
         evidence: dict[str, Any] = {
             "schema_version": "1.0",
@@ -747,8 +827,12 @@ async def run_benchmark() -> dict[str, Any]:
                 "frames": frames,
                 "first_token": streamed["first_token"],
             },
-            "token_log": token_log_from_frames(frames, client_observation=True),
-            "server_token_log": token_log_from_frames(redis_frames),
+            "token_log": annotate_client_token_log(
+                token_log_from_frames(frames),
+                server_token_log,
+                str(persisted_partial.get("content") or ""),
+            ),
+            "server_token_log": server_token_log,
             "captured_stream_id": streamed["captured_stream_id"],
             "server_replay_buffers": [observed_redis],
             "disconnect": {

@@ -19,7 +19,7 @@ import jwt
 from fastapi import WebSocket
 
 from .config import settings
-from .security import peek_unverified_claims, verify_token
+from .security import peek_unverified_claims, verify_token, verify_token_async
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,8 @@ class WebSocketAuthenticator:
             )
 
         try:
-            token_data = verify_token(token)
+            # Off-loop when a cold JWKS fetch is needed (GOO-641).
+            token_data = await verify_token_async(token, verify=verify_token)
             if not token_data:
                 try:
                     claims = peek_unverified_claims(token)

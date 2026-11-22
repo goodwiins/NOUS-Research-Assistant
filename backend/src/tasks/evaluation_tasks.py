@@ -2,7 +2,6 @@
 Celery tasks for evaluation processing and RAG Triad metrics calculation
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -11,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from celery import Task
+from celery.exceptions import SoftTimeLimitExceeded
 
 # Add src directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -32,6 +32,7 @@ from src.services.evaluation.rag_evaluation_service import (
     RAGEvaluationInput,
     rag_evaluation_service,
 )
+from src.tasks._async_utils import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,16 @@ _TERMINAL_EVAL_STATUSES = frozenset(
         EvaluationStatus.CANCELLED.value,
     }
 )
+
+
+def _failure_message(exc: BaseException) -> str:
+    """Job error text; a soft time limit gets an explicit, stable message."""
+    if isinstance(exc, SoftTimeLimitExceeded):
+        return (
+            "Evaluation stopped at the task time limit; metrics already saved "
+            "for processed items are kept"
+        )
+    return str(exc)
 
 
 class EvaluationTask(Task):
@@ -64,8 +75,10 @@ class EvaluationTask(Task):
             try:
                 job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
 
-                if job:
-                    job.fail_job(str(exc))
+                # The task's own handler usually already failed the job; keep
+                # its terminal state and message instead of overwriting them.
+                if job and job.status not in _TERMINAL_EVAL_STATUSES:
+                    job.fail_job(_failure_message(exc))
                     db.commit()
             except Exception as e:
                 logger.error(f"Failed to update evaluation job status: {str(e)}")
@@ -79,6 +92,7 @@ def run_rag_triad_evaluation(self, job_id: str):
     Run complete RAG Triad evaluation for a job
     """
     db = SessionLocal()
+    job = None
     try:
         # Get evaluation job
         job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
@@ -136,76 +150,74 @@ def run_rag_triad_evaluation(self, job_id: str):
         processed_items = 0
         metrics_results = []
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        for i, question in enumerate(questions):
+            try:
+                # Create evaluation input
+                evaluation_input = RAGEvaluationInput(
+                    query=question,
+                    generated_answer="",  # Will be generated during evaluation
+                    retrieved_context=contexts[i] if i < len(contexts) else [],
+                    reference_answer=(
+                        reference_answers[i] if i < len(reference_answers) else None
+                    ),
+                    metadata={"item_index": i, "total_items": total_items},
+                )
 
-        try:
-            for i, question in enumerate(questions):
-                try:
-                    # Create evaluation input
-                    evaluation_input = RAGEvaluationInput(
-                        query=question,
-                        generated_answer="",  # Will be generated during evaluation
-                        retrieved_context=contexts[i] if i < len(contexts) else [],
-                        reference_answer=(
-                            reference_answers[i] if i < len(reference_answers) else None
-                        ),
-                        metadata={"item_index": i, "total_items": total_items},
-                    )
-
-                    # If no provided context, perform search
-                    if not evaluation_input.retrieved_context:
-                        search_results = loop.run_until_complete(
-                            rag_evaluation_service.evaluate_search_pipeline(
-                                [question],
-                                str(job.organization_id),
-                                str(job.user_id) if job.user_id else "anonymous",
-                                search_type=job.parameters.get("search_type", "hybrid"),
-                                limit=job.parameters.get("search_limit", 5),
-                            )
-                        )
-
-                        if search_results:
-                            evaluation_input.generated_answer = search_results[
-                                0
-                            ].metadata.get("generated_answer", "")
-                            evaluation_input.retrieved_context = search_results[
-                                0
-                            ].metadata.get("retrieved_context", [])
-                    else:
-                        # Generate simple answer from context
-                        evaluation_input.generated_answer = (
-                            rag_evaluation_service._generate_simple_answer(
-                                question, evaluation_input.retrieved_context
-                            )
-                        )
-
-                    # Calculate RAG Triad metrics
-                    metrics = loop.run_until_complete(
-                        rag_evaluation_service.run_rag_triad_evaluation(
-                            evaluation_input, job_id, str(job.organization_id), db
+                # If no provided context, perform search
+                if not evaluation_input.retrieved_context:
+                    search_results = run_async(
+                        rag_evaluation_service.evaluate_search_pipeline(
+                            [question],
+                            str(job.organization_id),
+                            str(job.user_id) if job.user_id else "anonymous",
+                            search_type=job.parameters.get("search_type", "hybrid"),
+                            limit=job.parameters.get("search_limit", 5),
                         )
                     )
 
-                    metrics_results.append(metrics)
-                    processed_items += 1
-
-                    # Update progress
-                    progress = int((processed_items / total_items) * 100)
-                    job.update_progress(processed_items)
-                    db.commit()
-
-                    logger.info(f"Processed item {i+1}/{total_items} for job {job_id}")
-
-                except Exception as item_error:
-                    logger.error(
-                        f"Error processing item {i} for job {job_id}: {str(item_error)}"
+                    if search_results:
+                        evaluation_input.generated_answer = search_results[
+                            0
+                        ].metadata.get("generated_answer", "")
+                        evaluation_input.retrieved_context = search_results[
+                            0
+                        ].metadata.get("retrieved_context", [])
+                else:
+                    # Generate simple answer from context
+                    evaluation_input.generated_answer = (
+                        rag_evaluation_service._generate_simple_answer(
+                            question, evaluation_input.retrieved_context
+                        )
                     )
-                    continue
 
-        finally:
-            loop.close()
+                # Calculate RAG Triad metrics
+                metrics = run_async(
+                    rag_evaluation_service.run_rag_triad_evaluation(
+                        evaluation_input, job_id, str(job.organization_id), db
+                    )
+                )
+
+                metrics_results.append(metrics)
+                processed_items += 1
+
+                # Update progress
+                progress = int((processed_items / total_items) * 100)
+                job.update_progress(processed_items)
+                db.commit()
+
+                logger.info(f"Processed item {i+1}/{total_items} for job {job_id}")
+
+            except SoftTimeLimitExceeded:
+                # Never swallow the soft limit: the hard kill follows, and with
+                # acks_late the redelivered message would re-run every paid item
+                # of a job still in RUNNING. Propagate so the handler below marks
+                # the job terminal (the idempotency guard then skips redelivery).
+                raise
+            except Exception as item_error:
+                logger.error(
+                    f"Error processing item {i} for job {job_id}: {str(item_error)}"
+                )
+                continue
 
         # Calculate overall metrics
         if metrics_results:
@@ -287,7 +299,7 @@ def run_rag_triad_evaluation(self, job_id: str):
         # Update job status
         try:
             if job:
-                job.fail_job(str(e))
+                job.fail_job(_failure_message(e))
                 db.commit()
         except Exception as update_error:
             logger.error(f"Failed to update job failure status: {str(update_error)}")
@@ -304,6 +316,7 @@ def run_batch_evaluation(self, job_id: str, queries: List[str]):
     Run batch evaluation for a list of queries
     """
     db = SessionLocal()
+    job = None
     try:
         # Get evaluation job
         job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
@@ -332,93 +345,83 @@ def run_batch_evaluation(self, job_id: str, queries: List[str]):
             f"Starting batch evaluation for job {job_id} with {len(queries)} queries"
         )
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Run evaluation for all queries
+        metrics_results = run_async(
+            rag_evaluation_service.evaluate_search_pipeline(
+                queries,
+                str(job.organization_id),
+                str(job.user_id) if job.user_id else "anonymous",
+                search_type=job.parameters.get("search_type", "hybrid"),
+                limit=job.parameters.get("search_limit", 5),
+            )
+        )
 
-        try:
-            # Run evaluation for all queries
-            metrics_results = loop.run_until_complete(
-                rag_evaluation_service.evaluate_search_pipeline(
-                    queries,
-                    str(job.organization_id),
-                    str(job.user_id) if job.user_id else "anonymous",
-                    search_type=job.parameters.get("search_type", "hybrid"),
-                    limit=job.parameters.get("search_limit", 5),
+        # Save metrics to database
+        for i, metrics in enumerate(metrics_results):
+            try:
+                # R5-M25: metrics.metadata now carries generated_answer/
+                # retrieved_context (the writer side, rag_evaluation_
+                # service.evaluate_search_pipeline, was fixed to populate
+                # them) instead of always reading back "" / []. Column is
+                # Text, so the context list needs json.dumps like every
+                # other retrieved_context write in this codebase.
+                metric = EvaluationMetric(
+                    job_id=job_id,
+                    metric_type="rag_triad_overall",
+                    metric_name="Overall RAG Triad Score",
+                    value=metrics.overall_score,
+                    query=queries[i],
+                    generated_answer=metrics.metadata.get("generated_answer", ""),
+                    retrieved_context=json.dumps(
+                        metrics.metadata.get("retrieved_context", [])
+                    ),
+                    metric_metadata={
+                        "answer_relevancy": metrics.answer_relevancy,
+                        "faithfulness": metrics.faithfulness,
+                        "contextual_relevancy": metrics.contextual_relevancy,
+                        "hallucination_rate": metrics.hallucination_rate,
+                        "response_time_ms": metrics.response_time_ms,
+                    },
                 )
+
+                db.add(metric)
+
+            except Exception as metric_error:
+                logger.error(f"Error saving metric for query {i}: {str(metric_error)}")
+                continue
+
+        db.commit()
+
+        # Calculate overall metrics
+        if metrics_results:
+            overall_score = sum(m.overall_score for m in metrics_results) / len(
+                metrics_results
+            )
+            success_rate = (
+                sum(1 for m in metrics_results if m.overall_score > 0.5)
+                / len(metrics_results)
+                * 100
             )
 
-            # Save metrics to database
-            for i, metrics in enumerate(metrics_results):
-                try:
-                    # R5-M25: metrics.metadata now carries generated_answer/
-                    # retrieved_context (the writer side, rag_evaluation_
-                    # service.evaluate_search_pipeline, was fixed to populate
-                    # them) instead of always reading back "" / []. Column is
-                    # Text, so the context list needs json.dumps like every
-                    # other retrieved_context write in this codebase.
-                    metric = EvaluationMetric(
-                        job_id=job_id,
-                        metric_type="rag_triad_overall",
-                        metric_name="Overall RAG Triad Score",
-                        value=metrics.overall_score,
-                        query=queries[i],
-                        generated_answer=metrics.metadata.get("generated_answer", ""),
-                        retrieved_context=json.dumps(
-                            metrics.metadata.get("retrieved_context", [])
-                        ),
-                        metric_metadata={
-                            "answer_relevancy": metrics.answer_relevancy,
-                            "faithfulness": metrics.faithfulness,
-                            "contextual_relevancy": metrics.contextual_relevancy,
-                            "hallucination_rate": metrics.hallucination_rate,
-                            "response_time_ms": metrics.response_time_ms,
-                        },
-                    )
-
-                    db.add(metric)
-
-                except Exception as metric_error:
-                    logger.error(
-                        f"Error saving metric for query {i}: {str(metric_error)}"
-                    )
-                    continue
-
+            job.complete_job(overall_score=overall_score, success_rate=success_rate)
             db.commit()
 
-            # Calculate overall metrics
-            if metrics_results:
-                overall_score = sum(m.overall_score for m in metrics_results) / len(
-                    metrics_results
-                )
-                success_rate = (
-                    sum(1 for m in metrics_results if m.overall_score > 0.5)
-                    / len(metrics_results)
-                    * 100
-                )
-
-                job.complete_job(overall_score=overall_score, success_rate=success_rate)
-                db.commit()
-
-                return {
-                    "status": "completed",
-                    "job_id": job_id,
-                    "processed_queries": len(metrics_results),
-                    "total_queries": len(queries),
-                    "overall_score": overall_score,
-                    "success_rate": success_rate,
-                }
-            else:
-                # No query produced a metric (every item errored). Without this
-                # branch the job — already start_job()'d to RUNNING — was never
-                # completed or failed, leaving it stuck in RUNNING forever.
-                # Mirrors run_rag_triad_evaluation's empty-results handling.
-                job.fail_job("No queries were successfully evaluated")
-                db.commit()
-                raise ValueError("No queries were successfully evaluated")
-
-        finally:
-            loop.close()
+            return {
+                "status": "completed",
+                "job_id": job_id,
+                "processed_queries": len(metrics_results),
+                "total_queries": len(queries),
+                "overall_score": overall_score,
+                "success_rate": success_rate,
+            }
+        else:
+            # No query produced a metric (every item errored). Without this
+            # branch the job — already start_job()'d to RUNNING — was never
+            # completed or failed, leaving it stuck in RUNNING forever.
+            # Mirrors run_rag_triad_evaluation's empty-results handling.
+            job.fail_job("No queries were successfully evaluated")
+            db.commit()
+            raise ValueError("No queries were successfully evaluated")
 
     except Exception as e:
         logger.error(f"Batch evaluation failed for job {job_id}: {str(e)}")
@@ -430,7 +433,7 @@ def run_batch_evaluation(self, job_id: str, queries: List[str]):
         # Update job status
         try:
             if job:
-                job.fail_job(str(e))
+                job.fail_job(_failure_message(e))
                 db.commit()
         except Exception as update_error:
             logger.error(f"Failed to update job failure status: {str(update_error)}")
@@ -454,6 +457,7 @@ def run_real_time_evaluation(
     Run real-time evaluation for a single query-answer pair
     """
     db = SessionLocal()
+    job = None
     try:
         # Idempotency guard for acks_late redelivery: unlike the job_id-based
         # tasks above, this task CREATES its job — a redelivered message would
@@ -512,40 +516,32 @@ def run_real_time_evaluation(
             metadata={"real_time_evaluation": True},
         )
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            # Calculate metrics
-            metrics = loop.run_until_complete(
-                rag_evaluation_service.run_rag_triad_evaluation(
-                    evaluation_input, job.id, organization_id, db
-                )
+        # Calculate metrics
+        metrics = run_async(
+            rag_evaluation_service.run_rag_triad_evaluation(
+                evaluation_input, job.id, organization_id, db
             )
+        )
 
-            # Complete job
-            job.complete_job(
-                overall_score=metrics.overall_score,
-                success_rate=100.0 if metrics.overall_score > 0.5 else 0.0,
-            )
-            db.commit()
+        # Complete job
+        job.complete_job(
+            overall_score=metrics.overall_score,
+            success_rate=100.0 if metrics.overall_score > 0.5 else 0.0,
+        )
+        db.commit()
 
-            return {
-                "status": "completed",
-                "job_id": str(job.id),
-                "metrics": {
-                    "answer_relevancy": metrics.answer_relevancy,
-                    "faithfulness": metrics.faithfulness,
-                    "contextual_relevancy": metrics.contextual_relevancy,
-                    "overall_score": metrics.overall_score,
-                    "hallucination_rate": metrics.hallucination_rate,
-                    "response_time_ms": metrics.response_time_ms,
-                },
-            }
-
-        finally:
-            loop.close()
+        return {
+            "status": "completed",
+            "job_id": str(job.id),
+            "metrics": {
+                "answer_relevancy": metrics.answer_relevancy,
+                "faithfulness": metrics.faithfulness,
+                "contextual_relevancy": metrics.contextual_relevancy,
+                "overall_score": metrics.overall_score,
+                "hallucination_rate": metrics.hallucination_rate,
+                "response_time_ms": metrics.response_time_ms,
+            },
+        }
 
     except Exception as e:
         logger.error(f"Real-time evaluation failed: {str(e)}")
@@ -557,7 +553,7 @@ def run_real_time_evaluation(
         # Update job status
         try:
             if job:
-                job.fail_job(str(e))
+                job.fail_job(_failure_message(e))
                 db.commit()
         except Exception as update_error:
             logger.error(f"Failed to update job failure status: {str(update_error)}")
@@ -584,37 +580,29 @@ def run_comparison_evaluation(
     try:
         logger.info(f"Starting comparison evaluation: {comparison_name}")
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            # Perform comparison
-            comparison = loop.run_until_complete(
-                rag_evaluation_service.compare_evaluations(
-                    baseline_job_id,
-                    comparison_job_id,
-                    comparison_name,
-                    user_id,
-                    organization_id,
-                    db,
-                )
+        # Perform comparison
+        comparison = run_async(
+            rag_evaluation_service.compare_evaluations(
+                baseline_job_id,
+                comparison_job_id,
+                comparison_name,
+                user_id,
+                organization_id,
+                db,
             )
+        )
 
-            logger.info(f"Comparison evaluation completed: {comparison_name}")
-            logger.info(f"Improvement: {comparison.improvement_percentage:.2f}%")
+        logger.info(f"Comparison evaluation completed: {comparison_name}")
+        logger.info(f"Improvement: {comparison.improvement_percentage:.2f}%")
 
-            return {
-                "status": "completed",
-                "comparison_id": str(comparison.id),
-                "improvement_percentage": comparison.improvement_percentage,
-                "statistical_significance": comparison.statistical_significance,
-                "baseline_score": comparison.baseline_score,
-                "comparison_score": comparison.comparison_score,
-            }
-
-        finally:
-            loop.close()
+        return {
+            "status": "completed",
+            "comparison_id": str(comparison.id),
+            "improvement_percentage": comparison.improvement_percentage,
+            "statistical_significance": comparison.statistical_significance,
+            "baseline_score": comparison.baseline_score,
+            "comparison_score": comparison.comparison_score,
+        }
 
     except Exception as e:
         logger.error(f"Comparison evaluation failed: {str(e)}")
