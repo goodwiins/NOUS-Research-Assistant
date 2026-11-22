@@ -350,7 +350,10 @@ def test_velero_backup_excludes_secrets(tmp_path: Path) -> None:
     assert "--exclude-resources secrets" in create[0]
     # --namespace is Velero's own namespace; the app namespace is what it backs up.
     assert "--namespace velero " in create[0]
-    assert "--include-namespaces knowledge-graph-analytics" in create[0]
+    assert "--include-namespaces multimodal-rag-system" in create[0]
+    # Velero 1.10 renamed --default-volumes-to-restic.
+    assert "--default-volumes-to-fs-backup=false" in create[0]
+    assert "restic" not in create[0]
 
 
 def _source_and_call(tmp_path: Path, function: str, **extra: str) -> list[str]:
@@ -380,3 +383,30 @@ def test_velero_namespace_is_configurable(tmp_path: Path) -> None:
 def test_listing_uses_the_velero_namespace(tmp_path: Path) -> None:
     calls = _source_and_call(tmp_path, "list_backups")
     assert "velero get backups --namespace velero" in calls, calls
+
+
+def test_default_namespace_is_the_live_one(tmp_path: Path) -> None:
+    # The RDS check must look in the namespace where the chart runs on AWS.
+    result, calls, output = _restore(tmp_path, "postgres", STUB_RDS="1")
+    assert result.returncode != 0, output
+    assert (
+        "get externalsecret aws-database-credentials -n multimodal-rag-system" in calls
+    )
+
+
+def test_backup_refuses_to_dump_rds(tmp_path: Path) -> None:
+    log, env = _stubs(tmp_path)
+    env["STUB_RDS"] = "1"
+    result = subprocess.run(
+        [_bash(), "-c", 'source "$1" && backup_postgresql', "_", str(SCRIPT)],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "RDS" in output
+    assert "pg_dump" not in log.read_text()

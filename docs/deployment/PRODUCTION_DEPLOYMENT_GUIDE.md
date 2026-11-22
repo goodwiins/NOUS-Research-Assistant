@@ -1,6 +1,6 @@
 # Production Deployment Guide
 
-> **Status: historical (reconciled 2026-10-17).** This guide was written for earlier deployment generations (Docker Compose, single-host or DigitalOcean/DOKS setups). Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Qdrant is removed; live retrieval is PostgreSQL full-text. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). The text below is kept unedited as a record; do not run its commands without checking them against the current repo.
+> **Status: historical (reconciled 2026-10-17).** This guide was written for earlier deployment generations (Docker Compose, single-host or DigitalOcean/DOKS setups). Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Qdrant is removed; live retrieval is PostgreSQL full-text. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). Parts of the text below were updated on 2026-11-22 (env-file names, backup and restore, schema setup); the rest is a historical record. Check any other command against the current repo before running it.
 
 > **Legacy guide (2026-09-29):** The DigitalOcean staging/production deployment
 > workflows described here have been retired. For the current AWS dev release
@@ -427,7 +427,7 @@ kubectl rollout restart deployment/postgres -n knowledge-graph-analytics
 #### Scenario 3: Full Cluster Recovery
 
 ```bash
-NS=knowledge-graph-analytics   # the script's NAMESPACE
+NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
 
 # 1. Restore from the Velero backup. It contains no Secrets. --namespace is
 #    Velero's own namespace (the script's VELERO_NAMESPACE, default velero);

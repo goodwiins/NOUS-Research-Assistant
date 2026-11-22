@@ -1,6 +1,6 @@
 # Runbooks
 
-> **Status: superseded (reconciled 2026-10-17).** These runbooks target an earlier deployment generation. Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). The text below is kept unedited as a record; do not run its commands without checking them against the current repo.
+> **Status: superseded (reconciled 2026-10-17).** These runbooks target an earlier deployment generation. Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). Parts of the text below were updated on 2026-11-22 (env-file names, backup and restore, schema setup); the rest is a historical record. Check any other command against the current repo before running it.
 ## Knowledge Graph Analytics Dashboard
 
 ### Table of Contents
@@ -112,7 +112,7 @@ kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser
 # precondition fails, it changes nothing. This is for in-cluster Postgres
 # only: on AWS the database is RDS and the script refuses, so use an RDS
 # snapshot or point-in-time restore instead.
-NS=knowledge-graph-analytics   # the script's NAMESPACE
+NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
 
 # 1. Stop every writer first, or the boot migrations (the migrate Job and the
 #    backend's run-migrations init container) repopulate ragdb before the
