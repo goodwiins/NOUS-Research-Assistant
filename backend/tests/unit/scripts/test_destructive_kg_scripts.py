@@ -38,14 +38,22 @@ def rebuild() -> Any:
 
 
 class Calls:
-    def __init__(self) -> None:
+    def __init__(self, entities: int = 5, probe_error: str = "") -> None:
         self.events: List[str] = []
+        self.entities = entities
+        self.probe_error = probe_error
+
+    def probe(self) -> None:
+        self.events.append("probe")
+        if self.probe_error:
+            raise RuntimeError(self.probe_error)
 
     def wipe(self) -> None:
         self.events.append("wipe")
 
-    def rebuild(self, docs: list[dict]) -> None:
+    def rebuild(self, docs: list[dict]) -> int:
         self.events.append(f"rebuild:{len(docs)}")
+        return self.entities
 
 
 DOCS = [{"id": "d1", "title": "t", "filename": "f", "content_text": "x"}]
@@ -57,7 +65,11 @@ def test_rebuild_requires_explicit_database_url(
     monkeypatch.delenv("KG_DATABASE_URL", raising=False)
     calls = Calls()
     code = rebuild.run(
-        ["--yes"], load=lambda _url: DOCS, wipe=calls.wipe, rebuild=calls.rebuild
+        ["--yes"],
+        load=lambda _url: DOCS,
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
     )
     assert code != 0
     assert calls.events == []
@@ -69,7 +81,11 @@ def test_rebuild_default_is_a_dry_run(
     monkeypatch.setenv("KG_DATABASE_URL", "postgresql://scratch/db")
     calls = Calls()
     code = rebuild.run(
-        [], load=lambda _url: DOCS, wipe=calls.wipe, rebuild=calls.rebuild
+        [],
+        load=lambda _url: DOCS,
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
     )
     assert code == 0
     assert calls.events == []
@@ -81,7 +97,11 @@ def test_rebuild_refuses_to_wipe_when_source_is_empty(
     monkeypatch.setenv("KG_DATABASE_URL", "postgresql://scratch/db")
     calls = Calls()
     code = rebuild.run(
-        ["--yes"], load=lambda _url: [], wipe=calls.wipe, rebuild=calls.rebuild
+        ["--yes"],
+        load=lambda _url: [],
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
     )
     assert code != 0
     assert calls.events == []
@@ -96,7 +116,13 @@ def test_rebuild_refuses_to_wipe_when_source_fails(
     def broken(_url: str) -> list[dict]:
         raise RuntimeError("connection refused")
 
-    code = rebuild.run(["--yes"], load=broken, wipe=calls.wipe, rebuild=calls.rebuild)
+    code = rebuild.run(
+        ["--yes"],
+        load=broken,
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
+    )
     assert code != 0
     assert calls.events == []
 
@@ -198,13 +224,48 @@ def test_manual_cleanup_error_exits_non_zero(
     assert manual_cleanup.cleanup_manual_entities(["--yes"]) != 0
 
 
+def test_rebuild_probes_the_llm_before_wiping(
+    rebuild: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KG_DATABASE_URL", "postgresql://scratch/db")
+    calls = Calls(probe_error="401 invalid api key")
+    code = rebuild.run(
+        ["--yes"],
+        load=lambda _url: DOCS,
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
+    )
+    assert code != 0
+    assert calls.events == ["probe"], "a failing LLM must leave Neo4j untouched"
+
+
+def test_rebuild_that_extracts_nothing_exits_non_zero(
+    rebuild: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KG_DATABASE_URL", "postgresql://scratch/db")
+    calls = Calls(entities=0)
+    code = rebuild.run(
+        ["--yes"],
+        load=lambda _url: DOCS,
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
+    )
+    assert code != 0
+
+
 def test_rebuild_with_yes_wipes_after_validation(
     rebuild: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("KG_DATABASE_URL", "postgresql://scratch/db")
     calls = Calls()
     code = rebuild.run(
-        ["--yes"], load=lambda _url: DOCS, wipe=calls.wipe, rebuild=calls.rebuild
+        ["--yes"],
+        load=lambda _url: DOCS,
+        wipe=calls.wipe,
+        rebuild=calls.rebuild,
+        probe=calls.probe,
     )
     assert code == 0
-    assert calls.events == ["wipe", "rebuild:1"]
+    assert calls.events == ["probe", "wipe", "rebuild:1"]

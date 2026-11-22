@@ -92,10 +92,28 @@ def test_self_approval_is_explicit_and_does_not_ack_warnings_by_default() -> Non
 
 
 def test_token_is_not_accepted_on_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A complete old-style invocation: before the fix this uploaded (and
+    # self-approved) with the argv token instead of exiting.
+    FakeClient.posts = []
+    monkeypatch.delenv("NOUS_TOKEN", raising=False)
     monkeypatch.setattr(
-        sys, "argv", ["import_kdense.py", "--upload", "--token", "secret"]
+        sys,
+        "argv",
+        ["import_kdense.py", "--upload", "--project-id", "p1", "--token", "secret"],
     )
-    monkeypatch.setattr(kdense, "scan_all", lambda: {})
+    monkeypatch.setattr(kdense, "scan_all", lambda: {"skill-a": "doc"})
     with pytest.raises(SystemExit) as excinfo:
         kdense.main()
     assert excinfo.value.code != 0
+    assert FakeClient.posts == [], "nothing may be uploaded with an argv token"
+
+
+def test_upload_reads_token_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOUS_TOKEN", "env-token")
+    monkeypatch.setattr(
+        sys, "argv", ["import_kdense.py", "--upload", "--project-id", "p1"]
+    )
+    monkeypatch.setattr(kdense, "scan_all", lambda: {"skill-a": "doc"})
+    kdense.main()
+    assert len(FakeClient.posts) == 1
+    assert _approvals() == []

@@ -471,6 +471,25 @@ def load_documents(pg_url: str) -> list[dict]:
     ]
 
 
+def probe_llm() -> None:
+    """Make one real chat call; raise if the deployment cannot answer.
+
+    is_chat_available() only checks configuration, so a bad key or deployment
+    would otherwise be discovered after the graph is already wiped.
+    """
+
+    async def _call() -> dict:
+        return await azure_openai_service.chat_completion(
+            messages=[{"role": "user", "content": "Reply with OK."}],
+            temperature=0.0,
+            max_tokens=5,
+        )
+
+    result = asyncio.run(_call())
+    if not (result or {}).get("content"):
+        raise RuntimeError("LLM probe returned no content")
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -492,12 +511,14 @@ def run(
     *,
     load: Optional[Callable[[str], list[dict]]] = None,
     wipe: Optional[Callable[[], None]] = None,
-    rebuild: Optional[Callable[[list[dict]], None]] = None,
+    rebuild: Optional[Callable[[list[dict]], int]] = None,
+    probe: Optional[Callable[[], None]] = None,
 ) -> int:
     """Validate the source, then (only with --yes) wipe and rebuild. Returns an exit code."""
     load = load or load_documents
     wipe = wipe or wipe_neo4j
     rebuild = rebuild or rebuild_documents
+    probe = probe or probe_llm
     args = parse_args(argv)
 
     pg_url = os.environ.get("KG_DATABASE_URL")
@@ -523,12 +544,25 @@ def run(
         )
         return 0
 
+    try:
+        probe()
+    except Exception as e:
+        logger.error(f"LLM probe failed; Neo4j untouched: {e}")
+        return 1
+
     wipe()
-    rebuild(documents)
+    total_entities = rebuild(documents)
+    if total_entities == 0:
+        logger.error(
+            "Rebuild extracted 0 entities: Neo4j was wiped and is now empty. "
+            "Check the LLM deployment and re-run."
+        )
+        return 1
     return 0
 
 
-def rebuild_documents(documents: list[dict]) -> None:
+def rebuild_documents(documents: list[dict]) -> int:
+    """Extract and insert every document; return the number of entities inserted."""
     # Step 3: Process each document
     total_entities = 0
     total_relationships = 0
@@ -608,6 +642,7 @@ def rebuild_documents(documents: list[dict]) -> None:
         f"Estimated cost:      ${total_cost:.2f} (${input_cost:.2f} input + ${output_cost:.2f} output)"
     )
     logger.info("=" * 60)
+    return total_entities
 
 
 def main() -> None:

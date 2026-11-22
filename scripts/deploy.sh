@@ -8,7 +8,17 @@ set -euo pipefail
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-ENVIRONMENT="${ENVIRONMENT:-staging}"
+# Canonicalize the environment against an allowlist so every spelling of
+# production hits the production gate and resolves to docker-compose.prod.yml.
+case "$(printf '%s' "${ENVIRONMENT:-staging}" | tr '[:upper:]' '[:lower:]')" in
+    prod|production) ENVIRONMENT="prod"; IS_PRODUCTION="true" ;;
+    staging) ENVIRONMENT="staging"; IS_PRODUCTION="false" ;;
+    dev|development) ENVIRONMENT="development"; IS_PRODUCTION="false" ;;
+    *)
+        echo "ERROR: unknown ENVIRONMENT='${ENVIRONMENT:-}'. Use staging, development or prod." >&2
+        exit 2
+        ;;
+esac
 COMPOSE_FILE="docker-compose.${ENVIRONMENT}.yml"
 BLUE_GREEN_COMPOSE_FILE="docker-compose.${ENVIRONMENT}-blue-green.yml"
 BLUE_GREEN_STATE_FILE="${PROJECT_ROOT}/.blue-green-state-${ENVIRONMENT}"
@@ -156,9 +166,10 @@ deploy_standard() {
     cd "$PROJECT_ROOT"
 
     # Recreate only changed containers. Never `down` first: a failed `up`
-    # would then leave the environment with nothing running.
+    # would then leave the environment with nothing running. No
+    # --remove-orphans: the blue-green containers share this compose project.
     log "Updating services..."
-    docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans || error_exit "Failed to start services; previous containers were left running where possible"
+    docker-compose -f "$COMPOSE_FILE" up -d || error_exit "Failed to start services; previous containers were left running where possible"
 
     # Wait for services to be ready
     wait_for_health_check
@@ -439,13 +450,15 @@ rollback() {
     fi
 
     # Recreate services with the restored configuration (no `down` first).
-    docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans || error_exit "Failed to start services after rollback"
+    docker-compose -f "$COMPOSE_FILE" up -d || error_exit "Failed to start services after rollback"
 
     wait_for_health_check
 
     # This command does not restore the database or roll back images.
     warning "Configuration rolled back. The DATABASE WAS NOT RESTORED and images were not rolled back."
     warning "To restore the database: scripts/backup/disaster_recovery.py --components database"
+    error "PARTIAL ROLLBACK: configuration only. Exiting with status 3."
+    exit 3
 }
 
 # Get deployment status
@@ -472,7 +485,7 @@ Usage: $0 [COMMAND] [OPTIONS]
 Commands:
     deploy           Deploy the application
     deploy-blue-green    Deploy using blue-green strategy
-    rollback [backup]    Roll back .env config to the latest or given backup (does NOT restore the database)
+    rollback [backup]    Roll back .env config to the latest or given backup; does NOT restore the database, exits 3
     status           Show deployment status
     test            Run pre-deployment tests
     backup          Create backup
@@ -480,7 +493,7 @@ Commands:
     help            Show this help message
 
 Environment Variables:
-    ENVIRONMENT      Target environment (staging, production)
+    ENVIRONMENT      Target environment: staging, development, prod (or production)
     BACKUP_BEFORE_DEPLOY  Create backup before deployment (true/false)
     HEALTH_CHECK_URL  Health check URL
     MAX_RETRIES      Maximum health check retries
@@ -498,8 +511,8 @@ EOF
 
 # Refuse to touch production unless the operator says so explicitly.
 require_production_confirmation() {
-    if [[ "$ENVIRONMENT" == "production" && "${CONFIRM_PRODUCTION:-}" != "yes" ]]; then
-        error_exit "ENVIRONMENT=production requires CONFIRM_PRODUCTION=yes"
+    if [[ "$IS_PRODUCTION" == "true" && "${CONFIRM_PRODUCTION:-}" != "yes" ]]; then
+        error_exit "Production (ENVIRONMENT=$ENVIRONMENT) requires CONFIRM_PRODUCTION=yes"
     fi
 }
 
