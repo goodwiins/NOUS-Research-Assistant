@@ -32,18 +32,15 @@ pytestmark = pytest.mark.unit
 # ---- MS2A-1: aware timestamps ---------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "started_at",
-    [
-        datetime.now(timezone.utc) - timedelta(seconds=30),  # re-read from PG
-        datetime.utcnow() - timedelta(seconds=30),  # naive (SQLite / legacy)
-    ],
-    ids=["aware", "naive"],
-)
+@pytest.mark.parametrize("aware", [True, False], ids=["aware", "naive"])
 @pytest.mark.parametrize("finish", ["complete", "fail", "cancel"])
-def test_finishing_a_job_computes_duration(started_at: datetime, finish: str) -> None:
+def test_finishing_a_job_computes_duration(aware: bool, finish: str) -> None:
+    # Build the timestamp inside the test: a parametrize-time value is taken at
+    # collection, minutes before the test runs on a large suite.
+    now = datetime.now(timezone.utc)
+    started_at = now if aware else now.replace(tzinfo=None)  # aware = re-read from PG
     job = EvaluationJob(name="j", evaluation_type="rag_triad", parameters={})
-    job.started_at = started_at  # type: ignore[assignment]
+    job.started_at = started_at - timedelta(seconds=30)  # type: ignore[assignment]
 
     if finish == "complete":
         job.complete_job(overall_score=0.9, success_rate=100.0)
