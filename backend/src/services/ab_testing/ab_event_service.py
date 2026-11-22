@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from src.core.background_tasks import spawn
 from src.core.config import settings
 from src.services.cache.analytics_cache import analytics_cache
 
@@ -166,7 +167,7 @@ class EventPublisher:
 
         # Start background publisher if not running
         if not self.publishing:
-            asyncio.create_task(self._background_publisher())
+            spawn(self._background_publisher())
 
     async def publish_events_batch(self, events: List[Event]):
         """Publish multiple events"""
@@ -175,7 +176,7 @@ class EventPublisher:
             await self.event_queue.put(event)
 
         if not self.publishing:
-            asyncio.create_task(self._background_publisher())
+            spawn(self._background_publisher())
 
     async def _background_publisher(self):
         """Background task for publishing events"""
@@ -292,7 +293,7 @@ class EventSubscriber:
             return
 
         self.processing = True
-        asyncio.create_task(self._event_processor())
+        spawn(self._event_processor())
         logger.info(f"Started event processing for {self.service_name}")
 
     async def stop_processing(self):
@@ -516,7 +517,7 @@ class EventService:
         if service_name not in self.publishers:
             self.publishers[service_name] = EventPublisher(service_name)
             # Initialize asynchronously
-            asyncio.create_task(self.publishers[service_name].initialize())
+            spawn(self.publishers[service_name].initialize())
         return self.publishers[service_name]
 
     def get_subscriber(self, service_name: str = "default") -> EventSubscriber:
@@ -524,7 +525,7 @@ class EventService:
         if service_name not in self.subscribers:
             self.subscribers[service_name] = EventSubscriber(service_name)
             # Initialize asynchronously
-            asyncio.create_task(self.subscribers[service_name].initialize())
+            spawn(self.subscribers[service_name].initialize())
         return self.subscribers[service_name]
 
     async def publish_event(

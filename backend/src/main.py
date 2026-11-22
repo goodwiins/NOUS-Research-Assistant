@@ -118,6 +118,7 @@ from src.api.threads import (
     workspaces_router,
     workspaces_standalone_router,
 )
+from src.core.background_tasks import spawn
 from src.core.config import settings
 from src.core.database import Base, engine
 from src.core.probes import ProbeAwareTrustedHostMiddleware
@@ -391,7 +392,7 @@ async def lifespan(app: FastAPI):
     try:
         from src.core.cache_warmup import warm_critical_caches
 
-        asyncio.create_task(warm_critical_caches())
+        spawn(warm_critical_caches(), name="cache-warmup")
     except Exception as e:
         logger.debug(f"Cache warm-up skipped: {e}")
 

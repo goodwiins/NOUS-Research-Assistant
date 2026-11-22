@@ -94,9 +94,6 @@ def _golden_replay(monkeypatch, request):
     # (4.2 in the design — otherwise a previously-built real client leaks).
     llm_factory.reset_llm_caches()
     graph._LLM_CACHE.clear()
-    monkeypatch.setattr(classifier, "_CLASSIFIER_LLM", None, raising=False)
-    monkeypatch.setattr(reflection, "_REFLECTION_LLM", None, raising=False)
-    monkeypatch.setattr(compactor, "_COMPACTOR_LLM", None, raising=False)
 
     # Three construction seams + three module-top rebinds (reflection/planner/
     # compactor `from ... import build_lightweight_llm` bind a local name).
