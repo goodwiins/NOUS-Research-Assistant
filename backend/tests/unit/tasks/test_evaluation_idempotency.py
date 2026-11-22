@@ -28,7 +28,10 @@ def _terminal_job(status="completed"):
 def _session_with(first_results):
     """MagicMock sync session whose query().filter().first() yields in order."""
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.side_effect = first_results
+    db.query.return_value.filter.return_value.first.side_effect = list(first_results)
+    # Job-based tasks lock the job row (with_for_update) before deciding.
+    locked = db.query.return_value.filter.return_value.with_for_update.return_value
+    locked.first.side_effect = list(first_results)
     return db
 
 

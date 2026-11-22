@@ -66,6 +66,9 @@ def test_start_job_is_timezone_aware() -> None:
 def _db_with(job: Any, dataset: Any) -> MagicMock:
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = job
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+        job
+    )
     db.query.return_value.filter.return_value.order_by.return_value.first.return_value = (
         dataset
     )

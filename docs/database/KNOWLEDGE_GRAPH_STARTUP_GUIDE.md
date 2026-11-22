@@ -469,7 +469,7 @@ curl -X GET http://localhost:8010/api/visualization/layout
 #### 1. Environment Configuration
 ```bash
 # Production environment file
-cat > .env.production << EOF
+cat > .env.prod << EOF
 # Production Environment Variables
 JWT_SECRET_KEY=your-production-secret-key
 DEBUG=false
@@ -490,7 +490,7 @@ EOF
 #### 2. Production Deployment
 ```bash
 # Deploy with production configuration
-env_file=.env.production ./scripts/deploy-graph-services.sh deploy
+env_file=.env.prod ./scripts/deploy-graph-services.sh deploy
 
 # Enable monitoring profile
 docker-compose -f docker-compose.graph-services-corrected.yml --profile monitoring up -d

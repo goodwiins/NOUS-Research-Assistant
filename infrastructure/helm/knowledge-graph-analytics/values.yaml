@@ -131,6 +131,23 @@ backend:
       value: "gpt-5.6-luna"
     - name: LOG_LEVEL
       value: "INFO"
+    # Platform operators: comma-separated Supabase user UUIDs allowed to see
+    # host-wide metrics (/analytics/performance/system-health, the overview's
+    # system_health section, host-derived quality recommendations). Unset means
+    # nobody (fail-closed). Set the ids per environment as the
+    # PLATFORM_OPERATOR_USER_IDS key in Infisical app-secrets, never here: an
+    # env literal (even "") would override envFrom and would publish user ids
+    # in this public repo. GOO-673; see docs/engineering/gotchas.md.
+    # NOTE: live dev never sees this copy. values-aws.yaml replaces the whole
+    # backend.env list (Helm does not merge lists), so only its own
+    # PLATFORM_OPERATOR_USER_IDS entry reaches the pods. This one is only for
+    # base-file-only renders; keep the two in sync.
+    - name: PLATFORM_OPERATOR_USER_IDS
+      valueFrom:
+        secretKeyRef:
+          name: app-secrets
+          key: PLATFORM_OPERATOR_USER_IDS
+          optional: true
     - name: DATABASE_URL
       valueFrom:
         secretKeyRef:

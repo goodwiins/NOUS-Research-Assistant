@@ -437,6 +437,19 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _evaluation_soft_limit_below_hard(self):
+        """The soft limit must fire first, or the job is SIGKILLed unrecorded."""
+        if (
+            self.EVALUATION_TASK_SOFT_TIME_LIMIT_SECONDS
+            >= self.EVALUATION_TASK_TIME_LIMIT_SECONDS
+        ):
+            raise ValueError(
+                "EVALUATION_TASK_SOFT_TIME_LIMIT_SECONDS must be below "
+                "EVALUATION_TASK_TIME_LIMIT_SECONDS"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _enforce_debug_off_in_prod(self):
         """Never allow DEBUG=True outside throwaway local/CI environments.
 
@@ -866,6 +879,16 @@ class Settings(BaseSettings):
     LOST_JOB_RECONCILE_AFTER_MINUTES: int = 10
     LOST_JOB_RECONCILE_MAX_ATTEMPTS: int = 3
     LOST_JOB_RECONCILE_MAX_PER_RUN: int = 100
+
+    # Evaluation Celery tasks (src/tasks/evaluation_tasks.py) run one paid LLM
+    # evaluation per dataset item, so they need far more than the global 300s
+    # soft limit. The soft limit stops the job (marked FAILED, metrics kept);
+    # the hard limit kills the child after the grace below. The hard limit must
+    # stay under the broker visibility_timeout (3600s, celery_app.py), or a
+    # still-running task is redelivered; tests/unit/tasks/test_celery_config.py
+    # enforces that.
+    EVALUATION_TASK_SOFT_TIME_LIMIT_SECONDS: int = Field(default=2700, ge=60)
+    EVALUATION_TASK_TIME_LIMIT_SECONDS: int = Field(default=3000, ge=120, lt=3600)
 
     # Audit D5 (P2.5): data-retention beat tasks (src/tasks/retention_tasks.py).
     # Two-stage safety: RETENTION_ENABLED is the kill switch (tasks no-op when
