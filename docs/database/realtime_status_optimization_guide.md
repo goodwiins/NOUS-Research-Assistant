@@ -1,5 +1,7 @@
 # Real-Time Status Database Optimization Guide
 
+> **Status (2026-11-22, GOO-685):** the standalone SQL this guide describes was deleted; none of it applied to a real database. The schema comes from the Alembic chain in `backend/alembic/`: run `alembic upgrade head` from `backend/`. Treat the rest of this guide as a historical design note.
+
 This guide provides comprehensive documentation for the database optimizations implemented for real-time status queries in the Multimodal Enterprise RAG System.
 
 ## Overview
@@ -64,27 +66,17 @@ database/
 
 ### Deployment Steps
 
-1. **Run the main migration**:
+1. **Apply the schema** (from `backend/`):
    ```bash
-   psql -h localhost -U postgres -d multimodal_rag_dev -f database/migrations/009_realtime_status_optimizations.sql
+   alembic upgrade head
    ```
+   The standalone `009_realtime_status_optimizations.sql` was deleted on
+   2026-11-22 (GOO-685); it ran `CREATE INDEX CONCURRENTLY` inside a
+   transaction and never applied.
 
-2. **Execute deployment script**:
-   ```bash
-   psql -h localhost -U postgres -d multimodal_rag_dev -f database/deployment/realtime_status_deployment.sql
-   ```
-
-3. **Verify deployment**:
-   ```sql
-   SELECT * FROM deployment_history ORDER BY started_at DESC LIMIT 1;
-   ```
-
-### Rollback Procedure
-
-If issues arise, rollback using:
-```bash
-psql -h localhost -U postgres -d multimodal_rag_dev -f database/deployment/realtime_status_rollback.sql
-```
+There is no separate deployment or rollback script: the
+`database/deployment/` SQL was deleted on 2026-11-21 (GOO-668). Roll back a
+schema change with `alembic downgrade -1`.
 
 ## Usage Examples
 

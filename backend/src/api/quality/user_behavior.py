@@ -3,9 +3,11 @@ User Behavior Analytics API endpoints
 """
 
 import asyncio
+import csv
+import io
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -23,7 +25,10 @@ from src.schemas.quality_metrics import (
     ContentUsageAnalytics,
     UserBehaviorAnalytics,
 )
-from src.services.quality.user_behavior_service import user_behavior_service
+from src.services.quality.user_behavior_service import (
+    analytics_window,
+    user_behavior_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,46 @@ async def _off_loop(
 router = APIRouter()
 
 _EXPORT_DATA_TYPES = frozenset({"user_behavior", "content_usage"})
+# Formats the export actually produces. "csv" (the schema default) returns
+# each table as CSV text; anything else is rejected instead of being echoed
+# back over JSON data.
+_EXPORT_FORMATS = frozenset({"json", "csv"})
+# Same ceiling as the routes' ``days_back`` query parameter (le=365), plus a
+# day of slack for calendar-aligned windows.
+_EXPORT_MAX_WINDOW = timedelta(days=366)
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Analytics timestamps are stored as naive UTC; compare like with like."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _csv_table(rows: List[Dict[str, Any]]) -> str:
+    """Flat rows as CSV text, one column per key seen; "" if there are none."""
+    if not rows:
+        return ""
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=fieldnames, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return out.getvalue()
+
+
+def _export_as_csv(data_type: str, export_data: Dict[str, Any]) -> Dict[str, str]:
+    """One CSV table per section of ``export_data``."""
+    if data_type == "content_usage":
+        return {"content_usage": _csv_table(export_data["content_usage"])}
+    tables = {name: _csv_table(rows) for name, rows in export_data["trends"].items()}
+    pattern_rows = [
+        {"pattern": pattern, **row}
+        for pattern, rows in export_data["patterns"].items()
+        for row in rows
+    ]
+    tables["patterns"] = _csv_table(pattern_rows)
+    return tables
 
 
 @router.post("/sessions", response_model=dict)
@@ -538,9 +583,20 @@ async def get_organization_user_behavior(
 
 
 def _query_content_usage(
-    db: Session, organization_id: Any, days_back: int, limit: int
+    db: Session,
+    organization_id: Any,
+    days_back: int,
+    limit: int,
+    *,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
-    """Per-document usage rows for one organization (shared by two routes)."""
+    """Per-document usage rows for one organization (shared by two routes).
+
+    The window is ``[start_date, end_date)`` when given (naive UTC), otherwise
+    the last ``days_back`` days.
+    """
+    cutoff_date, end_date = analytics_window(days_back, start_date, end_date)
     # Query content usage from search events
     content_usage = db.execute(
         text("""
@@ -562,6 +618,7 @@ def _query_content_usage(
             AND se.organization_id = :org_id
             AND s.organization_id = :org_id
             AND se.created_at >= :cutoff_date
+            AND se.created_at < :end_date
         GROUP BY d.id, d.title
         HAVING COUNT(DISTINCT s.user_id) > 0
         ORDER BY unique_users DESC, total_clicks DESC
@@ -569,7 +626,8 @@ def _query_content_usage(
     """),
         {
             "org_id": organization_id,
-            "cutoff_date": datetime.utcnow() - timedelta(days=days_back),
+            "cutoff_date": cutoff_date,
+            "end_date": end_date,
             "limit": limit,
         },
     ).fetchall()
@@ -710,23 +768,44 @@ async def export_behavior_data(
         if export_request.data_type not in _EXPORT_DATA_TYPES:
             raise HTTPException(status_code=400, detail="Unsupported data_type")
 
+        # Every request parameter is either honoured or rejected (API2B-2):
+        # the export covers exactly [start_date, end_date) in the requested
+        # format.
+        export_format = export_request.format.strip().lower()
+        if export_format not in _EXPORT_FORMATS:
+            raise HTTPException(
+                status_code=400, detail="Unsupported format; use json or csv"
+            )
+        start_date = _naive_utc(export_request.start_date)
+        end_date = _naive_utc(export_request.end_date)
+        if end_date <= start_date:
+            raise HTTPException(
+                status_code=400, detail="end_date must be after start_date"
+            )
+        if end_date - start_date > _EXPORT_MAX_WINDOW:
+            raise HTTPException(
+                status_code=400, detail="Export window is limited to 366 days"
+            )
+
         # Generate export data based on type
-        export_data = {}
-        days_back = max((export_request.end_date - export_request.start_date).days, 1)
+        export_data: Dict[str, Any] = {}
 
         if export_request.data_type == "user_behavior":
             # Get organization user behavior
             trends = await _off_loop(
                 user_behavior_service.get_behavior_trends,
                 organization_id=str(current_user.organization_id),
-                days_back=days_back,
                 group_by="day",
+                start_date=start_date,
+                end_date=end_date,
             )
             export_data["trends"] = trends
 
             patterns = await _off_loop(
                 user_behavior_service.identify_behavior_patterns,
                 organization_id=str(current_user.organization_id),
+                start_date=start_date,
+                end_date=end_date,
             )
             export_data["patterns"] = patterns
 
@@ -736,9 +815,17 @@ async def export_behavior_data(
                 _query_content_usage,
                 db,
                 current_user.organization_id,
-                days_back,
+                days_back=1,  # unused: the explicit window wins
                 limit=500,
+                start_date=start_date,
+                end_date=end_date,
             )
+
+        data: Dict[str, Any] = (
+            _export_as_csv(export_request.data_type, export_data)
+            if export_format == "csv"
+            else export_data
+        )
 
         # Create export response
         export_response = AnalyticsExportResponse(
@@ -752,8 +839,12 @@ async def export_behavior_data(
         return {
             "export_id": export_response.export_id,
             "status": export_response.status,
-            "data": export_data,
-            "format": export_request.format,
+            "data": data,
+            "format": export_format,
+            "window": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
             "created_at": export_response.created_at,
         }
 

@@ -22,6 +22,7 @@ import aiohttp
 import httpx
 from defusedxml import ElementTree as ET
 from pypdf import PdfReader
+from pypdf.generic import NullObject
 
 from src.models.document import DocumentType, ProcessingStatus
 from src.services.infrastructure.azure_openai_service import azure_openai_service
@@ -248,7 +249,11 @@ def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
                 value = value.get_object()
             except AttributeError:
                 pass
-            return "" if value is None else str(value)
+            # A PDF null (pypdf NullObject) is an absent value, not the text
+            # "NullObject": treat it like a missing field.
+            if value is None or isinstance(value, NullObject):
+                return ""
+            return str(value)
 
         metadata = {
             "title": _field("/Title"),
@@ -266,6 +271,10 @@ def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
         "num_pages": len(pdf_reader.pages),
         "metadata": metadata,
     }
+
+
+# Upper bound for one pypdf parse of an arXiv PDF (at most _MAX_PDF_BYTES).
+_PDF_PARSE_TIMEOUT_SECONDS = 120.0
 
 
 async def _parse_pdf_off_loop(pdf_content: bytes) -> Dict[str, Any]:
@@ -884,7 +893,12 @@ class ArXivIngestionService:
             Dictionary with extracted content
         """
         try:
-            return await _parse_pdf_off_loop(pdf_content)
+            # A stuck parse must not hold its worker slot forever: the
+            # timeout cancels the call, which kills the per-call worker
+            # process (arxiv_fulltext.run_in_subprocess) and frees the slot.
+            return await asyncio.wait_for(
+                _parse_pdf_off_loop(pdf_content), _PDF_PARSE_TIMEOUT_SECONDS
+            )
         except Exception as e:
             logger.error(f"Failed to extract PDF content: {e}")
             raise IngestionError(f"PDF extraction failed: {e}")

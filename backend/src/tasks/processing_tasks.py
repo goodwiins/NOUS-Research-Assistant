@@ -592,12 +592,16 @@ def process_document_ingestion(self, job_id: str):
             )
             if entities is None:
                 # Extraction errored: keep the entities a previous run wrote
-                # rather than resetting them to an empty set.
+                # rather than resetting them to an empty set, and mark the
+                # graph stage failed so the reconciler re-extracts it
+                # (reconcile_tasks re-drives neo4j_index_status=failed).
                 logger.warning(
                     "Entity extraction failed for document %s; keeping its "
-                    "existing entities",
+                    "existing entities and marking the graph stage failed",
                     document.id,
                 )
+                document.neo4j_index_status = SatelliteSyncStatus.FAILED.value
+                commit_if_active()
 
         if entities is not None:
             # Replay-safe write: drop any spaCy/regex entities left by a prior

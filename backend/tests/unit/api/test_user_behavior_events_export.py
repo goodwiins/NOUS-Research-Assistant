@@ -12,8 +12,10 @@ always returned 500.
 
 from __future__ import annotations
 
+import csv
+import io
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -193,3 +195,113 @@ async def test_export_unknown_data_type_is_400() -> None:
             db=MagicMock(),
         )
     assert ei.value.status_code == 400
+
+
+# ---- export parameters are honoured or rejected (GOO-677) -------------------
+
+
+def _req(**overrides: Any) -> AnalyticsExportRequest:
+    end = datetime(2026, 11, 21)
+    fields: dict[str, Any] = {
+        "data_type": "user_behavior",
+        "start_date": end - timedelta(days=7),
+        "end_date": end,
+        "format": "json",
+    }
+    return AnalyticsExportRequest(**{**fields, **overrides})
+
+
+async def _export(req: AnalyticsExportRequest) -> Any:
+    return await ub.export_behavior_data(
+        export_request=req,
+        background_tasks=BackgroundTasks(),
+        current_user=_caller(),
+        db=MagicMock(),
+    )
+
+
+@pytest.mark.parametrize("fmt", ["xml", "xlsx", ""])
+async def test_export_unsupported_format_is_400(fmt: str) -> None:
+    with pytest.raises(HTTPException) as ei:
+        await _export(_req(format=fmt))
+    assert ei.value.status_code == 400
+
+
+@pytest.mark.parametrize("days", [0, -3])
+async def test_export_end_not_after_start_is_400(days: int) -> None:
+    end = datetime(2026, 11, 21)
+    with pytest.raises(HTTPException) as ei:
+        await _export(_req(start_date=end - timedelta(days=days), end_date=end))
+    assert ei.value.status_code == 400
+
+
+async def test_export_window_longer_than_a_year_is_400() -> None:
+    end = datetime(2026, 11, 21)
+    with pytest.raises(HTTPException) as ei:
+        await _export(_req(start_date=end - timedelta(days=367), end_date=end))
+    assert ei.value.status_code == 400
+
+
+TRENDS = {
+    "session_trends": [{"period": "2026-11-20", "session_count": 2}],
+    "search_trends": [{"period": "2026-11-20", "search_count": 5}],
+    "engagement_trends": [],
+}
+PATTERNS = {
+    "power_users": [{"user_id": USER, "name": "A B", "session_count": 9}],
+    "casual_users": [],
+}
+
+
+def _mock_behavior(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, AsyncMock]:
+    trends = AsyncMock(return_value=TRENDS)
+    patterns = AsyncMock(return_value=PATTERNS)
+    monkeypatch.setattr(ub.user_behavior_service, "get_behavior_trends", trends)
+    monkeypatch.setattr(
+        ub.user_behavior_service, "identify_behavior_patterns", patterns
+    )
+    return trends, patterns
+
+
+async def test_export_user_behavior_passes_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trends, patterns = _mock_behavior(monkeypatch)
+    # An aware window is converted to the naive UTC the columns store.
+    start = datetime(2026, 11, 1, 2, 0, tzinfo=timezone(timedelta(hours=2)))
+    end = datetime(2026, 11, 8, 2, 0, tzinfo=timezone(timedelta(hours=2)))
+
+    resp = await _export(_req(start_date=start, end_date=end))
+
+    window = {"start_date": datetime(2026, 11, 1), "end_date": datetime(2026, 11, 8)}
+    for mock in (trends, patterns):
+        assert mock.await_args is not None
+        kwargs = mock.await_args.kwargs
+        assert {k: kwargs.get(k) for k in window} == window
+    assert resp["data"] == {"trends": TRENDS, "patterns": PATTERNS}
+    assert resp["window"] == {
+        "start_date": "2026-11-01T00:00:00",
+        "end_date": "2026-11-08T00:00:00",
+    }
+
+
+async def test_export_user_behavior_as_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_behavior(monkeypatch)
+
+    resp = await _export(_req(format="CSV"))
+
+    data = resp["data"]
+    assert resp["format"] == "csv"
+    assert set(data) == {
+        "session_trends",
+        "search_trends",
+        "engagement_trends",
+        "patterns",
+    }
+    sessions = list(csv.DictReader(io.StringIO(data["session_trends"])))
+    assert sessions == [{"period": "2026-11-20", "session_count": "2"}]
+    assert data["engagement_trends"] == ""
+    patterns = list(csv.DictReader(io.StringIO(data["patterns"])))
+    assert patterns == [
+        {"pattern": "power_users", "user_id": USER, "name": "A B", "session_count": "9"}
+    ]

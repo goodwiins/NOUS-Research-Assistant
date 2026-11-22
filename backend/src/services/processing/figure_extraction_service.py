@@ -19,6 +19,7 @@ from src.services.documents.object_keys import (
     figure_object_prefix,
 )
 from src.services.documents.storage_utils import local_file_for_document
+from src.services.processing import pdf_lock
 
 # Re-exported for backwards compatibility; the canonical definitions now live in
 # ``object_keys`` so the delete/reconcile paths can derive figure keys without
@@ -173,11 +174,12 @@ def extract_figures_for_document(db: Session, document: Document) -> Dict[str, A
         return {"skipped": "not_pdf"}
 
     with local_file_for_document(document) as pdf_path:
-        pdf_doc = fitz.open(pdf_path)
-        try:
-            candidates = _collect_candidates(pdf_doc)
-        finally:
-            pdf_doc.close()
+        with pdf_lock.PYMUPDF_LOCK:  # PyMuPDF is not thread-safe
+            pdf_doc = fitz.open(pdf_path)
+            try:
+                candidates = _collect_candidates(pdf_doc)
+            finally:
+                pdf_doc.close()
 
     helper = None
     try:
