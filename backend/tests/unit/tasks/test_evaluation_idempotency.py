@@ -36,31 +36,38 @@ def _session_with(first_results):
 
 
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
-def test_rag_triad_short_circuits_terminal_job(monkeypatch, status):
+def test_rag_triad_short_circuits_terminal_job(monkeypatch, eval_skips, status):
     job = _terminal_job(status)
     dataset = MagicMock()
     db = _session_with([job, dataset])
     monkeypatch.setattr(et, "SessionLocal", lambda: db)
 
-    result = et.run_rag_triad_evaluation.apply(args=("job-1",)).result
+    result = et.run_rag_triad_evaluation.apply(args=("job-1",))
 
-    assert result == {
-        "status": status,
-        "job_id": "job-1",
-        "skipped": "duplicate_delivery",
-    }
+    # Skipped deliveries are IGNORED (acked, not reported as SUCCESS).
+    assert result.state == "IGNORED"
+    assert eval_skips == [
+        {
+            "status": status,
+            "job_id": "job-1",
+            "skipped": "duplicate_delivery",
+        }
+    ]
     job.start_job.assert_not_called()
+    job.fail_job.assert_not_called()  # the skip is not treated as an error
 
 
-def test_batch_short_circuits_terminal_job(monkeypatch):
+def test_batch_short_circuits_terminal_job(monkeypatch, eval_skips):
     job = _terminal_job("completed")
     db = _session_with([job])
     monkeypatch.setattr(et, "SessionLocal", lambda: db)
 
-    result = et.run_batch_evaluation.apply(args=("job-2", ["q1", "q2"])).result
+    result = et.run_batch_evaluation.apply(args=("job-2", ["q1", "q2"]))
 
-    assert result["skipped"] == "duplicate_delivery"
+    assert result.state == "IGNORED"
+    assert [s["skipped"] for s in eval_skips] == ["duplicate_delivery"]
     job.start_job.assert_not_called()
+    job.fail_job.assert_not_called()  # the skip is not treated as an error
 
 
 def test_rag_triad_runs_when_job_running(monkeypatch):
@@ -80,7 +87,7 @@ def test_rag_triad_runs_when_job_running(monkeypatch):
     job.start_job.assert_called_once()
 
 
-def test_real_time_short_circuits_existing_task_id(monkeypatch):
+def test_real_time_short_circuits_existing_task_id(monkeypatch, eval_skips):
     existing = MagicMock()
     existing.status = "completed"
     existing.id = "job-4"
@@ -90,11 +97,14 @@ def test_real_time_short_circuits_existing_task_id(monkeypatch):
     result = et.run_real_time_evaluation.apply(
         args=("q", "a", ["ctx"]),
         task_id="stable-delivery-id",
-    ).result
+    )
 
-    assert result == {
-        "status": "completed",
-        "job_id": "job-4",
-        "skipped": "duplicate_delivery",
-    }
+    assert result.state == "IGNORED"
+    assert eval_skips == [
+        {
+            "status": "completed",
+            "job_id": "job-4",
+            "skipped": "duplicate_delivery",
+        }
+    ]
     db.add.assert_not_called()
