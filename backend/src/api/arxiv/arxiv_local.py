@@ -76,26 +76,29 @@ def _read_pdf_text_and_metadata(pdf_file: Path) -> Tuple[str, Dict[str, Any]]:
     """
     import fitz  # PyMuPDF
 
-    pdf_document = fitz.open(str(pdf_file))
-    try:
-        text_content = []
-        for page_num in range(len(pdf_document)):
-            page = pdf_document.load_page(page_num)
-            text_content.append(page.get_text())
+    from src.services.processing import pdf_lock
 
-        metadata = pdf_document.metadata or {}
-        pdf_metadata = {
-            "title": metadata.get("title") or "",
-            "author": metadata.get("author") or "",
-            "subject": metadata.get("subject") or "",
-            "creator": metadata.get("creator") or "",
-            "producer": metadata.get("producer") or "",
-            "creation_date": metadata.get("creationDate") or "",
-            "modification_date": metadata.get("modDate") or "",
-            "page_count": len(pdf_document),
-        }
-    finally:
-        pdf_document.close()
+    with pdf_lock.PYMUPDF_LOCK:  # PyMuPDF is not thread-safe
+        pdf_document = fitz.open(str(pdf_file))
+        try:
+            text_content = []
+            for page_num in range(len(pdf_document)):
+                page = pdf_document.load_page(page_num)
+                text_content.append(page.get_text())
+
+            metadata = pdf_document.metadata or {}
+            pdf_metadata = {
+                "title": metadata.get("title") or "",
+                "author": metadata.get("author") or "",
+                "subject": metadata.get("subject") or "",
+                "creator": metadata.get("creator") or "",
+                "producer": metadata.get("producer") or "",
+                "creation_date": metadata.get("creationDate") or "",
+                "modification_date": metadata.get("modDate") or "",
+                "page_count": len(pdf_document),
+            }
+        finally:
+            pdf_document.close()
     return "\n".join(text_content), pdf_metadata
 
 

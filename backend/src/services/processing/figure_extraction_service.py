@@ -7,8 +7,6 @@ import re
 from typing import Any, Dict, List, Optional
 
 import fitz
-
-from src.services.processing import pdf_lock
 import structlog
 from sqlalchemy.orm import Session
 
@@ -21,6 +19,7 @@ from src.services.documents.object_keys import (
     figure_object_prefix,
 )
 from src.services.documents.storage_utils import local_file_for_document
+from src.services.processing import pdf_lock
 
 # Re-exported for backwards compatibility; the canonical definitions now live in
 # ``object_keys`` so the delete/reconcile paths can derive figure keys without

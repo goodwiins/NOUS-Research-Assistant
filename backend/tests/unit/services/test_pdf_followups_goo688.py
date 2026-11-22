@@ -63,6 +63,7 @@ def lock_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[_RecordingLock]:
     """Swap in a recording lock and make ``fitz.open`` assert it is held."""
     probe = _RecordingLock()
     monkeypatch.setattr(pdf_lock, "PYMUPDF_LOCK", probe)
+
     def _guarded_open(*args: Any, **kwargs: Any) -> Any:
         assert probe.depth > 0, "fitz.open called without PYMUPDF_LOCK"
         return _REAL_FITZ_OPEN(*args, **kwargs)
@@ -252,3 +253,17 @@ def test_null_metadata_is_an_absent_field() -> None:
     assert metadata["subject"] == ""
     assert metadata["author"] == "A. Author"
     assert metadata["creator"] == "maker"
+
+
+def test_local_arxiv_reader_holds_the_lock(
+    tmp_path: Path, lock_probe: _RecordingLock
+) -> None:
+    from src.api.arxiv import arxiv_local
+
+    path = tmp_path / "2401.00001.pdf"
+    path.write_bytes(_pdf_bytes("local text"))
+
+    text, metadata = arxiv_local._read_pdf_text_and_metadata(path)
+
+    assert "local text" in text and metadata["page_count"] == 1
+    assert lock_probe.entered == 1

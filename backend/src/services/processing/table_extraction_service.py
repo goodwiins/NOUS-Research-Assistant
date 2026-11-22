@@ -10,8 +10,8 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 import structlog
 
 from src.core.config import settings
-from src.services.processing import pdf_lock
 from src.services.documents.storage_utils import local_file_for_document
+from src.services.processing import pdf_lock
 
 logger = structlog.get_logger()
 
