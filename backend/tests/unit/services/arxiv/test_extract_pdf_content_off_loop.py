@@ -96,3 +96,35 @@ async def test_parse_failure_is_an_ingestion_error(
     service = mod.ArXivIngestionService.__new__(mod.ArXivIngestionService)
     with pytest.raises(mod.IngestionError):
         await service.extract_pdf_content(b"not a pdf")
+
+
+def _pdf_with_indirect_title() -> bytes:
+    """A PDF whose /Info /Title is an indirect reference, as real ones often are."""
+    from io import BytesIO
+
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import NameObject, TextStringObject
+
+    writer = PdfWriter(clone_from=PdfReader(BytesIO(_pdf_bytes("indirect title"))))
+    writer.add_metadata({"/Author": "A. Author"})
+    title_ref = writer._add_object(TextStringObject("Indirect Title"))
+    writer._info.get_object()[NameObject("/Title")] = title_ref
+    out = BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_indirect_metadata_survives_the_real_worker_process() -> None:
+    """GOO-642 review: an IndirectObject in the metadata cannot be pickled back
+    from the worker process (RecursionError), so ingest fell back to the
+    abstract. Exercised through a real ProcessPoolExecutor, not a stub."""
+    result = await arxiv_fulltext.run_in_subprocess(
+        mod._extract_pdf_content_sync, _pdf_with_indirect_title()
+    )
+
+    assert result["metadata"]["title"] == "Indirect Title"
+    assert result["metadata"]["author"] == "A. Author"
+    assert all(isinstance(v, str) for v in result["metadata"].values())
+    assert "indirect title" in result["full_text"]

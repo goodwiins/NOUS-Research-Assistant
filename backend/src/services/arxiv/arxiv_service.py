@@ -233,15 +233,31 @@ def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
             logger.warning(f"Failed to extract text from page {page_num + 1}: {e}")
 
     metadata = {}
-    if pdf_reader.metadata:
+    info = pdf_reader.metadata
+    if info:
+
+        def _field(name: str) -> str:
+            # Values can be IndirectObjects (or other pypdf objects) that hold
+            # a reference back to the reader; pickling one back from the
+            # worker process recurses until RecursionError. Resolve and
+            # coerce to plain str.
+            value = info.get(name)
+            if value is None:
+                return ""
+            try:
+                value = value.get_object()
+            except AttributeError:
+                pass
+            return "" if value is None else str(value)
+
         metadata = {
-            "title": pdf_reader.metadata.get("/Title", ""),
-            "author": pdf_reader.metadata.get("/Author", ""),
-            "subject": pdf_reader.metadata.get("/Subject", ""),
-            "creator": pdf_reader.metadata.get("/Creator", ""),
-            "producer": pdf_reader.metadata.get("/Producer", ""),
-            "creation_date": str(pdf_reader.metadata.get("/CreationDate", "")),
-            "modification_date": str(pdf_reader.metadata.get("/ModDate", "")),
+            "title": _field("/Title"),
+            "author": _field("/Author"),
+            "subject": _field("/Subject"),
+            "creator": _field("/Creator"),
+            "producer": _field("/Producer"),
+            "creation_date": _field("/CreationDate"),
+            "modification_date": _field("/ModDate"),
         }
 
     return {
