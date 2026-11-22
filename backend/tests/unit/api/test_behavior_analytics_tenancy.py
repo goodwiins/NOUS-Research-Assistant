@@ -7,7 +7,11 @@ so it counted org-B activity. Closed on both sides:
 
 * write: ``track_search_event`` rejects a ``search_query_id`` that is malformed
   (422) or not in the caller's org (404), and the session lookup is scoped;
-* read: ``_query_content_usage`` filters events, sessions and queries by org.
+* read: ``_query_content_usage`` and the /insights top-documents query
+  (``_query_top_documents``) filter events, sessions and queries by org.
+
+The write-side service tests run against real tables (GOO-677): a mock that
+returns a row for any filter can't catch a dropped org predicate.
 
 ``POST /sessions`` also returned another user's session for a reused token;
 it now answers 409 instead.
@@ -15,6 +19,8 @@ it now answers 409 instead.
 
 from __future__ import annotations
 
+import csv
+import io
 import uuid
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -22,14 +28,16 @@ from typing import Any, Iterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from src.api.quality import user_behavior as ub
-from src.models.quality_metrics import SearchSession
-from src.models.search import SearchQuery
+from src.models.quality_metrics import SearchEvent, SearchSession
+from src.models.search import SearchQuery, SearchType
 from src.models.user import UserRole
+from src.schemas.quality_metrics import AnalyticsExportRequest
 from src.services.quality import user_behavior_service as svc_mod
 from src.services.quality.user_behavior_service import UserBehaviorService
 
@@ -37,8 +45,12 @@ pytestmark = pytest.mark.unit
 
 ORG_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 ORG_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-USER_A = "11111111-1111-1111-1111-111111111111"
-USER_B = "22222222-2222-2222-2222-222222222222"
+# Ids start with a letter on purpose: SQLite gives a column typed UUID numeric
+# affinity, so an all-digit hex id would read back as a float.
+USER_A = "a1111111-1111-1111-1111-111111111111"
+USER_B = "b2222222-2222-2222-2222-222222222222"
+QUERY_A = "aaaaaaaa-0000-0000-0000-00000000000a"
+QUERY_B = "bbbbbbbb-0000-0000-0000-00000000000b"
 EVENT: dict[str, Any] = {
     "session_id": "tok",
     "query": "q",
@@ -69,7 +81,13 @@ _DDL = [
 
 @pytest.fixture
 def db() -> Iterator[Session]:
-    engine = create_engine("sqlite://")
+    # One shared in-memory connection usable from any thread: the export route
+    # runs _query_content_usage in a worker thread (asyncio.to_thread).
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     with engine.begin() as conn:
         for ddl in _DDL:
             conn.execute(text(ddl))
@@ -98,8 +116,24 @@ def db() -> Iterator[Session]:
             " ('e-b2', 's-b', 'q-a', :ub, :b, 1, 3, :t)",
             {},
         ),
+        # an older org-A document, used only by the export-window tests
+        ("INSERT INTO documents VALUES ('doc-old', 'Old paper', :a)", {}),
+        ("INSERT INTO search_queries VALUES ('q-old', :a)", {}),
+        ("INSERT INTO search_results VALUES ('r-old', 'doc-old', 'q-old')", {}),
+        (
+            "INSERT INTO search_events VALUES"
+            " ('e-old', 's-a', 'q-old', :ua, :a, 0, 2, :old)",
+            {},
+        ),
     ]
-    params = {"a": ORG_A, "b": ORG_B, "ua": USER_A, "ub": USER_B, "t": now}
+    params = {
+        "a": ORG_A,
+        "b": ORG_B,
+        "ua": USER_A,
+        "ub": USER_B,
+        "t": now,
+        "old": now - timedelta(days=20),
+    }
     for sql, extra in rows:
         session.execute(text(sql), {**params, **extra})
     session.commit()
@@ -122,56 +156,121 @@ def test_org_b_sees_nothing_of_org_a_documents(db: Session) -> None:
     assert ub._query_content_usage(db, ORG_B, days_back=7, limit=10) == []
 
 
-# ---- write side: service ----------------------------------------------------
+def _top_documents(db: Session, org: str) -> list[Any]:
+    now = datetime.utcnow()
+    return svc_mod._query_top_documents(
+        db, org, now - timedelta(days=7), now + timedelta(minutes=1)
+    )
 
 
-def _db_for(session: Any, query: Any) -> MagicMock:
-    def by_entity(entity: Any) -> MagicMock:
-        found = {SearchSession: session, SearchQuery: query}[entity]
-        chain = MagicMock()
-        chain.filter.return_value.first.return_value = found
-        return chain
+def test_insights_top_documents_ignore_forged_org_b_events(db: Session) -> None:
+    rows = _top_documents(db, ORG_A)
 
-    db = MagicMock()
-    db.query.side_effect = by_entity
-    return db
+    assert [(r.id, r.unique_users, r.access_count) for r in rows] == [
+        ("doc-a", 1, 1)  # USER_A's one event, not the two forged org-B ones
+    ]
+
+
+def test_insights_top_documents_for_org_b_are_empty(db: Session) -> None:
+    assert _top_documents(db, ORG_B) == []
+
+
+# ---- write side: service, against real tables -------------------------------
+
+
+@pytest.fixture
+def orm_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[sessionmaker[Session]]:
+    """Real search_sessions / search_queries / search_events tables, two orgs.
+
+    Each org has its own session token and search query. ``get_db_sync`` hands
+    the service a fresh session per call, like production.
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    models: tuple[Any, ...] = (SearchSession, SearchQuery, SearchEvent)
+    for model in models:
+        model.__table__.create(engine)
+    factory = sessionmaker(bind=engine)
+    with factory() as seed:
+        for user, org, token in ((USER_A, ORG_A, "tok-a"), (USER_B, ORG_B, "tok-b")):
+            seed.add(
+                SearchSession(
+                    session_id=token,
+                    user_id=uuid.UUID(user),
+                    organization_id=uuid.UUID(org),
+                )
+            )
+        for qid, user, org in ((QUERY_A, USER_A, ORG_A), (QUERY_B, USER_B, ORG_B)):
+            seed.add(
+                SearchQuery(
+                    id=uuid.UUID(qid),
+                    query_text="q",
+                    search_type=SearchType.KEYWORD,
+                    user_id=uuid.UUID(user),
+                    organization_id=uuid.UUID(org),
+                )
+            )
+        seed.commit()
+
+    def get_db_sync() -> Iterator[Session]:
+        yield factory()
+
+    monkeypatch.setattr(svc_mod, "get_db_sync", get_db_sync)
+    yield factory
+    engine.dispose()
+
+
+def _track(token: str, user: str, org: str, query_id: str) -> Any:
+    return UserBehaviorService().track_search_event(
+        **{**EVENT, "session_id": token},
+        user_id=user,
+        organization_id=org,
+        search_query_id=query_id,
+    )
+
+
+def _events(factory: sessionmaker[Session]) -> list[SearchEvent]:
+    with factory() as s:
+        return list(s.query(SearchEvent).all())
 
 
 async def test_foreign_search_query_id_writes_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    orm_db: sessionmaker[Session],
 ) -> None:
-    session = SimpleNamespace(id=uuid.uuid4(), search_count=0, total_response_time=0)
-    db = _db_for(session, None)  # query id not found in the caller's org
-    monkeypatch.setattr(svc_mod, "get_db_sync", lambda: iter([db]))
-
-    event = await UserBehaviorService().track_search_event(
-        **EVENT,
-        user_id=USER_B,
-        organization_id=ORG_B,
-        search_query_id=str(uuid.uuid4()),
-    )
+    # Org B's own session, but org A's search query: must not be planted.
+    event = await _track("tok-b", USER_B, ORG_B, QUERY_A)
 
     assert event is None
-    db.add.assert_not_called()
-    db.commit.assert_not_called()
+    assert _events(orm_db) == []
+    with orm_db() as s:
+        session = s.query(SearchSession).filter_by(session_id="tok-b").one()
+        assert session.search_count == 0
 
 
-async def test_own_search_query_id_is_accepted(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_own_search_query_id_is_recorded_in_own_org(
+    orm_db: sessionmaker[Session],
 ) -> None:
-    session = SimpleNamespace(id=uuid.uuid4(), search_count=0, total_response_time=0)
-    query_id = uuid.uuid4()
-    db = _db_for(session, SimpleNamespace(id=query_id))
-    monkeypatch.setattr(svc_mod, "get_db_sync", lambda: iter([db]))
+    event = await _track("tok-b", USER_B, ORG_B, QUERY_B)
 
-    event = await UserBehaviorService().track_search_event(
-        **EVENT,
-        user_id=USER_A,
-        organization_id=ORG_A,
-        search_query_id=str(query_id),
-    )
+    assert event is not None
+    [stored] = _events(orm_db)
+    assert stored.search_query_id == uuid.UUID(QUERY_B)
+    assert stored.organization_id == uuid.UUID(ORG_B)
+    with orm_db() as s:
+        session = s.query(SearchSession).filter_by(session_id="tok-b").one()
+        assert stored.session_id == session.id
+        assert session.search_count == 1
 
-    assert event is not None and event.search_query_id == query_id
+
+async def test_another_orgs_session_token_writes_nothing(
+    orm_db: sessionmaker[Session],
+) -> None:
+    # Org B caller presenting org A's session token (and org A's query).
+    assert await _track("tok-a", USER_B, ORG_B, QUERY_A) is None
+    assert _events(orm_db) == []
 
 
 async def test_malformed_search_query_id_raises_value_error(
@@ -268,3 +367,50 @@ def test_cutoff_uses_days_back() -> None:
     assert datetime.utcnow() - params["cutoff_date"] >= timedelta(days=3) - timedelta(
         seconds=5
     )
+
+
+# ---- export honours its date window (GOO-677 / API2B-2) ---------------------
+
+
+def _export(data_type: str, start: datetime, end: datetime, fmt: str) -> Any:
+    return AnalyticsExportRequest(
+        data_type=data_type,
+        start_date=start,
+        end_date=end,
+        format=fmt,
+        filters=None,
+        include_metadata=True,
+    )
+
+
+async def test_export_content_usage_uses_start_and_end_date(db: Session) -> None:
+    now = datetime.utcnow()
+    resp = await ub.export_behavior_data(
+        export_request=_export(
+            "content_usage", now - timedelta(days=30), now - timedelta(days=10), "json"
+        ),
+        background_tasks=BackgroundTasks(),
+        current_user=_caller(USER_A, ORG_A),
+        db=db,
+    )
+
+    # Only the 20-day-old event is inside [start, end); today's doc-a is not.
+    assert [r["document_id"] for r in resp["data"]["content_usage"]] == ["doc-old"]
+    assert resp["format"] == "json"
+
+
+async def test_export_content_usage_as_csv(db: Session) -> None:
+    now = datetime.utcnow()
+    resp = await ub.export_behavior_data(
+        export_request=_export(
+            "content_usage", now - timedelta(days=30), now - timedelta(days=10), "csv"
+        ),
+        background_tasks=BackgroundTasks(),
+        current_user=_caller(USER_A, ORG_A),
+        db=db,
+    )
+
+    assert resp["format"] == "csv"
+    rows = list(csv.DictReader(io.StringIO(resp["data"]["content_usage"])))
+    assert [r["document_id"] for r in rows] == ["doc-old"]
+    assert rows[0]["title"] == "Old paper"
