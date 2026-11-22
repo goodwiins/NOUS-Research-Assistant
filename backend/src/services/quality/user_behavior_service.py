@@ -17,6 +17,7 @@ from src.core.config import settings
 from src.core.database import get_db_sync
 from src.models.organization import Organization
 from src.models.quality_metrics import SearchEvent, SearchSession
+from src.models.search import SearchQuery
 from src.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,11 @@ class UserBehaviorService:
 
         if not organization_id:
             return None
+        # Validate client-supplied ids before opening a session: a malformed
+        # value is the caller's error (the route maps ValueError to 422).
+        org_uuid = uuid.UUID(str(organization_id))
+        user_uuid = uuid.UUID(str(user_id))
+        query_uuid = uuid.UUID(str(search_query_id)) if search_query_id else None
 
         db = next(get_db_sync())
 
@@ -115,13 +121,28 @@ class UserBehaviorService:
                 db.query(SearchSession)
                 .filter(
                     SearchSession.session_id == session_id,
-                    SearchSession.user_id == uuid.UUID(str(user_id)),
-                    SearchSession.organization_id == uuid.UUID(str(organization_id)),
+                    SearchSession.user_id == user_uuid,
+                    SearchSession.organization_id == org_uuid,
                 )
                 .first()
             )
             if session is None:
                 return None
+
+            # ``search_events.search_query_id`` has no FK, and content-usage
+            # analytics joins through it, so a foreign id would plant this
+            # event in another org's analytics. Accept only the caller's own.
+            if query_uuid is not None:
+                own_query = (
+                    db.query(SearchQuery)
+                    .filter(
+                        SearchQuery.id == query_uuid,
+                        SearchQuery.organization_id == org_uuid,
+                    )
+                    .first()
+                )
+                if own_query is None:
+                    return None
 
             search_event = SearchEvent(
                 session_id=session.id,
@@ -129,9 +150,9 @@ class UserBehaviorService:
                 search_type=search_type,
                 results_count=results_count,
                 response_time=response_time,
-                user_id=uuid.UUID(str(user_id)),
-                organization_id=uuid.UUID(str(organization_id)),
-                search_query_id=uuid.UUID(search_query_id) if search_query_id else None,
+                user_id=user_uuid,
+                organization_id=org_uuid,
+                search_query_id=query_uuid,
                 page_number=page_number,
                 filters_applied=filters_applied,
                 sort_order=sort_order,

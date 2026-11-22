@@ -41,19 +41,28 @@ def create_search_session(
     try:
         from src.models.quality_metrics import SearchSession
 
-        # Check if session already exists
+        token = session_data.get("session_id")
+        if not token or not isinstance(token, str):
+            raise HTTPException(status_code=422, detail="session_id is required")
+
+        # ``session_id`` is globally unique, so look it up by token, then only
+        # hand it back if it is the caller's own (same user and organization).
         existing_session = (
-            db.query(SearchSession)
-            .filter(SearchSession.session_id == session_data["session_id"])
-            .first()
+            db.query(SearchSession).filter(SearchSession.session_id == token).first()
         )
 
         if existing_session:
+            if str(existing_session.user_id) != str(current_user.id) or str(
+                existing_session.organization_id
+            ) != str(current_user.organization_id):
+                raise HTTPException(
+                    status_code=409, detail="session_id is already in use"
+                )
             return {"session_id": existing_session.session_id, "status": "existing"}
 
         # Create new session
         session = SearchSession(
-            session_id=session_data["session_id"],
+            session_id=token,
             user_id=current_user.id,
             organization_id=current_user.organization_id,
             user_agent=session_data.get("user_agent"),
@@ -73,6 +82,8 @@ def create_search_session(
             "created_at": session.created_at.isoformat(),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create search session: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -116,6 +127,8 @@ async def track_search_event(
         raise
     except KeyError:
         raise HTTPException(status_code=422, detail="Missing required event field")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Malformed id in event")
     except Exception as e:
         logger.error(f"Failed to track search event: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -512,6 +525,9 @@ def _query_content_usage(
         JOIN search_events se ON sq.id = se.search_query_id
         JOIN search_sessions s ON se.session_id = s.id
         WHERE d.organization_id = :org_id
+            AND sq.organization_id = :org_id
+            AND se.organization_id = :org_id
+            AND s.organization_id = :org_id
             AND se.created_at >= :cutoff_date
         GROUP BY d.id, d.title
         HAVING COUNT(DISTINCT s.user_id) > 0
@@ -545,7 +561,9 @@ def _query_content_usage(
                 "click_through_rate": float(ctr),
                 "avg_results_in_search": float(content.avg_results_in_search or 0),
                 "last_accessed": (
-                    content.last_accessed.isoformat() if content.last_accessed else None
+                    content.last_accessed.isoformat()
+                    if isinstance(content.last_accessed, datetime)
+                    else content.last_accessed
                 ),
             }
         )
