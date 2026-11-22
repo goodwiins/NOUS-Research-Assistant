@@ -34,6 +34,7 @@ except ImportError:
 
 from src.core.config import settings
 from src.core.database import get_db
+from src.core.thread_offload import to_thread_finish_on_cancel
 from src.models.document import Document, DocumentType, ProcessingStatus
 from src.models.organization import Organization
 from src.models.processing import JobPriority, JobStatus, JobType, ProcessingJob
@@ -1028,25 +1029,16 @@ class FileService:
         nothing references it. Waiting also keeps the spool file in place
         until the thread is done reading it.
         """
-        upload_future = asyncio.ensure_future(
-            asyncio.to_thread(self._upload_spool, spool_path, upload, *args)
+
+        def _delete_landed(result: Any) -> None:
+            self._delete_stored_object(*identity(result))
+
+        # Waits through any number of cancellations (a second one used to
+        # skip the delete, GOO-693) and logs a failed delete: the object is
+        # then recoverable by a later sweep.
+        return await to_thread_finish_on_cancel(
+            self._upload_spool, spool_path, upload, *args, on_cancel=_delete_landed
         )
-        try:
-            return await asyncio.shield(upload_future)
-        except asyncio.CancelledError:
-            try:
-                result = await upload_future
-            except Exception:
-                raise asyncio.CancelledError() from None  # nothing was stored
-            try:
-                await asyncio.to_thread(self._delete_stored_object, *identity(result))
-            except Exception:
-                logger.warning(
-                    "cancelled upload: could not delete the stored object "
-                    "(recoverable by a later sweep)",
-                    exc_info=True,
-                )
-            raise
 
     @staticmethod
     def _upload_spool(spool_path: str, upload: Any, *args: Any) -> Any:

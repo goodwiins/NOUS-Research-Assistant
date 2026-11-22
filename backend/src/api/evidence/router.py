@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ...core.database import get_db_sync
 from ...core.dependencies import get_current_user
+from ...core.thread_offload import to_thread_finish_on_cancel
 from ...middleware.rate_limiting import ApiRateLimiter
 from ...models.document import Document, ProcessingStatus
 from ...models.evidence import StanceClassificationModel
@@ -345,7 +346,7 @@ async def get_evidence_meter(
                 status_code=400, detail=_batch_classification_limit_detail()
             ) from e
 
-        loaded, classifier_sources = await asyncio.to_thread(
+        loaded, classifier_sources = await to_thread_finish_on_cancel(
             _load_sources_and_release,
             db,
             organization_id=current_user.organization_id,
@@ -409,7 +410,7 @@ async def get_evidence_meter(
 
         # Store in database (upsert to avoid duplicates/races)
         try:
-            saved_count = await asyncio.to_thread(
+            saved_count = await to_thread_finish_on_cancel(
                 _save_and_commit,
                 db,
                 classifications=classifications,
@@ -617,7 +618,7 @@ async def classify_sources_for_claim(
                 status_code=400, detail=_batch_classification_limit_detail()
             ) from e
 
-        _loaded, classifier_sources = await asyncio.to_thread(
+        _loaded, classifier_sources = await to_thread_finish_on_cancel(
             _load_sources_and_release,
             db,
             organization_id=current_user.organization_id,
@@ -646,7 +647,7 @@ async def classify_sources_for_claim(
             )
 
         # Store results in database (upsert to avoid duplicates/races)
-        saved_count = await asyncio.to_thread(
+        saved_count = await to_thread_finish_on_cancel(
             _save_and_commit,
             db,
             classifications=classifications,
@@ -667,7 +668,7 @@ async def classify_sources_for_claim(
     except HTTPException:
         raise
     except Exception:
-        await asyncio.to_thread(db.rollback)
+        await to_thread_finish_on_cancel(db.rollback)
         logger.error("Failed to classify sources")
         raise HTTPException(status_code=500, detail="Classification failed")
 

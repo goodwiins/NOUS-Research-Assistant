@@ -15,6 +15,7 @@ from sqlalchemy import Integer, func
 
 from src.core.database import get_db_sync
 from src.core.dependencies import get_current_user
+from src.core.thread_offload import to_thread_finish_on_cancel
 from src.models.evaluation import (
     EvaluationComparison,
     EvaluationJob,
@@ -224,7 +225,7 @@ async def create_evaluation_job(
             # .delay() is a blocking broker round-trip (GOO-466 / GOO-643).
             await asyncio.to_thread(run_rag_triad_evaluation.delay, job_id_str)
         except OperationalError:
-            await asyncio.to_thread(_fail_job_quietly, db, job, job_id_str)
+            await to_thread_finish_on_cancel(_fail_job_quietly, db, job, job_id_str)
             raise HTTPException(
                 status_code=503,
                 detail="Evaluation queue unavailable. Please retry.",

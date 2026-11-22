@@ -6,6 +6,7 @@ For processing PDF files stored locally in the data/arxiv directory
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -67,6 +68,9 @@ from src.services.embedding.embedding_service import EmbeddingService  # noqa: E
 from src.services.expensive_work_admission import metered_expensive_work
 
 _shared_embedding_service = None
+# Two concurrent ingests used to both see None and each load the model
+# (GOO-693); the lock makes the build happen once.
+_shared_embedding_lock = threading.Lock()
 
 
 def _read_pdf_text_and_metadata(pdf_file: Path) -> Tuple[str, Dict[str, Any]]:
@@ -106,7 +110,9 @@ def _get_shared_embedding_service():
     """Process-wide EmbeddingService (R6-M4: no per-document reloads)."""
     global _shared_embedding_service
     if _shared_embedding_service is None:
-        _shared_embedding_service = EmbeddingService(lazy=False)
+        with _shared_embedding_lock:
+            if _shared_embedding_service is None:
+                _shared_embedding_service = EmbeddingService(lazy=False)
     return _shared_embedding_service
 
 

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.core.database import SessionLocal
+from src.core.thread_offload import to_thread_finish_on_cancel
 from src.models.document import Document
 from src.models.evaluation import (
     EvaluationComparison,
@@ -133,7 +134,9 @@ class RAGEvaluationService:
         ``db`` is a sync Session: the inserts and commits run in a worker
         thread so they do not block the event loop (GOO-643 / API-5).
         """
-        return await asyncio.to_thread(self._create_evaluation_job_sync, request, db)
+        return await to_thread_finish_on_cancel(
+            self._create_evaluation_job_sync, request, db
+        )
 
     def _create_evaluation_job_sync(
         self, request: EvaluationRequest, db: Session
