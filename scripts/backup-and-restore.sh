@@ -9,8 +9,9 @@
 set -euo pipefail
 
 # Backups hold database contents and Helm values: keep every local file
-# owner-only. Kubernetes Secrets are never backed up here; they are restored
-# from the secret manager, not from backups.
+# owner-only. Kubernetes Secrets are never backed up here, neither in the
+# config dump nor in the Velero backup; after a restore, re-create them from
+# the secret manager.
 umask 077
 
 # Configuration
@@ -328,6 +329,7 @@ create_velero_backup() {
         velero create backup "$backup_name" \
             --namespace "$NAMESPACE" \
             --include-namespaces "$NAMESPACE" \
+            --exclude-resources secrets \
             --default-volumes-to-restic=false \
             --wait
 
@@ -350,6 +352,12 @@ restore_backup() {
         log_error "Backup ID is required for restore"
         return 1
     fi
+    # IDs are the TIMESTAMP used at backup time; reject anything else so it
+    # cannot widen the S3 filter or escape the restore directory.
+    if [[ ! "$backup_id" =~ ^[0-9]{8}_[0-9]{6}$ ]]; then
+        log_error "Invalid backup ID '$backup_id' (expected YYYYMMDD_HHMMSS)"
+        return 1
+    fi
 
     log_info "Starting restore from backup: $backup_id"
 
@@ -362,11 +370,18 @@ restore_backup() {
         log_info "Available backups in S3:"
         aws s3 ls "s3://$S3_BUCKET/backups/" --recursive
 
-        # Download backup files
+        # Uploads live at backups/<component>/<component>_backup_<id>.<ext>,
+        # so download every component key for this id.
         log_info "Downloading backup files for: $backup_id"
-        aws s3 sync "s3://$S3_BUCKET/backups/$backup_id" "$restore_dir/"
+        aws s3 sync "s3://$S3_BUCKET/backups/" "$restore_dir/" \
+            --exclude "*" --include "*_${backup_id}.*"
     else
         log_error "AWS credentials not configured for restore"
+        return 1
+    fi
+
+    if ! find "$restore_dir" -type f -name "*_${backup_id}.*" | grep -q .; then
+        log_error "No backup files match ID $backup_id in s3://$S3_BUCKET/backups/; nothing restored"
         return 1
     fi
 
@@ -499,8 +514,8 @@ Components backed up:
     - Neo4j graph database
     - Kubernetes configurations (Secrets are NOT included; restore them
       from the secret manager)
+    - Velero cluster backup (also excludes Secrets: --exclude-resources secrets)
     - Application files
-    - Velero cluster backup
 
 Environment:
     BACKUP_DIR           Local staging dir (default: a fresh mktemp -d, mode 0700)
