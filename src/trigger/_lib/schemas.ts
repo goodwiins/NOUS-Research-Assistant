@@ -71,18 +71,20 @@ export const ArxivIngestPaperPayloadSchema = z.object({
   userId: z.string(),
 });
 
-export const ArxivSearchResponseSchema = z.object({
-  papers: z.array(
-    z.object({
-      id: z.string(),
-      title: z.string(),
-      authors: z.array(z.string()).optional(),
-      categories: z.array(z.string()).optional(),
-      published: z.string().optional(),
-    }),
-  ),
-  total: z.number().optional(),
-});
+/**
+ * POST /api/v1/arxiv/search returns a bare JSON array
+ * (`response_model=List[ArXivPaperResponse]`), not an object with `papers`.
+ * Contract: tests/trigger/arxiv-search-contract.test.mjs.
+ */
+export const ArxivSearchResponseSchema = z.array(
+  z.object({
+    id: z.string(),
+    title: z.string(),
+    authors: z.array(z.string()).optional(),
+    categories: z.array(z.string()).optional(),
+    published: z.string().optional(),
+  }),
+);
 
 export const BatchProcessPayloadSchema = z.object({
   documentIds: z.array(z.string()).min(1).max(100),

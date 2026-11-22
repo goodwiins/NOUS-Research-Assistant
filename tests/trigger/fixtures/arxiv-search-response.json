@@ -1,0 +1,40 @@
+[
+  {
+    "id": "2301.07041v2",
+    "title": "Example paper on retrieval-augmented generation",
+    "authors": [
+      "A. Author",
+      "B. Author"
+    ],
+    "abstract": "An abstract.",
+    "published": "2023-01-17T18:00:00Z",
+    "updated": "2023-02-01T09:30:00Z",
+    "categories": [
+      "cs.CL",
+      "cs.IR"
+    ],
+    "primary_category": "cs.CL",
+    "comment": null,
+    "journal_ref": null,
+    "pdf_url": "http://arxiv.org/pdf/2301.07041v2",
+    "doi": null
+  },
+  {
+    "id": "hep-th/9901001v1",
+    "title": "Old-style identifier paper",
+    "authors": [
+      "C. Author"
+    ],
+    "abstract": "Another abstract.",
+    "published": "1999-01-01T00:00:00Z",
+    "updated": "1999-01-01T00:00:00Z",
+    "categories": [
+      "hep-th"
+    ],
+    "primary_category": "hep-th",
+    "comment": "12 pages",
+    "journal_ref": "J. Example 1 (1999)",
+    "pdf_url": null,
+    "doi": "10.1000/example"
+  }
+]
