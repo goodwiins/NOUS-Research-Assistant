@@ -9,7 +9,7 @@ import sys
 import threading
 import types
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 import pytest
 
@@ -92,7 +92,7 @@ async def test_run_ingestion_reads_the_dataset_off_the_loop(
     service = mod.KaggleLLMBulkIngestionService(batch_size=2, max_papers=max_papers)
     service.state_file = tmp_path / "state.json"
     service.state_file.write_text(json.dumps({"last_batch": start_batch}))
-    service._neo4j_driver = _Driver()
+    service._neo4j_driver = cast(Any, _Driver())
 
     batches: List[List[str]] = []
 
