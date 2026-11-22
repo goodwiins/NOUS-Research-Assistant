@@ -190,19 +190,32 @@ def test_blocking_call_stays_off_the_loop(site: Site) -> None:
         not wrong
     ), f"{site.target} must use one of {sorted(site.offloads)}, not {wrong}"
 
-    if site.target.startswith("lambda:"):
-        return  # a lambda's own body is the offloaded call
     lambdas = {
         id(n)
         for _, arg in offloads
         if isinstance(arg, ast.Lambda)
         for n in ast.walk(arg)
     }
-    direct = [
-        n.lineno
-        for n in ast.walk(fn)
-        if isinstance(n, ast.Call)
-        and _tail(n.func) == site.target
-        and id(n) not in lambdas
-    ]
+    if site.target.startswith("lambda:"):
+        # The lambda wraps a sync-Session call (``db.<attr>(...)``); the same
+        # call made outside an offloaded lambda would run on the loop.
+        attr = site.target[len("lambda:") :]
+        direct = [
+            n.lineno
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == attr
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "db"
+            and id(n) not in lambdas
+        ]
+    else:
+        direct = [
+            n.lineno
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and _tail(n.func) == site.target
+            and id(n) not in lambdas
+        ]
     assert not direct, f"{site.target} called directly on the loop at lines {direct}"

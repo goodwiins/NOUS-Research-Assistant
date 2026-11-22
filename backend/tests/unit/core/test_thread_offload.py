@@ -110,3 +110,64 @@ async def test_cleanup_failure_is_logged_not_raised(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert "cleanup after a cancelled offloaded call failed" in caplog.text
+
+
+async def test_a_hung_thread_is_abandoned_after_the_max_wait(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entered, release = threading.Event(), threading.Event()
+    cleaned: List[Any] = []
+
+    task = asyncio.create_task(
+        to_thread_finish_on_cancel(
+            _blocking, entered, release, [], on_cancel=cleaned.append, max_wait=0.1
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    finally:
+        release.set()
+    assert "abandoning" in caplog.text
+    # Its result is unknown when we give up, so no cleanup runs for it.
+    assert cleaned == []
+
+
+async def test_max_wait_defaults_from_env(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("THREAD_OFFLOAD_CANCEL_MAX_WAIT_SECONDS", "0.1")
+    entered, release = threading.Event(), threading.Event()
+    task = asyncio.create_task(
+        to_thread_finish_on_cancel(_blocking, entered, release, [])
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    finally:
+        release.set()
+    assert "abandoning" in caplog.text
+
+
+async def test_work_failing_after_cancellation_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entered, release = threading.Event(), threading.Event()
+
+    def _fails() -> None:
+        entered.set()
+        release.wait(timeout=5)
+        raise RuntimeError("commit failed")
+
+    task = asyncio.create_task(to_thread_finish_on_cancel(_fails))
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert "offloaded call failed after its caller was cancelled" in caplog.text
+    assert "commit failed" in caplog.text

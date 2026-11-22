@@ -4,8 +4,9 @@ The cache is a module-level singleton. It kept one ``redis.asyncio`` client
 for the whole process, but that client's connections belong to the event loop
 that opened them, so a second loop (Celery's ``run_async``, a test loop) got
 "attached to a different loop" errors. Only connection, timeout and OS errors
-started the backoff, so a wrong-loop RuntimeError or a protocol error
-(``InvalidResponse``) hit Redis again on every request.
+started the backoff, so a protocol error (``InvalidResponse``) hit Redis
+again on every request. A bare RuntimeError is a caller bug, not an outage,
+and must not switch the cache off.
 """
 
 import asyncio
@@ -34,14 +35,13 @@ class _FailingRedis:
     "error",
     [
         # New in GOO-693:
-        RuntimeError("Task got Future attached to a different loop"),
         InvalidResponse("Protocol error"),
         # Already covered; kept so the broadening cannot drop them:
         AuthenticationError("bad password"),
         asyncio.TimeoutError(),
         OSError("network unreachable"),
     ],
-    ids=["wrong-loop", "invalid-response", "auth", "asyncio-timeout", "oserror"],
+    ids=["invalid-response", "auth", "asyncio-timeout", "oserror"],
 )
 async def test_unusable_redis_backs_off(error: BaseException) -> None:
     fake = _FailingRedis(error)
@@ -54,8 +54,15 @@ async def test_unusable_redis_backs_off(error: BaseException) -> None:
     assert fake.calls == 1, "every request paid for a broken Redis again"
 
 
-async def test_a_bad_command_does_not_switch_the_cache_off() -> None:
-    fake = _FailingRedis(ResponseError("WRONGTYPE"))
+@pytest.mark.parametrize(
+    "error",
+    [ResponseError("WRONGTYPE"), RuntimeError("caller bug")],
+    ids=["bad-command", "bare-runtime-error"],
+)
+async def test_errors_that_are_not_an_outage_do_not_switch_the_cache_off(
+    error: BaseException,
+) -> None:
+    fake = _FailingRedis(error)
     service = mod.EvidenceCacheService()
     service.redis_client = fake  # type: ignore[assignment]
 

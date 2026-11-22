@@ -10,7 +10,6 @@ import json
 import logging
 import random
 import time
-import weakref
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -30,11 +29,11 @@ _UNAVAILABLE_BACKOFF_SECONDS = 30.0
 # (including ResponseError subclasses such as READONLY or NOPERM): they must
 # not switch the cache off for everyone.
 _COMMAND_ERRORS = (ResponseError, DataError)
-# Errors that mean Redis (or this client) is unusable right now: any other
-# RedisError (connection, timeout, auth, protocol errors...), socket errors,
-# asyncio timeouts, and the RuntimeError a client raises when used from a
-# different or closed event loop.
-_UNAVAILABLE_ERRORS = (RedisError, OSError, asyncio.TimeoutError, RuntimeError)
+# Errors that mean Redis is unusable right now: any other RedisError
+# (connection, timeout, auth, protocol errors...), socket errors and asyncio
+# timeouts. A bare RuntimeError is a bug in the caller, not an outage, so it
+# does not switch the cache off for everyone.
+_UNAVAILABLE_ERRORS = (RedisError, OSError, asyncio.TimeoutError)
 
 
 class EvidenceCacheService:
@@ -49,43 +48,49 @@ class EvidenceCacheService:
     """
 
     def __init__(self):
-        # An injected client (tests) wins; otherwise one client per event
-        # loop. An asyncio Redis client's connections belong to the loop that
-        # opened them, and this service is a module-level singleton used from
-        # the API loop and from Celery's run_async loop alike (GOO-693).
+        # An injected client (tests) wins. Otherwise one client, bound to the
+        # event loop that first used it: an asyncio Redis client's
+        # connections belong to that loop. A different loop that is running
+        # at the same time gets a cache miss instead of its own client, and
+        # once the bound loop has closed the next loop takes over. Keeping a
+        # client per loop leaked one open connection per short-lived loop,
+        # because each client's connections keep their loop alive (GOO-693).
         self.redis_client: Optional[redis.Redis] = None
-        self._loop_clients: (
-            "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, redis.Redis]"
-        ) = weakref.WeakKeyDictionary()
+        self._bound_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._bound_client: Optional[redis.Redis] = None
         self._unavailable_until = 0.0
 
     def _client(self) -> Optional[redis.Redis]:
         """The client for the running loop, created lazily (no I/O), or None
-        while backing off."""
+        while backing off or when another live loop owns the client."""
         if time.monotonic() < self._unavailable_until:
             return None
         if self.redis_client is not None:
             return self.redis_client
         try:
-            loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            loop = None
-        client = self._loop_clients.get(loop) if loop is not None else None
-        if client is None:
-            try:
-                client = redis.Redis.from_url(
-                    settings.REDIS_URL or "redis://localhost:6379/0",
-                    decode_responses=True,
-                    socket_timeout=5,
-                    socket_connect_timeout=5,
-                    health_check_interval=30,
-                )
-            except Exception as e:
-                logger.error(f"Failed to create Redis client: {e}")
-                self._mark_unavailable()
-                return None
-            if loop is not None:
-                self._loop_clients[loop] = client
+            return None  # only usable from async code
+        if self._bound_client is not None:
+            if self._bound_loop is loop:
+                return self._bound_client
+            if self._bound_loop is not None and not self._bound_loop.is_closed():
+                return None  # owned by a loop that is still running: skip cache
+        try:
+            client = redis.Redis.from_url(
+                settings.REDIS_URL or "redis://localhost:6379/0",
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                health_check_interval=30,
+            )
+        except Exception as e:
+            logger.error(f"Failed to create Redis client: {e}")
+            self._mark_unavailable()
+            return None
+        # Drop the client of a closed loop: its connections can no longer be
+        # used, and releasing the reference lets them be collected.
+        self._bound_loop, self._bound_client = loop, client
         return client
 
     def _mark_unavailable(self) -> None:
