@@ -12,6 +12,7 @@ import multiprocessing
 import re
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -281,9 +282,13 @@ _PDF_PARSE_TIMEOUT_SECONDS = 120.0
 # ones whose caller already timed out (GOO-695). A thread cannot be killed, so
 # a timeout there only abandons the await; the slot is released by the thread
 # itself when the parse really ends, which bounds how many abandoned parses
-# can pile up.
+# can pile up. The parses get their own executor, one thread per slot, so
+# they never queue behind unrelated work in the loop's default executor.
 _MAX_THREAD_PARSES = 2
 _thread_parse_slots = threading.BoundedSemaphore(_MAX_THREAD_PARSES)
+_pdf_parse_executor = ThreadPoolExecutor(
+    max_workers=_MAX_THREAD_PARSES, thread_name_prefix="pdf-parse"
+)
 
 
 class _ParseSlotsBusy(Exception):
@@ -294,6 +299,16 @@ def _parse_in_thread_slot(slots: threading.BoundedSemaphore, pdf_content: bytes)
     try:
         return _extract_pdf_content_sync(pdf_content)
     finally:
+        slots.release()
+
+
+def _release_if_never_ran(
+    slots: threading.BoundedSemaphore, job: "Future[Any]"
+) -> None:
+    # A concurrent.futures job can only be cancelled before it starts, so a
+    # cancelled job never reached _parse_in_thread_slot's release: this is
+    # then the only release. A job that ran is never "cancelled" (GOO-701).
+    if job.cancelled():
         slots.release()
 
 
@@ -315,15 +330,15 @@ async def _parse_pdf_off_loop(pdf_content: bytes) -> Dict[str, Any]:
                 f"{_MAX_THREAD_PARSES} earlier PDF parses are still running"
             )
         try:
-            # run_in_executor submits now, so the slot is always released by
-            # the thread, even if this await is cancelled straight away.
-            future = asyncio.get_running_loop().run_in_executor(
-                None, _parse_in_thread_slot, slots, pdf_content
-            )
+            job = _pdf_parse_executor.submit(_parse_in_thread_slot, slots, pdf_content)
         except BaseException:
             slots.release()
             raise
-        return await future
+        # Exactly one release per slot: the thread releases a job that ran;
+        # a job cancelled while still queued (this await was cancelled before
+        # a worker picked it up) is released by this callback instead.
+        job.add_done_callback(lambda done: _release_if_never_ran(slots, done))
+        return await asyncio.wrap_future(job)
     from src.services.integrations.arxiv_fulltext import run_in_subprocess
 
     return await run_in_subprocess(_extract_pdf_content_sync, pdf_content)
