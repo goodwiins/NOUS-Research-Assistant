@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -143,11 +144,30 @@ def _render(start: str = PARENT) -> str:
     )
 
 
+OWN_ENUM_TYPES = {"connectionstatus", "updatetype", "priority"}
+
+
 def test_offline_sql_render_creates_the_four_tables() -> None:
     sql = _render()
     for table in TABLES:
-        assert f"CREATE TABLE {table} (" in sql, table
+        assert sql.count(f"CREATE TABLE {table} (") == 1, table
     assert "DROP TABLE" not in sql
+    # Only the four tables' own enum types, each exactly once; nothing foreign.
+    created_types = re.findall(r"CREATE TYPE (\w+) AS ENUM", sql)
+    assert sorted(created_types) == sorted(OWN_ENUM_TYPES)
+    # Their indexes render too (the models declare index=True columns).
+    out = _run(
+        "import json, src.models\n"
+        "from src.models.base import Base\n"
+        f"names = [i.name for t in {list(TABLES)!r} for i in Base.metadata.tables[t].indexes]\n"
+        "print(json.dumps(names))\n"
+    )
+    index_names = json.loads(out.strip().splitlines()[-1])
+    assert index_names
+    for name in index_names:
+        assert (
+            f"CREATE INDEX {name} " in sql or f"CREATE UNIQUE INDEX {name} " in sql
+        ), name
 
 
 def test_offline_render_secures_every_table_like_rl01() -> None:
@@ -160,13 +180,22 @@ def test_offline_render_secures_every_table_like_rl01() -> None:
     # RLS comes after the CREATE TABLEs, the guards before them.
     first_create = sql.index("CREATE TABLE websocket_connections (")
     assert sql.index("ENABLE ROW LEVEL SECURITY") > first_create
-    for guard in ("legacy Supabase shape", "existing enum type public.priority"):
+    for guard in (
+        "is missing column(s)",
+        "existing enum type public.priority",
+        "is not an enum type",
+    ):
         assert sql.index(guard) < first_create, guard
     # Expected enum labels come from the models, not a hand copy.
     assert "ARRAY['LOW', 'NORMAL', 'HIGH', 'CRITICAL']" in sql
     assert "'CONNECTING', 'CONNECTED'" in sql
     # PL/pgSQL RAISE placeholders are a single % (a doubled one is a literal).
     assert "has labels %, expected %;" in sql and "%%" not in sql
+    # Every table's column guard names the expected columns and carries the
+    # diagnostic query.
+    for table in TABLES:
+        assert f"existing public.{table} is missing column(s) %" in sql, table
+        assert f"table_name = ''{table}'' ORDER BY ordinal_position" in sql, table
 
 
 _PG_URL = os.environ.get("GOO686_PG_URL")
@@ -300,7 +329,10 @@ def test_upgrade_refuses_the_legacy_supabase_websocket_connections_shape(
     )
     proc = _upgrade(scratch_db, REVISION)
     assert proc.returncode != 0
-    assert "legacy Supabase shape" in proc.stderr
+    assert "existing public.websocket_connections is missing column(s)" in proc.stderr
+    # It says WHICH columns, and how to look.
+    assert "organization_id" in proc.stderr and "connection_status" in proc.stderr
+    assert "information_schema.columns" in proc.stderr
     # Nothing was created: the guard runs before any DDL.
     [[status_updates]] = _pg(scratch_db, "SELECT to_regclass('public.status_updates')")
     assert status_updates is None
@@ -319,3 +351,19 @@ def test_upgrade_refuses_an_existing_enum_with_other_labels(scratch_db: str) -> 
     proc = _upgrade(scratch_db, REVISION)
     assert proc.returncode != 0
     assert "existing enum type public.priority" in proc.stderr
+
+
+@_needs_pg
+def test_upgrade_refuses_a_same_named_non_enum_type(scratch_db: str) -> None:
+    proc = _upgrade(scratch_db, PARENT)
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    _pg(
+        scratch_db,
+        "DROP TABLE public.status_updates, public.notification_templates CASCADE;;"
+        "DROP TYPE public.priority;;"
+        "CREATE DOMAIN public.priority AS text",
+    )
+    proc = _upgrade(scratch_db, REVISION)
+    assert proc.returncode != 0
+    assert "public.priority exists but is not an enum type" in proc.stderr
+    assert "<NULL>" not in proc.stderr
