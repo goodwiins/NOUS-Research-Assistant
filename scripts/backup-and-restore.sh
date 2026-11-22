@@ -17,7 +17,9 @@ umask 077
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-NAMESPACE="${NAMESPACE:-knowledge-graph-analytics}"
+# The live app namespace on AWS EKS (nous-dev-cluster). The RDS checks look
+# here, so a wrong default would make them miss.
+NAMESPACE="${NAMESPACE:-multimodal-rag-system}"
 # Velero's CLI --namespace is where Velero itself runs, not the app namespace.
 VELERO_NAMESPACE="${VELERO_NAMESPACE:-velero}"
 BACKUP_DIR="${BACKUP_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/kg-backups.XXXXXX")}"
@@ -339,14 +341,15 @@ create_velero_backup() {
         local backup_name="knowledge-graph-backup-${TIMESTAMP}"
 
         log_info "Running Velero backup: $backup_name"
-        velero create backup "$backup_name" \
+        # Needs Velero >= 1.10, which renamed --default-volumes-to-restic.
+        # The command is the if condition: under set -e a bare failure would
+        # exit before the error below is logged.
+        if velero create backup "$backup_name" \
             --namespace "$VELERO_NAMESPACE" \
             --include-namespaces "$NAMESPACE" \
             --exclude-resources secrets \
-            --default-volumes-to-restic=false \
-            --wait
-
-        if [ $? -eq 0 ]; then
+            --default-volumes-to-fs-backup=false \
+            --wait; then
             log_success "Velero backup completed: $backup_name"
         else
             log_error "Velero backup failed"
@@ -626,10 +629,13 @@ Components backed up:
     - Neo4j graph database
     - Kubernetes configurations (Secrets are NOT included; restore them
       from the secret manager)
-    - Velero cluster backup (also excludes Secrets: --exclude-resources secrets)
+    - Velero cluster backup (needs Velero >= 1.10; also excludes Secrets:
+      --exclude-resources secrets)
     - Application files
 
 Environment:
+    NAMESPACE            App namespace (default: multimodal-rag-system)
+    VELERO_NAMESPACE     Namespace Velero runs in (default: velero)
     BACKUP_DIR           Local staging dir (default: a fresh mktemp -d, mode 0700)
     S3_BUCKET            Destination bucket (default: knowledge-graph-analytics-backups)
     BACKUP_KMS_KEY_ID    KMS key for SSE-KMS uploads (default: the aws/s3 key)
