@@ -11975,8 +11975,8 @@ export interface components {
             } | null;
             /**
              * Format
-             * @description Export format
-             * @default csv
+             * @description Export format: json (default) returns the structured rows; csv returns each table as CSV text, with cells that start with = + - @ TAB or CR prefixed by ' so spreadsheets do not run them
+             * @default json
              */
             format: string;
             /**

@@ -414,3 +414,227 @@ async def test_export_content_usage_as_csv(db: Session) -> None:
     rows = list(csv.DictReader(io.StringIO(resp["data"]["content_usage"])))
     assert [r["document_id"] for r in rows] == ["doc-old"]
     assert rows[0]["title"] == "Old paper"
+
+
+# ---- one foreign row per table: every org predicate is load-bearing (GOO-691)
+#
+# The fixtures above put a forged event *and* its session in org B, so the
+# event and session predicates cover for each other and the document / query
+# predicates are never exercised. Each case below adds one chain whose only
+# foreign row is in the named table, so dropping that one predicate fails.
+
+
+def _engine() -> Any:
+    return create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+
+def _seed(engine: Any, ddl: list[str], rows: list[str], **params: Any) -> None:
+    with engine.begin() as conn:
+        for statement in ddl:
+            conn.execute(text(statement))
+        for statement in rows:
+            conn.execute(text(statement), params)
+
+
+_TOP_DOCS_BASE = [
+    "INSERT INTO documents VALUES ('doc-a', 'A paper', :a)",
+    "INSERT INTO search_queries VALUES ('q-a', :a)",
+    "INSERT INTO search_results VALUES ('r-a', 'doc-a', 'q-a')",
+    "INSERT INTO search_sessions VALUES ('s-a', :ua, :a)",
+    "INSERT INTO search_events VALUES ('e-a', 's-a', 'q-a', :ua, :a, 1, 3, :t)",
+]
+_TOP_DOCS_FOREIGN = {
+    # an org-A query lists an org-B document
+    "documents": [
+        "INSERT INTO documents VALUES ('doc-x', 'B paper', :b)",
+        "INSERT INTO search_results VALUES ('r-x', 'doc-x', 'q-a')",
+    ],
+    # an org-A event points at an org-B query that lists an org-A document
+    "search_queries": [
+        "INSERT INTO search_queries VALUES ('q-x', :b)",
+        "INSERT INTO search_results VALUES ('r-x', 'doc-a', 'q-x')",
+        "INSERT INTO search_events VALUES ('e-x', 's-a', 'q-x', :ua, :a, 1, 3, :t)",
+    ],
+    # an org-B event on an org-A session and query
+    "search_events": [
+        "INSERT INTO search_events VALUES ('e-x', 's-a', 'q-a', :ua, :b, 1, 3, :t)",
+    ],
+    # an org-A event on an org-B session
+    "search_sessions": [
+        "INSERT INTO search_sessions VALUES ('s-x', :ub, :b)",
+        "INSERT INTO search_events VALUES ('e-x', 's-x', 'q-a', :ub, :a, 1, 3, :t)",
+    ],
+}
+
+
+@pytest.mark.parametrize("foreign_table", sorted(_TOP_DOCS_FOREIGN))
+def test_top_documents_ignore_a_single_foreign_row(foreign_table: str) -> None:
+    engine = _engine()
+    _seed(
+        engine,
+        _DDL,
+        _TOP_DOCS_BASE + _TOP_DOCS_FOREIGN[foreign_table],
+        a=ORG_A,
+        b=ORG_B,
+        ua=USER_A,
+        ub=USER_B,
+        t=datetime.utcnow(),
+    )
+    db = sessionmaker(bind=engine)()
+
+    rows = _top_documents(db, ORG_A)
+
+    assert [(r.id, r.unique_users, r.access_count) for r in rows] == [("doc-a", 1, 1)]
+
+
+_PATTERNS_DDL = [
+    "CREATE TABLE users (id TEXT PRIMARY KEY, first_name TEXT, last_name TEXT,"
+    " organization_id TEXT)",
+    "CREATE TABLE search_sessions (id TEXT PRIMARY KEY, user_id TEXT,"
+    " organization_id TEXT, start_time TIMESTAMP)",
+    "CREATE TABLE search_events (id TEXT PRIMARY KEY, session_id TEXT,"
+    " organization_id TEXT, response_time FLOAT, clicked_results INTEGER,"
+    " user_rating FLOAT)",
+]
+_PATTERNS_BASE = [
+    "INSERT INTO users VALUES (:ua, 'Ada', 'A', :a)",
+    "INSERT INTO users VALUES (:ub, 'Bo', 'B', :b)",
+    "INSERT INTO search_sessions VALUES ('s-a', :ua, :a, :inside)",
+    "INSERT INTO search_events VALUES ('e-a', 's-a', :a, 100, 1, 4)",
+]
+_PATTERNS_FOREIGN = {
+    # an org-B user owns an org-A session
+    "users": [
+        "INSERT INTO search_sessions VALUES ('s-x', :ub, :a, :inside)",
+        "INSERT INTO search_events VALUES ('e-x', 's-x', :a, 100, 1, 4)",
+    ],
+    # USER_A's session filed under org B
+    "search_sessions": [
+        "INSERT INTO search_sessions VALUES ('s-x', :ua, :b, :inside)",
+        "INSERT INTO search_events VALUES ('e-x', 's-x', :a, 100, 1, 4)",
+    ],
+    # an org-B event on USER_A's org-A session
+    "search_events": [
+        "INSERT INTO search_events VALUES ('e-x', 's-a', :b, 100, 1, 4)",
+    ],
+    # a session just before the window ...
+    "before_start": [
+        "INSERT INTO search_sessions VALUES ('s-x', :ua, :a, :before)",
+        "INSERT INTO search_events VALUES ('e-x', 's-x', :a, 100, 1, 4)",
+    ],
+    # ... and one exactly at its exclusive end
+    "at_end": [
+        "INSERT INTO search_sessions VALUES ('s-x', :ua, :a, :end)",
+        "INSERT INTO search_events VALUES ('e-x', 's-x', :a, 100, 1, 4)",
+    ],
+}
+_WINDOW_START = datetime(2026, 11, 1)
+_WINDOW_END = datetime(2026, 11, 8)
+
+
+@pytest.mark.parametrize("case", sorted(_PATTERNS_FOREIGN))
+async def test_behavior_patterns_ignore_a_single_foreign_or_out_of_window_row(
+    case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine()
+    _seed(
+        engine,
+        _PATTERNS_DDL,
+        _PATTERNS_BASE + _PATTERNS_FOREIGN[case],
+        a=ORG_A,
+        b=ORG_B,
+        ua=USER_A,
+        ub=USER_B,
+        inside=datetime(2026, 11, 3),
+        before=_WINDOW_START - timedelta(seconds=1),
+        end=_WINDOW_END,
+    )
+    factory = sessionmaker(bind=engine)
+
+    def get_db_sync() -> Iterator[Session]:
+        yield factory()
+
+    monkeypatch.setattr(svc_mod, "get_db_sync", get_db_sync)
+
+    patterns = await UserBehaviorService().identify_behavior_patterns(
+        ORG_A, min_sessions=1, start_date=_WINDOW_START, end_date=_WINDOW_END
+    )
+
+    users = [
+        (u["user_id"], u["session_count"], u["search_count"])
+        for rows in patterns.values()
+        for u in rows
+    ]
+    assert users == [(USER_A, 1, 1)]
+
+
+# ---- every query that reads search_events filters the event's org (GOO-691)
+#
+# The /insights and trends queries use Postgres-only SQL, so the behaviour is
+# proven in test_behavior_insights_postgres.py; this runs everywhere and pins
+# the predicate (inside the ON clause for LEFT JOINs, so sessions without
+# events still count).
+
+
+class _RecordingSession:
+    def __init__(self, statements: list[str]) -> None:
+        self.statements = statements
+
+    def execute(self, statement: Any, params: Any = None) -> Any:
+        self.statements.append(str(statement))
+        return SimpleNamespace(fetchall=lambda: [], fetchone=lambda: None)
+
+    def close(self) -> None:
+        pass
+
+
+def _event_queries(statements: list[str]) -> list[str]:
+    return [" ".join(s.split()) for s in statements if "search_events e" in s]
+
+
+async def _record(
+    monkeypatch: pytest.MonkeyPatch, call: Any, *args: Any, **kwargs: Any
+) -> list[str]:
+    statements: list[str] = []
+
+    def get_db_sync() -> Iterator[Any]:
+        yield _RecordingSession(statements)
+
+    monkeypatch.setattr(svc_mod, "get_db_sync", get_db_sync)
+    await call(*args, **kwargs)
+    return _event_queries(statements)
+
+
+def _assert_event_org_filtered(queries: list[str]) -> None:
+    assert queries
+    for sql in queries:
+        if "LEFT JOIN search_events e" in sql:
+            assert (
+                "LEFT JOIN search_events e ON s.id = e.session_id"
+                " AND e.organization_id = :org_id" in sql
+            ), sql
+        else:
+            assert "e.organization_id = :org_id" in sql, sql
+
+
+async def test_insights_queries_filter_the_event_org(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = UserBehaviorService()
+    queries = await _record(monkeypatch, service.get_behavioral_insights, ORG_A)
+
+    assert len(queries) >= 7  # engagement, queries, types, hours, docs, ...
+    _assert_event_org_filtered(queries)
+
+
+async def test_trends_queries_filter_the_event_org(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = UserBehaviorService()
+    queries = await _record(monkeypatch, service.get_behavior_trends, ORG_A)
+
+    _assert_event_org_filtered(queries)

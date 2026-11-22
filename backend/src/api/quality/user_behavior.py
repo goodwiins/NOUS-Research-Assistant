@@ -67,6 +67,20 @@ def _naive_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+# A spreadsheet runs a cell that starts with one of these as a formula.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> Any:
+    """Make user-controlled text (titles, names) literal in a spreadsheet.
+
+    Only strings are prefixed, so a negative number stays a number (GOO-691).
+    """
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
 def _csv_table(rows: List[Dict[str, Any]]) -> str:
     """Flat rows as CSV text, one column per key seen; "" if there are none."""
     if not rows:
@@ -75,7 +89,9 @@ def _csv_table(rows: List[Dict[str, Any]]) -> str:
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=fieldnames, lineterminator="\n")
     writer.writeheader()
-    writer.writerows(rows)
+    writer.writerows(
+        {key: _csv_cell(value) for key, value in row.items()} for row in rows
+    )
     return out.getvalue()
 
 
