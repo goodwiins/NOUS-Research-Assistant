@@ -12,7 +12,7 @@ import uuid
 import uuid as uuid_module
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional
+from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
 
 import aiofiles
 import magic
@@ -525,8 +525,12 @@ class FileService:
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
                     # boto3 is blocking: upload from a worker thread (GOO-643).
-                    await asyncio.to_thread(
-                        self._upload_spool,
+                    await self._upload_off_loop(
+                        lambda _result: (
+                            "s3",
+                            s3_key,
+                            f"s3://{settings.S3_BUCKET_NAME}/{s3_key}",
+                        ),
                         spool_path,
                         self.s3_helper.upload_fileobj,
                         s3_key,
@@ -569,8 +573,12 @@ class FileService:
                 spool_path, file_hash = await self._spool_and_hash(file)
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
-                    storage_key = await asyncio.to_thread(
-                        self._upload_spool,
+                    storage_key = await self._upload_off_loop(
+                        lambda stored_key: (
+                            "supabase",
+                            stored_key,
+                            f"supabase://{stored_key}",
+                        ),
                         spool_path,
                         self.storage_helper.upload_fileobj,
                         bucket,
@@ -1003,6 +1011,42 @@ class FileService:
             self.storage_helper.delete_file(bucket, key)
         elif file_path and os.path.exists(file_path):
             os.remove(file_path)
+
+    async def _upload_off_loop(
+        self,
+        identity: Callable[[Any], Tuple[str, Optional[str], Optional[str]]],
+        spool_path: str,
+        upload: Any,
+        *args: Any,
+    ) -> Any:
+        """Run a blocking ``upload_fileobj`` in a worker thread.
+
+        Cancelling the request cannot stop the thread, so on cancellation wait
+        for it to finish and delete whatever it stored (``identity`` maps the
+        upload result to ``_delete_stored_object`` arguments) before
+        re-raising. Without that the object lands after the rollback ran and
+        nothing references it. Waiting also keeps the spool file in place
+        until the thread is done reading it.
+        """
+        upload_future = asyncio.ensure_future(
+            asyncio.to_thread(self._upload_spool, spool_path, upload, *args)
+        )
+        try:
+            return await asyncio.shield(upload_future)
+        except asyncio.CancelledError:
+            try:
+                result = await upload_future
+            except Exception:
+                raise asyncio.CancelledError() from None  # nothing was stored
+            try:
+                await asyncio.to_thread(self._delete_stored_object, *identity(result))
+            except Exception:
+                logger.warning(
+                    "cancelled upload: could not delete the stored object "
+                    "(recoverable by a later sweep)",
+                    exc_info=True,
+                )
+            raise
 
     @staticmethod
     def _upload_spool(spool_path: str, upload: Any, *args: Any) -> Any:

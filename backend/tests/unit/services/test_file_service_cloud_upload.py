@@ -309,3 +309,66 @@ async def test_duplicate_lookup_is_org_scoped_and_matches_legacy_hash(
     assert "documents.checksum_sha256" in sql
     assert "documents.document_metadata ->> " in sql
     assert "is_deleted IS NOT true" in sql
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["s3", "supabase"])
+async def test_cancelled_upload_deletes_the_object_once_it_lands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str
+) -> None:
+    """GOO-643 review: cancelling the request while the upload thread runs
+    must not orphan the object the thread goes on to store."""
+    import asyncio
+
+    entered = threading.Event()
+    release = threading.Event()
+    service = _make_service(monkeypatch, tmp_path, backend)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    class SlowS3(_S3Recorder):
+        def upload_fileobj(self, fileobj: Any, key: str, content_type: str) -> str:
+            entered.set()
+            release.wait(timeout=5)
+            return super().upload_fileobj(fileobj, key, content_type)
+
+    class SlowSupabase(_SupabaseRecorder):
+        def upload_fileobj(
+            self, fileobj: Any, bucket: str, key: str, content_type: str
+        ) -> str:
+            entered.set()
+            release.wait(timeout=5)
+            return super().upload_fileobj(fileobj, bucket, key, content_type)
+
+    if backend == "s3":
+        _S3Recorder.instances = []
+        monkeypatch.setattr("src.core.s3_client.S3StorageHelper", SlowS3)
+    else:
+        _SupabaseRecorder.instances = []
+        _patch_supabase_helper(monkeypatch, SlowSupabase)
+
+    deleted: list[tuple[Any, ...]] = []
+
+    def _record_delete(*identity: Any) -> None:
+        deleted.append(identity)
+
+    setattr(service, "_delete_stored_object", _record_delete)
+
+    task = asyncio.create_task(
+        service.upload_file(
+            cast(Any, _ChunkedUpload(b"cancel me mid-upload")),
+            "Sample",
+            cast(Any, SimpleNamespace(id=uuid.uuid4())),
+            cast(Any, SimpleNamespace(id=uuid.uuid4())),
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(deleted) == 1
+    stored_backend, storage_path, _file_path = deleted[0]
+    assert stored_backend == backend and storage_path
+    assert not list(tmp_path.glob("upload_*.bin"))

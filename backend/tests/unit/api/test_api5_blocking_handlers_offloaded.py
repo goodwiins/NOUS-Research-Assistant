@@ -123,3 +123,30 @@ def test_evidence_save_rolls_back_on_failure(monkeypatch: pytest.MonkeyPatch) ->
 
     db.rollback.assert_called_once()
     db.commit.assert_not_called()
+
+
+def test_evaluation_job_is_refreshed_after_its_last_commit() -> None:
+    """The handler reads job.id/name/status/created_at on the event loop;
+    the last commit expires them, so the reload must happen in the thread."""
+    from src.services.evaluation.rag_evaluation_service import (
+        EvaluationRequest,
+        EvaluationType,
+        rag_evaluation_service,
+    )
+
+    db = MagicMock()
+    request = EvaluationRequest(
+        name="n",
+        description="d",
+        evaluation_type=list(EvaluationType)[0],
+        dataset=[],
+        parameters={},
+        user_id="anonymous",
+        organization_id="org",
+    )
+
+    rag_evaluation_service._create_evaluation_job_sync(request, db)
+
+    calls = [name for name, _args, _kwargs in db.method_calls]
+    last_commit = max(i for i, name in enumerate(calls) if name == "commit")
+    assert "refresh" in calls[last_commit + 1 :]

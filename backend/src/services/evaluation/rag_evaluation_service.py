@@ -167,6 +167,10 @@ class RAGEvaluationService:
 
             db.add(dataset)
             db.commit()
+            # The commit expired ``job``; reload it here, in the worker
+            # thread, so the async caller's attribute reads don't lazy-load
+            # on the event loop.
+            db.refresh(job)
 
             logger.info(
                 f"Created evaluation job {job.id} with {len(request.dataset)} items"
