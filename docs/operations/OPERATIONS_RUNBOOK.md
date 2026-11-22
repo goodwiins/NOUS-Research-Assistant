@@ -448,7 +448,7 @@ docker-compose pull
 
 # Test disaster recovery
 echo "Testing disaster recovery..."
-./scripts/backup/disaster_recovery.py --dry-run
+./scripts/backup/disaster_recovery.py --components database uploads --dry-run
 
 # Performance optimization
 echo "Optimizing performance..."
