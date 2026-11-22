@@ -16,7 +16,9 @@ This document outlines the comprehensive migration strategy for implementing the
 - **Risk**: Low
 
 **Steps**:
-1. Deploy migration `007_knowledge_graph_analytics_dashboard.sql`
+1. Apply the schema with `alembic upgrade head` (the standalone
+   `007_knowledge_graph_analytics_dashboard.sql` was deleted on 2026-11-22,
+   GOO-685; it never applied)
 2. Create indexes and partitions
 3. Set up materialized views
 4. Configure Row Level Security policies

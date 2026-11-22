@@ -121,8 +121,15 @@ Provides comprehensive test infrastructure including:
 ### Prerequisites
 
 1. **Docker**: Required for test database and Redis containers
-2. **Python Dependencies**: Install from `requirements.txt`
-3. **Node.js Dependencies**: Install in `frontend/` directory
+2. **Backend requirements, installed first**: `run_tests.py` builds the test
+   schema with `alembic upgrade head`, and `backend/alembic/env.py` imports the
+   whole backend model layer. Install them in the interpreter that runs the
+   harness before starting it, e.g.
+   `pip install -r backend/requirements-cpu-lock.txt`. The harness's own
+   dependency step runs after the schema step and installs only this
+   directory's `requirements.txt`.
+3. **Python Dependencies**: Install from `requirements.txt`
+4. **Node.js Dependencies**: Install in `frontend/` directory
 
 ### Environment Setup
 

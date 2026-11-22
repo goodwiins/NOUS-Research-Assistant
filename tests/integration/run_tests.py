@@ -35,10 +35,18 @@ class IntegrationTestRunner:
     """Comprehensive integration test runner"""
 
     def apply_schema(self, database_url: str = TEST_DATABASE_URL) -> bool:
-        """Run `alembic upgrade head` against the test database; False on failure."""
-        # alembic/env.py prefers SUPABASE_DB_URL, which must never point the
-        # upgrade at a real database.
-        env = {k: v for k, v in os.environ.items() if k != "SUPABASE_DB_URL"}
+        """Run `alembic upgrade head` against the test database; False on failure.
+
+        alembic/env.py imports the whole backend model layer, so the backend
+        requirements (backend/requirements*.txt) must already be installed in
+        this interpreter. This step runs before install_dependencies(), which
+        only installs tests/integration/requirements.txt.
+        """
+        env = dict(os.environ)
+        # alembic/env.py prefers SUPABASE_DB_URL. Set it empty rather than
+        # deleting it: env.py's `or` falls through to DATABASE_URL, and a later
+        # load_dotenv (override=False) cannot put a real URL back.
+        env["SUPABASE_DB_URL"] = ""
         env["DATABASE_URL"] = database_url
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
@@ -49,8 +57,14 @@ class IntegrationTestRunner:
         )
         if result.returncode != 0:
             tail = "\n".join((result.stderr or "").strip().splitlines()[-20:])
+            hint = ""
+            if "ModuleNotFoundError" in tail:
+                hint = (
+                    " (install the backend requirements first, e.g."
+                    " pip install -r backend/requirements-cpu-lock.txt)"
+                )
             self.logger.error(
-                f"alembic upgrade head failed (exit {result.returncode}): {tail}"
+                f"alembic upgrade head failed (exit {result.returncode}){hint}: {tail}"
             )
             return False
         self.logger.info("Schema built with alembic upgrade head")

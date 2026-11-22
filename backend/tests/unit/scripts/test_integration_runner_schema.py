@@ -78,7 +78,24 @@ def test_supabase_url_cannot_redirect_the_upgrade(
     rec = Recorder()
     monkeypatch.setattr(runner_mod.subprocess, "run", rec)
     _runner().apply_schema()
-    assert "SUPABASE_DB_URL" not in rec.calls[0]["env"]
+    # Present but empty: env.py's `or` falls through to DATABASE_URL, and a
+    # later load_dotenv (override=False) cannot put a real value back.
+    assert rec.calls[0]["env"]["SUPABASE_DB_URL"] == ""
+
+
+def test_missing_backend_requirements_are_named_in_the_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def no_deps(cmd: List[str], **_kwargs: Any) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            cmd, 1, "", "ModuleNotFoundError: No module named 'sqlalchemy'"
+        )
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", no_deps)
+    runner = _runner()
+    with caplog.at_level("ERROR"):
+        assert runner.apply_schema() is False
+    assert "backend/requirements" in caplog.text
 
 
 def test_failed_upgrade_fails_setup(monkeypatch: pytest.MonkeyPatch) -> None:
