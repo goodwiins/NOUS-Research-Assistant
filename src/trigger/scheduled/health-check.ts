@@ -1,6 +1,9 @@
 import { logger, schedules } from "@trigger.dev/sdk";
 import { backendClient, BackendApiError } from "../_lib/backend-client";
-import { HealthCheckResponseSchema } from "../_lib/schemas";
+import {
+  HealthCheckResponseSchema,
+  WorkerHealthResponseSchema,
+} from "../_lib/schemas";
 
 export const systemHealthMonitor = schedules.task({
   id: "system-health-monitor",
@@ -25,9 +28,13 @@ export const systemHealthMonitor = schedules.task({
 
     try {
       const workers = await backendClient.get(
-        "/api/v1/infrastructure/workers/health",
+        "/api/v1/workers/health",
+        WorkerHealthResponseSchema,
       );
-      results.workers = { status: "healthy", detail: workers };
+      // A 200 can still report unhealthy workers; read the verdict.
+      results.workers = workers.healthy
+        ? { status: "healthy", detail: workers }
+        : { status: "unhealthy", detail: workers };
     } catch (err) {
       const message =
         err instanceof BackendApiError ? `HTTP ${err.status}` : String(err);
