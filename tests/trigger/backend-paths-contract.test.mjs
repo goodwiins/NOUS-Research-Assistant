@@ -21,21 +21,9 @@ const openapi = JSON.parse(readFileSync(join(root, "backend/openapi.json"), "utf
 // Calls with no equivalent backend route today. Each needs a product decision
 // (rebuild against a real endpoint, or retire the job), not a path rename.
 // Keep this list exact: an entry that starts matching, or a new missing call,
-// fails the test.
-const KNOWN_MISSING = new Map([
-  [
-    "POST /api/v2/documents/upload/single",
-    "github-push: there is no JSON upload route; the only upload is multipart POST /api/v1/files/upload",
-  ],
-  [
-    "GET /api/v1/search/vectors/model-info",
-    "embedding-regeneration: the vector-store routes were removed",
-  ],
-  [
-    "POST /api/v1/search/vectors/regenerate",
-    "embedding-regeneration: the vector-store routes were removed",
-  ],
-]);
+// fails the test. (github-push and embedding-regeneration were retired in
+// GOO-678 for this reason.)
+const KNOWN_MISSING = new Map();
 
 function* tsFiles(dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
