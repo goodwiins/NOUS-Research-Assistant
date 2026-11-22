@@ -427,15 +427,49 @@ kubectl rollout restart deployment/postgres -n knowledge-graph-analytics
 #### Scenario 3: Full Cluster Recovery
 
 ```bash
-# Restore from Velero backup
-velero restore create --from-backup <backup-name> --namespace knowledge-graph-analytics
+NS=knowledge-graph-analytics   # the script's NAMESPACE
 
-# Restore application data
+# 1. Restore from the Velero backup. It contains no Secrets.
+velero restore create --from-backup <backup-name> --namespace "$NS"
+
+# 2. Re-create the Infisical bootstrap Secret. App secrets come from
+#    InfisicalSecret CRs (templates/infisical-secrets.yaml), and the operator
+#    authenticates with the manually created Secret infisical-universal-auth.
+#    Run the "Bootstrap commands" block in
+#    infrastructure/kubernetes/infisical-bootstrap.md for "$NS".
+
+# 3. Wait for the operator to resync (it reconciles within about 60s), then
+#    check that the CRs are synced and the native Secrets exist again.
+kubectl get infisicalsecrets -n "$NS"
+kubectl describe infisicalsecret -n "$NS" <name>   # if one is not synced
+
+# 4. Only aws-database-credentials comes from External Secrets Operator
+#    (templates/aws-rds-secret.yaml); ESO rebuilds it from Secrets Manager.
+kubectl get externalsecret -n "$NS"
+
+# 5. Recover the Helm release record (see the note below)
+helm upgrade --install knowledge-graph-analytics \
+  infrastructure/helm/knowledge-graph-analytics \
+  -n "$NS" -f <the values files used for this cluster>
+
+# 6. Restore application data. PostgreSQL loads only into an EMPTY ragdb:
+#    stop every writer and drop/recreate ragdb first, exactly as in
+#    "PostgreSQL Database Recovery" in RUNBOOKS.md. Redis is copied into the
+#    pod but not loaded; Neo4j, configs and uploads are listed as SKIPPED.
 ./backup-and-restore.sh restore <backup-id>
 
 # Verify application functionality
-kubectl get pods -n knowledge-graph-analytics
+kubectl get pods -n "$NS"
 ```
+
+**Secrets and Helm history.** Velero backups run with
+`--exclude-resources secrets`, so no credential is ever written to the backup
+bucket. That includes `infisical-universal-auth`, the one Secret nothing
+re-creates automatically, which is why step 2 is manual. Helm 3 stores its
+release records as Secrets (`sh.helm.release.v1.<release>.v<n>`), so a
+restored namespace has no Helm history: `helm list` is empty and
+`helm rollback` has nothing to roll back to. Step 5 re-creates the release
+from the chart and values in git; the history restarts at revision 1.
 
 ### 3. Backup Testing
 

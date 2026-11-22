@@ -9,8 +9,9 @@
 set -euo pipefail
 
 # Backups hold database contents and Helm values: keep every local file
-# owner-only. Kubernetes Secrets are never backed up here; they are restored
-# from the secret manager, not from backups.
+# owner-only. Kubernetes Secrets are never backed up here, neither in the
+# config dump nor in the Velero backup; after a restore, re-create them from
+# the secret manager.
 umask 077
 
 # Configuration
@@ -328,6 +329,7 @@ create_velero_backup() {
         velero create backup "$backup_name" \
             --namespace "$NAMESPACE" \
             --include-namespaces "$NAMESPACE" \
+            --exclude-resources secrets \
             --default-volumes-to-restic=false \
             --wait
 
@@ -350,11 +352,20 @@ restore_backup() {
         log_error "Backup ID is required for restore"
         return 1
     fi
+    # IDs are the TIMESTAMP used at backup time; reject anything else so it
+    # cannot widen the S3 filter or escape the restore directory.
+    if [[ ! "$backup_id" =~ ^[0-9]{8}_[0-9]{6}$ ]]; then
+        log_error "Invalid backup ID '$backup_id' (expected YYYYMMDD_HHMMSS)"
+        return 1
+    fi
 
     log_info "Starting restore from backup: $backup_id"
 
-    # Download backup files from S3
+    # Download backup files from S3. The directory holds plaintext dumps, so
+    # it is removed when the script exits, whatever the outcome.
     local restore_dir="$BACKUP_DIR/restore_${backup_id}"
+    RESTORE_DIR_TO_CLEAN="$restore_dir"
+    trap 'rm -rf -- "${RESTORE_DIR_TO_CLEAN:-}"' EXIT
     mkdir -p "$restore_dir"
 
     # List available backups
@@ -362,35 +373,115 @@ restore_backup() {
         log_info "Available backups in S3:"
         aws s3 ls "s3://$S3_BUCKET/backups/" --recursive
 
-        # Download backup files
+        # Uploads live at backups/<component>/<component>_backup_<id>.<ext>,
+        # so download every component key for this id.
         log_info "Downloading backup files for: $backup_id"
-        aws s3 sync "s3://$S3_BUCKET/backups/$backup_id" "$restore_dir/"
+        aws s3 sync "s3://$S3_BUCKET/backups/" "$restore_dir/" \
+            --exclude "*" --include "*_${backup_id}.*"
     else
         log_error "AWS credentials not configured for restore"
         return 1
     fi
 
-    # Restore databases
-    log_info "Restoring databases..."
+    if ! find "$restore_dir" -type f -name "*_${backup_id}.*" | grep -q .; then
+        log_error "No backup files match ID $backup_id in s3://$S3_BUCKET/backups/; nothing restored"
+        return 1
+    fi
 
-    # Restore PostgreSQL
-    if [ -f "$restore_dir/postgres/postgres_backup_${backup_id}.sql.gz" ]; then
+    # A full backup has all three; say loudly which ones this one lacks.
+    local component
+    for component in postgres redis neo4j; do
+        if ! find "$restore_dir/$component" -type f -name "*_${backup_id}.*" 2>/dev/null | grep -q .; then
+            log_warning "MISSING from backup $backup_id: $component (it will not be restored)"
+        fi
+    done
+
+    local pg_file="$restore_dir/postgres/postgres_backup_${backup_id}.sql.gz"
+    local redis_file="$restore_dir/redis/redis_backup_${backup_id}.rdb.gz"
+    local redis_pod=""
+
+    # Check the preconditions of every component before applying any of them,
+    # so a failure cannot leave a half-restored system.
+    log_info "Checking restore preconditions..."
+    if [ -f "$pg_file" ]; then
+        if ! gzip -t "$pg_file"; then
+            log_error "PostgreSQL dump is corrupt: $pg_file; nothing restored"
+            return 1
+        fi
+        # The dump is a plain pg_dump without --clean: loading it into a
+        # populated database collides with existing objects. Require an empty
+        # target instead of guessing what to drop. Count base and partitioned
+        # tables only: views and extension-owned tables do not make it populated.
+        local table_count
+        if ! table_count=$(kubectl exec -n "$NAMESPACE" deployment/postgres -- \
+            psql -U raguser -d ragdb -tAc \
+            "SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')"); then
+            log_error "Cannot query the target PostgreSQL database; nothing restored"
+            return 1
+        fi
+        table_count="${table_count//[[:space:]]/}"
+        if [ "$table_count" != "0" ]; then
+            log_error "Target database ragdb is not empty ($table_count tables). The dump has no DROP statements: scale the backend, workers and migrate job to 0, drop and recreate ragdb (see RUNBOOKS.md), then re-run. Nothing restored."
+            return 1
+        fi
+    fi
+    if [ -f "$redis_file" ]; then
+        if ! gzip -t "$redis_file"; then
+            log_error "Redis snapshot is corrupt: $redis_file; nothing restored"
+            return 1
+        fi
+        redis_pod=$(kubectl get pods -n "$NAMESPACE" -l app=redis -o jsonpath='{.items[0].metadata.name}')
+        if [ -z "$redis_pod" ]; then
+            log_error "Redis pod not found in $NAMESPACE; nothing restored"
+            return 1
+        fi
+    fi
+
+    local restored=0
+
+    # Restore PostgreSQL in one transaction that stops at the first error.
+    if [ -f "$pg_file" ]; then
         log_info "Restoring PostgreSQL database..."
-        gunzip -c "$restore_dir/postgres/postgres_backup_${backup_id}.sql.gz" | kubectl exec -i -n "$NAMESPACE" deployment/postgres -- psql -U raguser -d ragdb
+        if ! gunzip -c "$pg_file" | kubectl exec -i -n "$NAMESPACE" deployment/postgres -- \
+            psql -U raguser -d ragdb -v ON_ERROR_STOP=1 --single-transaction; then
+            log_error "PostgreSQL restore failed; the transaction was rolled back"
+            return 1
+        fi
+        restored=$((restored + 1))
         log_success "PostgreSQL restore completed"
     fi
 
-    # Restore Redis
-    if [ -f "$restore_dir/redis/redis_backup_${backup_id}.rdb.gz" ]; then
-        log_info "Restoring Redis data..."
-        # Note: Redis restore requires service restart
-        kubectl cp "$restore_dir/redis/redis_backup_${backup_id}.rdb.gz" temp_redis_backup.rdb.gz
-        gunzip temp_redis_backup.rdb.gz
-        # Implementation would depend on Redis setup
-        log_warning "Redis restore requires manual intervention"
+    # Stage the Redis snapshot in the pod. Loading it means replacing dump.rdb
+    # while Redis is stopped, which depends on the deployment: left manual.
+    if [ -f "$redis_file" ]; then
+        local redis_rdb="$restore_dir/redis/redis_backup_${backup_id}.rdb"
+        local redis_target="/tmp/redis_restore_${backup_id}.rdb"
+        gunzip -c "$redis_file" > "$redis_rdb"
+        if ! kubectl cp "$redis_rdb" "$NAMESPACE/$redis_pod:$redis_target"; then
+            if [ "$restored" -gt 0 ]; then
+                log_error "Copying the Redis snapshot into $redis_pod failed. PostgreSQL WAS ALREADY RESTORED from $backup_id; do not re-run the restore against it. Copy the Redis snapshot by hand."
+            else
+                log_error "Copying the Redis snapshot into $redis_pod failed"
+            fi
+            return 1
+        fi
+        log_warning "Redis snapshot copied to $redis_pod:$redis_target but NOT loaded: stop Redis, replace dump.rdb in its data dir, then restart it."
     fi
 
-    log_success "Restore process initiated. Please verify application functionality."
+    # Neo4j, Kubernetes configs and uploads are downloaded but not restored.
+    local skipped
+    skipped=$(find "$restore_dir" -type f -name "*_${backup_id}.*" \
+        ! -path "$restore_dir/postgres/*" ! -path "$restore_dir/redis/*" | sed "s|^$restore_dir/||")
+    if [ -n "$skipped" ]; then
+        log_warning "SKIPPED, this script does not restore these components; restore them by hand:"
+        printf '%s\n' "$skipped" | sed 's/^/    /'
+    fi
+
+    if [ "$restored" -eq 0 ]; then
+        log_error "No component was restored for backup $backup_id"
+        return 1
+    fi
+    log_success "Restored $restored component(s) from backup $backup_id. Re-create Secrets from the secret manager, then verify the application."
 }
 
 # List available backups
@@ -499,8 +590,8 @@ Components backed up:
     - Neo4j graph database
     - Kubernetes configurations (Secrets are NOT included; restore them
       from the secret manager)
+    - Velero cluster backup (also excludes Secrets: --exclude-resources secrets)
     - Application files
-    - Velero cluster backup
 
 Environment:
     BACKUP_DIR           Local staging dir (default: a fresh mktemp -d, mode 0700)
@@ -524,5 +615,7 @@ EOF
     esac
 }
 
-# Run main function with all arguments
-main "$@"
+# Run main unless sourced (tests source the script to call one function).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
