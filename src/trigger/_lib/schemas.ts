@@ -52,7 +52,7 @@ export const AgentExecutePayloadSchema = z.object({
   maxContextDocs: z.number().optional(),
   threadId: z.string().optional(),
   userId: z.string(),
-  accessToken: z.string(),
+  backendToken: z.string(),
 });
 
 export const ArxivBulkIngestPayloadSchema = z.object({

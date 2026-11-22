@@ -1,13 +1,44 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { triggerUpstreamError } from '@/lib/trigger-proxy';
 import { createClient } from '@/lib/supabase/server';
+import { createHmac } from 'node:crypto';
 
 const TRIGGER_API_URL =
   process.env.TRIGGER_API_URL ?? 'https://api.trigger.dev';
 const TRIGGER_SECRET_KEY = process.env.TRIGGER_SECRET_KEY;
 
-export async function POST(request: NextRequest) {
-  if (!TRIGGER_SECRET_KEY) {
+function agentTicket(userId: string): string {
+  const key = process.env.TRIGGER_AGENT_SIGNING_KEY;
+  if (!key || Buffer.byteLength(key) < 32) {
+    throw new Error('Trigger agent signing key is not configured');
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(
+    JSON.stringify({ alg: 'HS256', typ: 'JWT' })
+  ).toString('base64url');
+  const claims = Buffer.from(
+    JSON.stringify({
+      iss: 'nous-trigger',
+      aud: 'nous-backend',
+      sub: userId,
+      scope: 'trigger:agent',
+      iat: now,
+      exp: now + 90 * 60,
+    })
+  ).toString('base64url');
+  const signingInput = `${header}.${claims}`;
+  const signature = createHmac('sha256', key)
+    .update(signingInput)
+    .digest('base64url');
+  return `${signingInput}.${signature}`;
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  if (
+    !TRIGGER_SECRET_KEY ||
+    !process.env.TRIGGER_AGENT_SIGNING_KEY ||
+    Buffer.byteLength(process.env.TRIGGER_AGENT_SIGNING_KEY) < 32
+  ) {
     return NextResponse.json(
       { error: 'Trigger.dev not configured' },
       { status: 503 }
@@ -15,9 +46,7 @@ export async function POST(request: NextRequest) {
   }
 
   const supabase = await createClient();
-  // getUser() verifies the JWT with Supabase; getSession() only reads the
-  // (forgeable) cookie. Validate first, then pull the session for the access
-  // token we forward downstream.
+  // getUser() verifies the session with Supabase before we mint a scoped ticket.
   const {
     data: { user },
     error: authError,
@@ -25,13 +54,6 @@ export async function POST(request: NextRequest) {
   if (authError || !user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session?.access_token) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
   const body = await request.json();
 
   const payload = {
@@ -42,7 +64,7 @@ export async function POST(request: NextRequest) {
     maxContextDocs: body.max_context_docs,
     threadId: body.thread_id,
     userId: user.id,
-    accessToken: session.access_token,
+    backendToken: agentTicket(user.id),
   };
 
   const res = await fetch(

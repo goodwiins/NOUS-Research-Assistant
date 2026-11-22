@@ -23,6 +23,8 @@ file it as a proposal instead.
   exports, row by row, with the test (or open issue) behind each row.
 - **[api-contracts.md](api-contracts.md)** — the OpenAPI → generated
   TypeScript pipeline and the adopt-on-touch migration rule.
+- **[trigger-credentials.md](trigger-credentials.md)** — Trigger.dev agent
+  tickets, service identity, backend scopes, and environment configuration.
 - **[agent-approvals.md](agent-approvals.md)** — native approval receipts,
   exact-action claims, client migration, and checkpoint conformance tests.
 - **[gotchas.md](gotchas.md)** — operational invariants preserved from the
