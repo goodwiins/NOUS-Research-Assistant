@@ -21,4 +21,4 @@ viewer roles with write policies and destructive retention/partition code in it.
 | `ci-init/00_auth_schema.sql` | Init-script mount in `config/docker-compose/docker-compose.ci.yml`. |
 | `performance_optimization.sql`, `neo4j_performance.cypher`, `redis_optimization.conf` | `scripts/deploy_performance_optimizations.sh` (manual; see GOO-655). |
 | `redis_knowledge_graph_config.lua` | `scripts/init-redis-graph.sh` (manual). |
-| `migrations/` | Init-script mount in the manual analytics harness `tests/integration/run_tests.py`. Standalone SQL, not the Alembic chain. |
+| `migrations/` | Applied file by file with `psql -v ON_ERROR_STOP=1` (rollback scripts skipped) by the manual analytics harness `tests/integration/run_tests.py`. Standalone SQL, not the Alembic chain. |
