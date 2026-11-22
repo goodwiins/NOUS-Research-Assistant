@@ -28,7 +28,7 @@ from celery.exceptions import Ignore, SoftTimeLimitExceeded
 from pydantic import ValidationError
 
 from src.core.config import Settings
-from src.models.evaluation import EvaluationMetric, EvaluationStatus
+from src.models.evaluation import EvaluationJob, EvaluationMetric, EvaluationStatus
 from src.services.evaluation import rag_evaluation_service as svc_mod
 from src.tasks import evaluation_tasks as et
 
@@ -218,7 +218,177 @@ def test_batch_metric_keeps_its_own_query_when_an_earlier_one_fails(
     assert [e for e in events if e.startswith("add:")] == ["add:q2"]
     assert result["processed_queries"] == 1
     assert [c.args[0] for c in pipeline.await_args_list] == [["q1"], ["q2"]]
-    db.job.update_progress.assert_called_with(2)
+    # processed_count counts evaluated queries only, like the rag-triad task
+    # (GOO-689): the failed q1 is not counted.
+    assert [c.args for c in db.job.update_progress.call_args_list] == [(0,), (1,)]
+
+
+def test_batch_passes_its_job_to_the_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # evaluation_metrics.job_id is NOT NULL: without the job the pipeline's
+    # metric commit fails on Postgres and every query is dropped (GOO-689).
+    _batch_db(monkeypatch)
+    pipeline = AsyncMock(return_value=[_metrics(0.8)])
+    monkeypatch.setattr(et.rag_evaluation_service, "evaluate_search_pipeline", pipeline)
+
+    et.run_batch_evaluation.apply(args=("job-2", ["q1"]), task_id="task-A")
+
+    assert pipeline.await_args is not None
+    assert pipeline.await_args.kwargs["job_id"] == "job-2"
+
+
+def test_batch_metric_commit_failure_is_rolled_back_and_the_run_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, events = _batch_db(monkeypatch)
+
+    def commit() -> None:
+        events.append("commit")
+        if events.count("commit") == 2:  # the claim commits first; q1's fails
+            raise RuntimeError("metric insert failed")
+
+    db.commit.side_effect = commit
+    pipeline = AsyncMock(side_effect=[[_metrics(0.9)], [_metrics(0.7)]])
+    monkeypatch.setattr(et.rag_evaluation_service, "evaluate_search_pipeline", pipeline)
+
+    result = et.run_batch_evaluation.apply(
+        args=("job-2", ["q1", "q2"]), task_id="task-A"
+    ).result
+
+    # q1's failed commit is rolled back before q2 runs, and q2 is saved.
+    q1_commit = events.index("commit", events.index("add:q1"))
+    assert events[q1_commit + 1] == "rollback"
+    assert events.index("add:q2") > q1_commit
+    assert result["processed_queries"] == 1
+    assert result["status"] == "completed"
+
+
+async def test_pipeline_passes_the_job_to_the_triad_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hit = SimpleNamespace(content_preview="ctx", document_id="d1")
+    response = SimpleNamespace(
+        results=[hit], search_time_ms=1.0, model_dump=lambda: {"results": []}
+    )
+    monkeypatch.setattr(
+        svc_mod.hybrid_search_service, "search", MagicMock(return_value=response)
+    )
+    monkeypatch.setattr(svc_mod, "SessionLocal", MagicMock())
+    triad = AsyncMock(return_value=_metrics(0.8))
+    monkeypatch.setattr(
+        svc_mod.rag_evaluation_service, "run_rag_triad_evaluation", triad
+    )
+
+    await svc_mod.rag_evaluation_service.evaluate_search_pipeline(
+        ["q1"], "org", "user", job_id="job-2"
+    )
+
+    assert triad.await_args is not None
+    assert triad.await_args.args[1] == "job-2"
+
+
+@pytest.fixture
+def scores(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = svc_mod.rag_evaluation_service
+    for name in (
+        "_calculate_answer_relevancy",
+        "_calculate_faithfulness",
+        "_calculate_contextual_relevancy",
+        "_calculate_hallucination_rate",
+    ):
+        monkeypatch.setattr(service, name, AsyncMock(return_value=0.8))
+
+
+def _input() -> Any:
+    return svc_mod.RAGEvaluationInput(
+        query="q", generated_answer="a", retrieved_context=["c"]
+    )
+
+
+async def test_triad_without_a_job_scores_but_writes_nothing(scores: None) -> None:
+    # Chat and real-time quality scoring pass no job; the four metric rows
+    # need one (job_id NOT NULL), so they are not written at all.
+    db = MagicMock()
+
+    metrics = await svc_mod.rag_evaluation_service.run_rag_triad_evaluation(
+        _input(), None, "org", db
+    )
+
+    assert metrics.overall_score == pytest.approx(0.8)
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+
+
+async def test_triad_with_a_job_writes_four_metrics_for_it(
+    scores: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        svc_mod.rag_evaluation_service, "_get_threshold", lambda *a, **k: None
+    )
+    db = MagicMock()
+    added: list[Any] = []
+    db.add.side_effect = added.append
+
+    await svc_mod.rag_evaluation_service.run_rag_triad_evaluation(
+        _input(), "job-1", "org", db
+    )
+
+    assert [m.job_id for m in added] == ["job-1"] * 4
+    db.commit.assert_called_once()
+
+
+# ---- complete_job clears a stale failure message ----------------------------
+
+
+def test_complete_job_clears_the_error_message() -> None:
+    job = EvaluationJob(name="j", evaluation_type="rag_triad", parameters={})
+    job.start_job()
+    job.fail_job("Evaluation worker was lost mid-run")
+
+    job.complete_job(overall_score=0.9, success_rate=100.0)
+
+    assert job.status == EvaluationStatus.COMPLETED.value
+    assert job.error_message is None
+
+
+# ---- the real-time claim is serialized per task id --------------------------
+
+
+def test_real_time_locks_its_task_id_before_looking_for_a_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(None)
+    db.get_bind.return_value.dialect.name = "postgresql"
+    calls: list[str] = []
+    db.execute.side_effect = lambda stmt, params=None: calls.append(f"execute:{params}")
+    def query(*_: Any) -> MagicMock:
+        calls.append("query")
+        return MagicMock(**{"filter.return_value.first.return_value": None})
+
+    db.query.side_effect = query
+    monkeypatch.setattr(et, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        et.rag_evaluation_service,
+        "run_rag_triad_evaluation",
+        AsyncMock(return_value=MagicMock(overall_score=0.9)),
+    )
+
+    et.run_real_time_evaluation.apply(args=("q", "a", ["ctx"]), task_id="task-A")
+
+    assert calls[0] == "execute:{'key': 'evaluation:real_time:task-A'}"
+    assert calls[1] == "query"
+    [stmt] = [c.args[0] for c in db.execute.call_args_list]
+    assert "pg_advisory_xact_lock" in str(stmt)
+
+
+def test_real_time_lock_is_a_no_op_off_postgres() -> None:
+    db = MagicMock()
+    db.get_bind.return_value.dialect.name = "sqlite"
+
+    et._lock_real_time_delivery(db, "task-A")
+
+    db.execute.assert_not_called()
 
 
 async def test_search_pipeline_does_not_swallow_the_soft_time_limit(

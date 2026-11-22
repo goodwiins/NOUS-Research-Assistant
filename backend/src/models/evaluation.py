@@ -133,6 +133,9 @@ class EvaluationJob(BaseModel):
         """Mark job as completed"""
         self.status = EvaluationStatus.COMPLETED.value
         self.completed_at = datetime.now(dt_timezone.utc)
+        # A completed job has no failure; don't leave an earlier message (for
+        # example a worker-lost note) next to a COMPLETED status.
+        self.error_message = None
         if self.started_at:
             self.duration_seconds = (
                 self.completed_at - _as_utc(self.started_at)
