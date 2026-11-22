@@ -714,14 +714,20 @@ class ProcessingPipeline:
 
     async def process_entity_extraction(
         self, document: Document, text: str
-    ) -> List[Entity]:
-        """Extract entities from text using enhanced entity extraction service"""
+    ) -> Optional[List[Entity]]:
+        """Extract entities from text using enhanced entity extraction service.
+
+        Returns ``None`` when extraction errored, so the caller keeps the
+        document's existing entities instead of replacing them with nothing.
+        A failure to build the extractor (spaCy load) is not caught: it fails
+        the task, as it did when the extractor was built in ``__init__``.
+        """
+        extractor = self.entity_extractor
         try:
-            # Use the enhanced entity extraction service
-            entities = self.entity_extractor.extract_entities_from_text(document, text)
+            entities = extractor.extract_entities_from_text(document, text)
 
             # Get statistics about extracted entities
-            stats = self.entity_extractor.get_entity_statistics(entities)
+            stats = extractor.get_entity_statistics(entities)
             logger.info(f"Entity extraction stats for document {document.id}: {stats}")
 
             return entities
@@ -730,7 +736,7 @@ class ProcessingPipeline:
             logger.error(
                 f"Entity extraction failed for document {document.id}: {str(e)}"
             )
-            return []
+            return None
 
     async def process_embedding_generation(self, document: Document, text: str) -> str:
         """Generate embeddings for document text using Azure OpenAI"""

@@ -54,3 +54,30 @@ def test_extractor_can_be_replaced_for_tests() -> None:
     stub = MagicMock()
     pipeline.entity_extractor = stub
     assert pipeline.entity_extractor is stub
+
+
+def _pipeline() -> "mod.ProcessingPipeline":
+    with patch("src.services.documents.file_service.FileService"):
+        return mod.ProcessingPipeline(MagicMock())
+
+
+@pytest.mark.unit
+async def test_extractor_load_failure_is_not_swallowed() -> None:
+    """Develop built the extractor in __init__, so a spaCy load failure failed
+    the task. Lazily built, it must still raise, not come back as []."""
+    pipeline = _pipeline()
+    with patch.object(
+        mod, "EntityExtractionService", side_effect=OSError("model missing")
+    ):
+        with pytest.raises(OSError):
+            await pipeline.process_entity_extraction(MagicMock(), "text")
+
+
+@pytest.mark.unit
+async def test_extraction_error_is_reported_as_none_not_empty() -> None:
+    pipeline = _pipeline()
+    extractor = MagicMock()
+    extractor.extract_entities_from_text.side_effect = RuntimeError("nlp broke")
+    pipeline.entity_extractor = extractor
+
+    assert await pipeline.process_entity_extraction(MagicMock(), "text") is None
