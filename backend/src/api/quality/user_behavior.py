@@ -51,9 +51,9 @@ async def _off_loop(
 router = APIRouter()
 
 _EXPORT_DATA_TYPES = frozenset({"user_behavior", "content_usage"})
-# Formats the export actually produces. "csv" (the schema default) returns
-# each table as CSV text; anything else is rejected instead of being echoed
-# back over JSON data.
+# Formats the export actually produces. "json" (the schema default) returns
+# the structured rows; "csv" returns each table as CSV text. Anything else is
+# rejected instead of being echoed back over JSON data.
 _EXPORT_FORMATS = frozenset({"json", "csv"})
 # Same ceiling as the routes' ``days_back`` query parameter (le=365), plus a
 # day of slack for calendar-aligned windows.

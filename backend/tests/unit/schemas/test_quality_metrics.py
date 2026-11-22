@@ -2,22 +2,23 @@
 Unit tests for quality metrics schemas
 """
 
-import pytest
 from datetime import datetime
+
+import pytest
 from pydantic import ValidationError
 
 from src.schemas.quality_metrics import (
-    QualityMetricResponse,
+    AlertAcknowledgmentRequest,
+    AnalyticsExportRequest,
     QualityAlertResponse,
+    QualityMetricResponse,
+    QualityReportRequest,
     QualityThresholdCreate,
     QualityThresholdResponse,
-    AlertAcknowledgmentRequest,
     SearchEventCreate,
     SearchEventUpdate,
     SessionCreate,
-    QualityReportRequest,
     SystemHealthCheck,
-    AnalyticsExportRequest,
 )
 
 
@@ -425,7 +426,7 @@ class TestAnalyticsExportRequest:
         }
 
         export_req = AnalyticsExportRequest(**data)
-        assert export_req.format == "csv"  # Default
+        assert export_req.format == "json"  # Default (GOO-691)
         assert export_req.filters is None
         assert export_req.include_metadata is True  # Default
 
