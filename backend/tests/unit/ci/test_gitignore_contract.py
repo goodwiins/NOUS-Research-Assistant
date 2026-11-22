@@ -58,6 +58,7 @@ def test_verification_binaries_are_ignored(path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        ".env.prod",
         ".env.production",
         ".env.staging",
         "scripts/seed-secrets.env",

@@ -47,7 +47,10 @@ def _bash() -> str:
 
 
 def _run(
-    tmp_path: Path, args: list[str], extra_env: Optional[Dict[str, str]] = None
+    tmp_path: Path,
+    args: list[str],
+    extra_env: Optional[Dict[str, str]] = None,
+    script: Path = SCRIPT,
 ) -> Tuple[subprocess.CompletedProcess, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -66,7 +69,7 @@ def _run(
     }
     env.update(extra_env or {})
     result = subprocess.run(
-        [_bash(), str(SCRIPT), *args],
+        [_bash(), str(script), *args],
         capture_output=True,
         text=True,
         env=env,
@@ -94,25 +97,45 @@ def test_every_prod_spelling_requires_explicit_confirmation(
     assert calls == "", "nothing may run before the production gate"
 
 
+PROD_ENV = {
+    "ENVIRONMENT": "production",
+    "CONFIRM_PRODUCTION": "yes",
+    "SECRET_KEY": "x",
+    "DATABASE_URL": "postgresql://stub/db",
+    "REDIS_URL": "redis://stub",
+}
+
+
+def _isolated_script(tmp_path: Path) -> Path:
+    """A copy of deploy.sh whose PROJECT_ROOT is a scratch dir, not the repo.
+
+    A real .env.prod in a developer checkout must not change the result.
+    """
+    scripts = tmp_path / "repo" / "scripts"
+    scripts.mkdir(parents=True)
+    copy = scripts / "deploy.sh"
+    shutil.copy2(SCRIPT, copy)
+    return copy
+
+
 def test_production_without_env_file_is_refused(tmp_path: Path) -> None:
     # Even with the required variables in the shell, prod must not deploy
     # without its .env.prod file (renamed from .env.production).
-    assert not (REPO_ROOT / ".env.prod").exists()
-    result, calls = _run(
-        tmp_path,
-        ["deploy"],
-        {
-            "ENVIRONMENT": "production",
-            "CONFIRM_PRODUCTION": "yes",
-            "SECRET_KEY": "x",
-            "DATABASE_URL": "postgresql://stub/db",
-            "REDIS_URL": "redis://stub",
-        },
-    )
+    script = _isolated_script(tmp_path)
+    result, calls = _run(tmp_path, ["deploy"], PROD_ENV, script=script)
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
-    assert ".env.prod" in output
+    assert "Production environment file not found" in output
     assert calls == "", "nothing may run when the prod env file is missing"
+
+
+def test_production_env_file_is_read_from_the_project_root(tmp_path: Path) -> None:
+    script = _isolated_script(tmp_path)
+    (tmp_path / "repo" / ".env.prod").write_text("APP_MARKER=1\n")
+    result, _calls = _run(tmp_path, ["deploy"], PROD_ENV, script=script)
+    output = result.stdout + result.stderr
+    assert "Production environment file not found" not in output
+    assert "Loaded environment from" in output and ".env.prod" in output
 
 
 def test_ci_environment_is_allowed() -> None:
