@@ -16,6 +16,7 @@ from celery.exceptions import Ignore, SoftTimeLimitExceeded
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from celery import Celery, current_app
+from sqlalchemy import text
 
 from src.core.config import settings
 from src.core.database import SessionLocal, get_db
@@ -175,6 +176,25 @@ def _skip_delivery(task: Any, response: Dict[str, Any]) -> NoReturn:
                 exc_info=True,
             )
     raise Ignore()
+
+
+def _lock_real_time_delivery(db: Any, task_id: str) -> None:
+    """Take a transaction-scoped Postgres advisory lock on a real-time task id.
+
+    ``run_real_time_evaluation`` creates its own job, so there is no row to
+    ``SELECT … FOR UPDATE`` before the job exists. The advisory lock gives the
+    same guarantee: a second delivery of the same task id waits here until
+    the first commits its job, then finds it. A unique index on
+    ``parameters->>'celery_task_id'`` would need a migration that fails on
+    any duplicate rows earlier redeliveries already wrote. Other databases
+    (SQLite in tests) have no advisory locks and skip this.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"evaluation:real_time:{task_id}"},
+    )
 
 
 def _start_claimed_job(job: Any, task_id: str | None) -> None:
@@ -462,14 +482,15 @@ def run_batch_evaluation(self, job_id: str, queries: List[str]):
                     str(job.user_id) if job.user_id else "anonymous",
                     search_type=job.parameters.get("search_type", "hybrid"),
                     limit=job.parameters.get("search_limit", 5),
+                    # The pipeline's per-query metric rows need the job:
+                    # evaluation_metrics.job_id is NOT NULL, and without it
+                    # every query failed its commit on Postgres and was dropped.
+                    job_id=job_id,
                 )
             )
-            job.update_progress(i + 1)
             if not results:
-                db.commit()
                 continue
             metrics = results[0]
-            metrics_results.append(metrics)
             try:
                 # R5-M25: metrics.metadata now carries generated_answer/
                 # retrieved_context (the writer side, rag_evaluation_
@@ -497,10 +518,18 @@ def run_batch_evaluation(self, job_id: str, queries: List[str]):
                 )
 
                 db.add(metric)
+                # processed_count counts evaluated (and saved) queries only,
+                # like the rag-triad task.
+                job.update_progress(len(metrics_results) + 1)
+                db.commit()
+                metrics_results.append(metrics)
 
             except Exception as metric_error:
+                # Roll back so the failed write doesn't poison the session
+                # for the remaining queries; the pipeline's own rows for this
+                # query were already committed by the service.
+                db.rollback()
                 logger.error(f"Error saving metric for query {i}: {str(metric_error)}")
-            db.commit()
 
         # Calculate overall metrics
         if metrics_results:
@@ -580,6 +609,10 @@ def run_real_time_evaluation(
         # delivery already exists.
         task_id = getattr(self.request, "id", None)
         if task_id:
+            # Serialize deliveries of this task id: held until the commit that
+            # creates (or fails) the job, so two concurrent deliveries can't
+            # both find no job and both create one.
+            _lock_real_time_delivery(db, task_id)
             existing = (
                 db.query(EvaluationJob)
                 .filter(

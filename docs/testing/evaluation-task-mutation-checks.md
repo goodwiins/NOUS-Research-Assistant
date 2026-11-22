@@ -41,3 +41,38 @@ Line numbers are for the GOO-684 branch.
 
 All 10 mutants failed at least one test. Every restore left the source as
 intended, and the four files were green again after the last restore.
+
+## GOO-689 (review of #2231), 2026-11-22
+
+Item 1 was first reproduced on a throwaway local PostgreSQL 14 cluster, built
+from the full model schema (`Base.metadata.create_all`). It ran on a Unix
+socket in a temporary directory and was deleted afterwards.
+`evaluation_metrics.job_id` is NOT NULL there. `evaluate_search_pipeline`
+returned 0 of 2 queries and wrote 0 rows, because each query's metric commit
+raised `NotNullViolation` and the pipeline's per-query handler dropped it.
+
+The real-Postgres tests live in
+`tests/unit/tasks/test_evaluation_metrics_postgres.py` and are skipped unless
+`ORCHESTRATION_TEST_DATABASE_URL` points at a disposable database. They ran
+here against that throwaway cluster.
+
+```sh
+# from backend/
+ORCHESTRATION_TEST_DATABASE_URL="${DISPOSABLE_PG_URL:?}" .venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/unit/tasks/test_evaluation_failure_paths.py \
+  tests/unit/tasks/test_evaluation_metrics_postgres.py \
+  tests/unit/tasks/test_evaluation_idempotency.py \
+  tests/unit/tasks/test_evaluation_worker_lost.py
+```
+
+| Guard (line) | Mutation | Observed mutant failure |
+|---|---|---|
+| Pipeline passes its job to the triad (`rag_evaluation_service.py:686`) | `None` (the develop shape) | `test_pipeline_with_a_job_writes_its_metrics` (Postgres): `NotNullViolation`, 0 results instead of 2. Also `test_pipeline_passes_the_job_to_the_triad_evaluation`. |
+| Triad writes nothing without a job (`rag_evaluation_service.py:229`) | `if False:` | `test_pipeline_without_a_job_returns_scores_and_writes_nothing` (Postgres): the scores are dropped. Also `test_triad_without_a_job_scores_but_writes_nothing`. |
+| Batch passes its job to the pipeline (`evaluation_tasks.py:489`) | the `job_id=` argument removed | `test_batch_passes_its_job_to_the_pipeline` |
+| `complete_job` clears the error (`models/evaluation.py:138`) | the line removed | `test_complete_job_clears_the_error_message`: the worker-lost text stays on a COMPLETED job. |
+| Real-time takes the task-id lock first (`evaluation_tasks.py:616`) | the call removed | `test_real_time_locks_its_task_id_before_looking_for_a_job`. The lock itself is proven by `test_real_time_task_lock_blocks_a_second_delivery` (Postgres). |
+| `processed_count` counts saved queries only (`evaluation_tasks.py:524`) | `update_progress(i + 1)` | `test_batch_metric_keeps_its_own_query_when_an_earlier_one_fails` |
+| Metric commit inside its `try`, with rollback (`evaluation_tasks.py:532`) | `db.rollback()` removed | `test_batch_metric_commit_failure_is_rolled_back_and_the_run_continues` |
+
+All 7 mutants failed at least one test, and every restore was green.
