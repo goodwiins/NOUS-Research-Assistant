@@ -67,8 +67,17 @@ def test_visibility_timeout_outlives_every_task_and_the_stale_claim_window() -> 
     visibility = celery_app.conf.broker_transport_options["visibility_timeout"]
     limits = _registered_hard_time_limits()
 
-    too_long = {name: limit for name, limit in limits.items() if limit >= visibility}
-    assert not too_long, f"tasks outlive the broker visibility timeout: {too_long}"
+    # Not just "<": a task that starts a little after delivery (queue wait
+    # after prefetch) and is then killed at its hard limit must still finish
+    # before the message becomes visible again (GOO-684).
+    headroom = 300
+    too_long = {
+        name: limit for name, limit in limits.items() if limit > visibility - headroom
+    }
+    assert not too_long, (
+        f"tasks leave under {headroom}s before the broker visibility timeout: "
+        f"{too_long}"
+    )
     assert visibility > DEFAULT_STALE_RUNNING_SECONDS
 
 

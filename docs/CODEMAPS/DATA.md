@@ -39,7 +39,7 @@ Roll back one: `alembic downgrade -1`
 
 ### Raw SQL migrations (`database/migrations/`)
 
-Legacy SQL files — used for PostgreSQL features (views, triggers, partitioning) that Alembic doesn't autogenerate. Applied manually or via deploy scripts. These have numeric prefix collisions (`001_*`, `007_*`, `008_*`) — **do not rely on filename order; read each file's header comment for application context.**
+Legacy standalone SQL that no runner applies; none of it applies to a clean database, because it assumes tables Alembic creates. The integration harness builds its schema with `alembic upgrade head`. The unreferenced files were deleted on 2026-11-22 (GOO-681); see [`database/README.md`](../../database/README.md) for why the rest are kept.
 
 Key files:
 
@@ -48,8 +48,6 @@ Key files:
 | `006_document_upload_schema.sql` | Document storage columns |
 | `007_analytics_schema.sql` | Analytics event tables |
 | `009_realtime_status_optimizations.sql` | Realtime status indexes |
-| `011_realtime_document_status_enhancements.sql` | Final realtime status schema |
-| `012_ai_document_qa_system.sql` | QA system tables |
 
 Also in `database/`:
 

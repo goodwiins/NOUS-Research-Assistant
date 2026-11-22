@@ -8,7 +8,18 @@ set -euo pipefail
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-ENVIRONMENT="${ENVIRONMENT:-staging}"
+# Canonicalize the environment against an allowlist so every spelling of
+# production hits the production gate and resolves to docker-compose.prod.yml.
+case "$(printf '%s' "${ENVIRONMENT:-staging}" | tr '[:upper:]' '[:lower:]')" in
+    prod|production) ENVIRONMENT="prod"; IS_PRODUCTION="true" ;;
+    staging) ENVIRONMENT="staging"; IS_PRODUCTION="false" ;;
+    dev|development) ENVIRONMENT="development"; IS_PRODUCTION="false" ;;
+    ci) ENVIRONMENT="ci"; IS_PRODUCTION="false" ;;
+    *)
+        echo "ERROR: unknown ENVIRONMENT='${ENVIRONMENT:-}'. Use staging, development, ci or prod." >&2
+        exit 2
+        ;;
+esac
 COMPOSE_FILE="docker-compose.${ENVIRONMENT}.yml"
 BLUE_GREEN_COMPOSE_FILE="docker-compose.${ENVIRONMENT}-blue-green.yml"
 BLUE_GREEN_STATE_FILE="${PROJECT_ROOT}/.blue-green-state-${ENVIRONMENT}"
@@ -71,6 +82,8 @@ load_env() {
         source "$env_file"
         set +a
         log "Loaded environment from: $env_file"
+    elif [[ "$IS_PRODUCTION" == "true" ]]; then
+        error_exit "Production environment file not found: $env_file (production reads .env.prod, not .env.production)"
     else
         warning "Environment file not found: $env_file"
     fi
@@ -92,20 +105,18 @@ create_backup() {
 
     log "Creating backup before deployment..."
 
-    local backup_dir="${PROJECT_ROOT}/backups/pre-deploy-$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$backup_dir"
+    local backup_dir
+    backup_dir="${PROJECT_ROOT}/backups/pre-deploy-$(date +%Y%m%d_%H%M%S)"
+    # The backup holds .env.* files: keep it owner-only (backups/ is gitignored).
+    (umask 077 && mkdir -p "$backup_dir")
 
-    # Backup database
+    # Backup database. A deploy must not continue without a backup.
     log "Backing up database..."
-    "${SCRIPT_DIR}/backup/backup_database.sh" || warning "Database backup failed"
-
-    # Backup vector store
-    log "Backing up vector store..."
-    python3 "${SCRIPT_DIR}/backup/backup_vector_store.py" || warning "Vector store backup failed"
+    "${SCRIPT_DIR}/backup/backup_database.sh" || error_exit "Database backup failed; aborting before any change"
 
     # Backup configuration files
     log "Backing up configuration files..."
-    cp -r "${PROJECT_ROOT}/.env."* "$backup_dir/" 2>/dev/null || true
+    (umask 077 && cp -r "${PROJECT_ROOT}/.env."* "$backup_dir/" 2>/dev/null) || true
     cp -r "${PROJECT_ROOT}/nginx" "$backup_dir/" 2>/dev/null || true
 
     success "Backup created: $backup_dir"
@@ -157,13 +168,11 @@ deploy_standard() {
 
     cd "$PROJECT_ROOT"
 
-    # Stop existing services
-    log "Stopping existing services..."
-    docker-compose -f "$COMPOSE_FILE" down || true
-
-    # Start new services
-    log "Starting new services..."
-    docker-compose -f "$COMPOSE_FILE" up -d || error_exit "Failed to start services"
+    # Recreate only changed containers. Never `down` first: a failed `up`
+    # would then leave the environment with nothing running. No
+    # --remove-orphans: the blue-green containers share this compose project.
+    log "Updating services..."
+    docker-compose -f "$COMPOSE_FILE" up -d || error_exit "Failed to start services; previous containers were left running where possible"
 
     # Wait for services to be ready
     wait_for_health_check
@@ -420,8 +429,7 @@ cleanup() {
 rollback() {
     log "Starting rollback..."
 
-    local rollback_to="${1:-previous}"
-    local backup_dir="${2:-}"
+    local backup_dir="${1:-}"
 
     if [[ -z "$backup_dir" ]]; then
         # Find most recent backup
@@ -431,29 +439,29 @@ rollback() {
         fi
     fi
 
-    log "Rolling back to backup: $backup_dir"
+    if [[ ! -d "$backup_dir" ]]; then
+        error_exit "Backup directory not found: $backup_dir"
+    fi
 
-    # Stop current services
-    docker-compose -f "$COMPOSE_FILE" down || true
+    log "Rolling back configuration from backup: $backup_dir"
 
     # Restore configuration files
     if [[ -f "$backup_dir/.env.${ENVIRONMENT}" ]]; then
         cp "$backup_dir/.env.${ENVIRONMENT}" "${PROJECT_ROOT}/"
+    else
+        warning "No .env.${ENVIRONMENT} in $backup_dir; configuration unchanged"
     fi
 
-    # Restore database
-    if [[ -f "$backup_dir"/*multimodal_rag_backup*.sql.gz ]]; then
-        log "Restoring database from backup..."
-        # Database restore logic here
-    fi
-
-    # Start services
+    # Recreate services with the restored configuration (no `down` first).
     docker-compose -f "$COMPOSE_FILE" up -d || error_exit "Failed to start services after rollback"
 
-    # Wait for health check
     wait_for_health_check
 
-    success "Rollback completed successfully"
+    # This command does not restore the database or roll back images.
+    warning "Configuration rolled back. The DATABASE WAS NOT RESTORED and images were not rolled back."
+    warning "To restore the database: scripts/backup/disaster_recovery.py --components database"
+    error "PARTIAL ROLLBACK: configuration only. Exiting with status 3."
+    exit 3
 }
 
 # Get deployment status
@@ -480,7 +488,7 @@ Usage: $0 [COMMAND] [OPTIONS]
 Commands:
     deploy           Deploy the application
     deploy-blue-green    Deploy using blue-green strategy
-    rollback [backup]    Rollback to previous version or specific backup
+    rollback [backup]    Roll back .env config to the latest or given backup; does NOT restore the database, exits 3
     status           Show deployment status
     test            Run pre-deployment tests
     backup          Create backup
@@ -488,24 +496,38 @@ Commands:
     help            Show this help message
 
 Environment Variables:
-    ENVIRONMENT      Target environment (staging, production)
+    ENVIRONMENT      Target environment: staging, development, prod (or production)
     BACKUP_BEFORE_DEPLOY  Create backup before deployment (true/false)
     HEALTH_CHECK_URL  Health check URL
     MAX_RETRIES      Maximum health check retries
     RETRY_DELAY      Delay between health check retries
+    CONFIRM_PRODUCTION  Must be "yes" to deploy or roll back production
 
 Examples:
     $0 deploy                           # Deploy to staging
-    $0 ENVIRONMENT=production deploy     # Deploy to production
+    ENVIRONMENT=production CONFIRM_PRODUCTION=yes $0 deploy  # Deploy to production
     $0 deploy-blue-green                # Blue-green deployment
-    $0 rollback                         # Rollback to previous version
+    $0 rollback                         # Roll back config to the latest pre-deploy backup
     $0 rollback /backups/pre-deploy-20231201_120000  # Rollback to specific backup
 EOF
+}
+
+# Refuse to touch production unless the operator says so explicitly.
+require_production_confirmation() {
+    if [[ "$IS_PRODUCTION" == "true" && "${CONFIRM_PRODUCTION:-}" != "yes" ]]; then
+        error_exit "Production (ENVIRONMENT=$ENVIRONMENT) requires CONFIRM_PRODUCTION=yes"
+    fi
 }
 
 # Main execution
 main() {
     local command="${1:-help}"
+
+    case "$command" in
+        "deploy"|"deploy-blue-green"|"rollback")
+            require_production_confirmation
+            ;;
+    esac
 
     case "$command" in
         "deploy")
@@ -531,7 +553,7 @@ main() {
         "rollback")
             check_dependencies
             load_env
-            rollback "${2:-}" "${3:-}"
+            rollback "${2:-}"
             post_deploy_verification
             ;;
         "status")

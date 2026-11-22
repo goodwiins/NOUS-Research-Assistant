@@ -81,7 +81,13 @@ _DDL = [
 
 @pytest.fixture
 def db() -> Iterator[Session]:
-    engine = create_engine("sqlite://")
+    # One shared in-memory connection usable from any thread: the export route
+    # runs _query_content_usage in a worker thread (asyncio.to_thread).
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     with engine.begin() as conn:
         for ddl in _DDL:
             conn.execute(text(ddl))

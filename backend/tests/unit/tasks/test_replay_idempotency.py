@@ -462,3 +462,36 @@ def test_ingestion_skips_completed_job_without_reprocessing(
     result = pt.process_document_ingestion.apply(args=(str(job_id),)).get()
     assert result["skipped"] == "terminal"
     assert result["status"] == "completed"
+
+
+class _FailingExtractionPipeline(_FakePipeline):
+    """Extraction errored: the pipeline reports None, not an empty set."""
+
+    async def process_entity_extraction(self, document, text):
+        return None
+
+
+def test_failed_extraction_keeps_existing_entities(session_factory, monkeypatch):
+    """GOO-642 review: a failed extraction used to come back as [] and the
+    reset then deleted the document's entities before inserting nothing."""
+    Session = session_factory
+    org_id, doc_id, job_id = uuid4(), uuid4(), uuid4()
+
+    setup = Session()
+    _seed_document(setup, doc_id=doc_id, org_id=org_id, content_text="Ada.")
+    _seed_job(
+        setup, job_id=job_id, doc_id=doc_id, org_id=org_id, status=JobStatus.PENDING
+    )
+    setup.add(_entity("Ada Lovelace", ExtractionMethod.SPACY, doc_id, org_id))
+    setup.commit()
+    setup.close()
+
+    _stub_ingestion_side_effects(monkeypatch, Session)
+    monkeypatch.setattr(pt, "ProcessingPipeline", _FailingExtractionPipeline)
+
+    pt.process_document_ingestion.apply(args=(str(job_id),)).get()
+
+    check = Session()
+    names = [e.name for e in check.query(Entity).filter(Entity.document_id == doc_id)]
+    check.close()
+    assert names == ["Ada Lovelace"]

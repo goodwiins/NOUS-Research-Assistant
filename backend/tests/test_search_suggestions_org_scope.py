@@ -27,7 +27,7 @@ ROUTER = Path(__file__).resolve().parents[1] / "src" / "api" / "search" / "searc
 def _suggestions_endpoint_block() -> str:
     """Return the source of the get_search_suggestions endpoint."""
     source = ROUTER.read_text()
-    start = source.index("async def get_search_suggestions(")
+    start = source.index("def get_search_suggestions(")
     # up to the next top-level route decorator
     end = source.index('@router.get("/history")', start)
     return source[start:end]

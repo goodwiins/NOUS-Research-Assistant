@@ -89,7 +89,7 @@ cp .env.example .env.development
 cp .env.example .env.staging
 
 # Production
-cp .env.example .env.production
+cp .env.example .env.prod
 ```
 
 ### 3. Configure Environment Variables
@@ -163,7 +163,7 @@ The deployment script provides a simple, automated way to deploy the system:
 ./scripts/deploy.sh deploy
 
 # Deploy to production
-ENVIRONMENT=production ./scripts/deploy.sh deploy
+ENVIRONMENT=production CONFIRM_PRODUCTION=yes ./scripts/deploy.sh deploy
 
 # Blue-green deployment
 ./scripts/deploy.sh deploy-blue-green
@@ -201,10 +201,10 @@ docker-compose -f docker-compose.staging.yml --profile monitoring up -d
 
 ```bash
 # Start production services
-docker-compose -f docker-compose.production.yml up -d
+docker-compose -f docker-compose.prod.yml up -d
 
 # With full monitoring stack
-docker-compose -f docker-compose.production.yml --profile monitoring up -d
+docker-compose -f docker-compose.prod.yml --profile monitoring up -d
 ```
 
 ### Method 3: CI/CD Pipeline

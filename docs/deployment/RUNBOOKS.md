@@ -107,10 +107,53 @@ kubectl delete pod -l app=postgres -n knowledge-graph-analytics
 # Check for corruption
 kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser -d ragdb -c "SELECT datname FROM pg_database WHERE datistemplate = false;"
 
-# If corruption detected, restore from backup
+# If corruption detected, restore from backup. The restore loads only into
+# an EMPTY ragdb: the dump has no DROP statements. If any component's
+# precondition fails, it changes nothing.
+NS=knowledge-graph-analytics   # the script's NAMESPACE
+
+# 1. Stop every writer first, or the boot migrations (the migrate Job and the
+#    backend's run-migrations init container) repopulate ragdb before the
+#    restore. Turn off Argo CD auto-sync for the app first (Argo CD UI, or
+#    `argocd app set <app> --sync-policy none`); otherwise self-heal scales
+#    everything back and re-runs the migrate Job. Pause KEDA so it does not
+#    scale the workers back up.
+kubectl annotate scaledobject --all -n "$NS" \
+  autoscaling.keda.sh/paused-replicas="0" --overwrite
+kubectl scale deployment -n "$NS" --replicas=0 \
+  -l 'app.kubernetes.io/component in (backend,celery-worker,celery-beat)'
+kubectl delete job -n "$NS" -l app.kubernetes.io/component=migrations \
+  --ignore-not-found
+
+# 2. Drop and recreate ragdb from the maintenance database. WITH (FORCE)
+#    needs PostgreSQL 13+, and raguser must own ragdb and have CREATEDB.
+kubectl exec -n "$NS" deployment/postgres -- psql -U raguser -d postgres \
+  -v ON_ERROR_STOP=1 \
+  -c 'DROP DATABASE IF EXISTS ragdb WITH (FORCE)' \
+  -c 'CREATE DATABASE ragdb OWNER raguser'
+
+# 3. Restore
 cd scripts
 ./backup-and-restore.sh restore <backup_id>
+
+# 4. Bring the writers back: remove the KEDA pause and re-enable auto-sync.
+#    Argo CD restores the replicas and re-runs the migrate Job, which applies
+#    only the revisions newer than the backup.
+kubectl annotate scaledobject --all -n "$NS" autoscaling.keda.sh/paused-replicas-
 ```
+
+If a step fails after PostgreSQL was loaded, the script says
+`PostgreSQL WAS ALREADY RESTORED`. Do not re-run the restore against that
+database. Finish the remaining component by hand.
+
+After a Velero restore, Secrets are missing because backups exclude them.
+Re-create `infisical-universal-auth` with the "Bootstrap commands" in
+`infrastructure/kubernetes/infisical-bootstrap.md`. Then check
+`kubectl get infisicalsecrets -n "$NS"` once the operator resyncs (about 60s).
+External Secrets Operator rebuilds only `aws-database-credentials`. Helm
+release records are Secrets too, so run `helm upgrade --install` with the
+chart and values from git to re-create the release. See "Full Cluster
+Recovery" in `PRODUCTION_DEPLOYMENT_GUIDE.md`.
 
 #### Redis Cache Recovery
 ```bash
