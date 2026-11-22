@@ -479,7 +479,9 @@ def test_failed_extraction_keeps_existing_entities(session_factory, monkeypatch)
 
     setup = Session()
     _seed_document(setup, doc_id=doc_id, org_id=org_id, content_text="Ada.")
-    _seed_job(setup, job_id=job_id, doc_id=doc_id, org_id=org_id, status=JobStatus.PENDING)
+    _seed_job(
+        setup, job_id=job_id, doc_id=doc_id, org_id=org_id, status=JobStatus.PENDING
+    )
     setup.add(_entity("Ada Lovelace", ExtractionMethod.SPACY, doc_id, org_id))
     setup.commit()
     setup.close()
