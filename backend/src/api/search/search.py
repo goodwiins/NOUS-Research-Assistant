@@ -29,6 +29,7 @@ from src.api.search._tenancy import require_org_id as _require_org_id
 from src.core.api_key_auth import APIKeyData, APIKeyUsageLog, get_api_key_data
 from src.core.database import get_db_sync
 from src.core.dependencies import get_current_user
+from src.core.thread_offload import to_thread_finish_on_cancel
 from src.models.search_analytics import SearchAnalyticsEvent
 from src.models.search_schemas import (
     DeterministicTrace,
@@ -205,21 +206,23 @@ async def search_documents(
         # whole worker whenever one query was slow.
         if search_request.search_type == SearchType.HYBRID:
             # Use hybrid search service
-            result = await run_in_threadpool(
+            result = await to_thread_finish_on_cancel(
                 hybrid_search_service.search,
                 search_request=search_request,
                 user_id=str(current_user.id),
                 organization_id=organization_id,
                 db=db,
+                guard_session=db,
             )
         elif search_request.search_type == SearchType.FULLTEXT:
             # Use full-text search service
-            result = await run_in_threadpool(
+            result = await to_thread_finish_on_cancel(
                 fulltext_search_service.search,
                 search_request=search_request,
                 user_id=str(current_user.id),
                 organization_id=organization_id,
                 db=db,
+                guard_session=db,
             )
         elif search_request.search_type == SearchType.VECTOR:
             # Vector-only search was Qdrant-backed and has been removed with the
@@ -243,12 +246,13 @@ async def search_documents(
             )
 
             try:
-                result = await run_in_threadpool(
+                result = await to_thread_finish_on_cancel(
                     knowledge_graph_service.search,
                     search_request=search_request,
                     user_id=str(current_user.id),
                     organization_id=organization_id,
                     db=db,
+                    guard_session=db,
                 )
             except Exception as e:
                 # GOO-589: a Neo4j outage is a dependency failure, not a bug —
@@ -266,12 +270,13 @@ async def search_documents(
         else:
             # Default to hybrid search
             search_request.search_type = SearchType.HYBRID
-            result = await run_in_threadpool(
+            result = await to_thread_finish_on_cancel(
                 hybrid_search_service.search,
                 search_request=search_request,
                 user_id=str(current_user.id),
                 organization_id=organization_id,
                 db=db,
+                guard_session=db,
             )
 
         # Log search query in background (for analytics)
@@ -808,8 +813,9 @@ async def search_health_check(
             WHERE tablename = 'documents'
                 AND indexname LIKE '%search%'
             """
-            index_count = await run_in_threadpool(
-                lambda: db.execute(text(index_check_query)).scalar()
+            index_count = await to_thread_finish_on_cancel(
+                lambda: db.execute(text(index_check_query)).scalar(),
+                guard_session=db,
             )
             health_status["indexes"] = {
                 "search_indexes_count": index_count,

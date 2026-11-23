@@ -12,13 +12,17 @@ Sites that use the request's sync ``Session`` (or an upload whose object must
 be deleted after a cancel) must use ``to_thread_finish_on_cancel``: a plain
 ``to_thread`` returns on cancellation while the thread is still inside the
 Session that ``get_db_sync`` is about to close. They must also pass the
-Session as ``guard_session=db`` (GOO-698), so a thread abandoned after the
-bounded wait can neither commit on it nor have it closed under it.
+Session as ``guard_session=`` (GOO-698), so a thread abandoned after the
+bounded wait starts no COMMIT on it and is never closed under.
+
+GOO-766 adds a scan of every offload call under src/ (end of this file): any
+``to_thread``, ``run_in_executor`` or ``run_in_threadpool`` that takes a sync
+Session fails unless it is listed in SESSION_OFFLOAD_EXEMPTIONS with a reason.
 """
 
 import ast
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import pytest
 
@@ -197,11 +201,12 @@ def _offload_calls(fn: ast.AST) -> List[Tuple[str, ast.expr, ast.Call]]:
     return out
 
 
-def _passes_db_as_guard(call: ast.Call) -> bool:
+def _passes_session_as_guard(call: ast.Call, fn: ast.AST) -> bool:
+    """``guard_session=`` names a sync Session of ``fn`` (any name, GOO-766)."""
     return any(
         kw.arg == "guard_session"
         and isinstance(kw.value, ast.Name)
-        and kw.value.id == "db"
+        and kw.value.id in _sync_session_names(fn)
         for kw in call.keywords
     )
 
@@ -229,11 +234,11 @@ def test_blocking_call_stays_off_the_loop(site: Site) -> None:
         unguarded = [
             call.lineno
             for _, arg, call in offloads
-            if _matches(arg, site.target) and not _passes_db_as_guard(call)
+            if _matches(arg, site.target) and not _passes_session_as_guard(call, fn)
         ]
         assert not unguarded, (
-            f"{site.target} uses the request Session but does not pass "
-            f"guard_session=db (lines {unguarded})"
+            f"{site.target} uses the request Session but does not pass it "
+            f"as guard_session= (lines {unguarded})"
         )
 
     lambdas = {
@@ -265,3 +270,273 @@ def test_blocking_call_stays_off_the_loop(site: Site) -> None:
             and id(n) not in lambdas
         ]
     assert not direct, f"{site.target} called directly on the loop at lines {direct}"
+
+
+# ---- GOO-766: every offload that takes a sync Session, not just the list ----
+#
+# The SITES list above pins known call sites. A new raw ``to_thread`` or
+# ``run_in_executor`` that handed the request Session to a thread passed it.
+# This scan reads every offload call under src/ and fails any that takes a
+# sync Session (directly, in a lambda, through partial(...), in a nested def
+# it closes over, or in a ``self`` method that uses ``self.db``) unless it is
+# ``to_thread_finish_on_cancel`` with that Session as ``guard_session=``.
+
+_RAW_OFFLOADS = frozenset({"to_thread", "run_in_executor", "run_in_threadpool"})
+_GUARDED_OFFLOAD = "to_thread_finish_on_cancel"
+# Conventional names of a sync Session in this codebase.
+_SESSION_NAMES = frozenset({"db", "db_session", "sync_db", "sync_session"})
+# ``self.<attr>`` holding a Session.
+_SELF_SESSION_ATTRS = frozenset({"db", "_db", "session", "_session", "db_session"})
+# Keyword arguments of to_thread_finish_on_cancel itself, not of the work.
+_HELPER_KWARGS = frozenset({"guard_session", "on_cancel", "max_wait"})
+
+# "<path>:<function>:<offload>:<callable>" -> why it may stay unguarded.
+SESSION_OFFLOAD_EXEMPTIONS: Dict[str, str] = {
+    "core/thread_offload.py:_start:to_thread:_run": (
+        "the guarded helper's own thread: _run is the work guard_session protects"
+    ),
+}
+
+
+def _annotation(arg: ast.arg) -> str:
+    return ast.unparse(arg.annotation) if arg.annotation is not None else ""
+
+
+def _sync_session_names(fn: ast.AST) -> Set[str]:
+    """Names that hold a sync Session inside ``fn``."""
+    names = set(_SESSION_NAMES)
+    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for arg in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs:
+            ann = _annotation(arg)
+            if "AsyncSession" in ann:
+                names.discard(arg.arg)
+            elif "Session" in ann:
+                names.add(arg.arg)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            callee = _tail(node.value.func) or ""
+            if "Session" in callee and "Async" not in callee:
+                names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return names
+
+
+def _refs(node: ast.AST, names: Set[str]) -> Set[str]:
+    """Session references in ``node``, skipping what is awaited on the loop."""
+    found: Set[str] = set()
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, ast.Await):
+            continue  # evaluated on the loop before the offload
+        if isinstance(cur, ast.Name) and cur.id in names:
+            found.add(cur.id)
+        if (
+            isinstance(cur, ast.Attribute)
+            and isinstance(cur.value, ast.Name)
+            and cur.value.id == "self"
+            and cur.attr in _SELF_SESSION_ATTRS
+        ):
+            found.add(f"self.{cur.attr}")
+        stack.extend(ast.iter_child_nodes(cur))
+    return found
+
+
+_Scope = Tuple[ast.AST, Optional[ast.ClassDef]]
+
+
+def _scopes(tree: ast.Module) -> Dict[int, _Scope]:
+    """For every node: its innermost enclosing function and class."""
+    out: Dict[int, _Scope] = {}
+
+    def visit(node: ast.AST, fn: ast.AST, cls: Optional[ast.ClassDef]) -> None:
+        for child in ast.iter_child_nodes(node):
+            out[id(child)] = (fn, cls)
+            if isinstance(child, ast.ClassDef):
+                visit(child, fn, child)
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child, cls)
+            else:
+                visit(child, fn, cls)
+
+    visit(tree, tree, None)
+    return out
+
+
+def _offload_args(call: ast.Call) -> List[ast.expr]:
+    args = list(call.args)
+    return args[1:] if _tail(call.func) == "run_in_executor" else args
+
+
+def _touched_sessions(
+    call: ast.Call, fn: ast.AST, cls: Optional[ast.ClassDef]
+) -> Set[str]:
+    names = _sync_session_names(fn)
+    args = _offload_args(call)
+    work = args + [kw.value for kw in call.keywords if kw.arg not in _HELPER_KWARGS]
+    touched: Set[str] = set()
+    for node in work:
+        touched |= _refs(node, names)
+    target = args[0] if args else None
+    if isinstance(target, ast.Name):  # a nested def closing over the Session
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node is not fn
+                and node.name == target.id
+            ):
+                touched |= _refs(node, names)
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+        and cls is not None
+    ):
+        for node in cls.body:
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == target.attr
+            ):
+                touched |= _refs(node, set())  # its self.<session attr> uses
+    return touched
+
+
+def session_offload_violations(tree: ast.Module, path: str) -> Dict[str, str]:
+    """``{exemption key: problem}`` for each offload that takes a Session
+    without the guarded helper and a ``guard_session=`` naming that Session."""
+    scopes = _scopes(tree)
+    found: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _tail(node.func)
+        if name not in _RAW_OFFLOADS and name != _GUARDED_OFFLOAD:
+            continue
+        fn, cls = scopes.get(id(node), (tree, None))
+        touched = _touched_sessions(node, fn, cls)
+        if not touched:
+            continue
+        args = _offload_args(node)
+        target = "?" if not args else ast.unparse(args[0])
+        if args and isinstance(args[0], ast.Lambda):
+            target = "lambda"
+        key = f"{path}:{getattr(fn, 'name', '<module>')}:{name}:{target}"
+        where = f"{path}:{node.lineno}"
+        if name in _RAW_OFFLOADS:
+            found[key] = (
+                f"{where}: {name} hands the Session {sorted(touched)} to a "
+                f"thread; use {_GUARDED_OFFLOAD}(..., guard_session=<it>)"
+            )
+            continue
+        guards = [kw.value for kw in node.keywords if kw.arg == "guard_session"]
+        guard = ast.unparse(guards[0]) if guards else None
+        if guard not in touched:
+            found[key] = (
+                f"{where}: {_GUARDED_OFFLOAD} uses the Session {sorted(touched)} "
+                f"but guard_session= is {guard or 'missing'}"
+            )
+    return found
+
+
+def _all_session_offload_violations() -> Dict[str, str]:
+    found: Dict[str, str] = {}
+    for file in sorted(_SRC.rglob("*.py")):
+        rel = file.relative_to(_SRC).as_posix()
+        found.update(session_offload_violations(_tree(rel), rel))
+    return found
+
+
+def test_every_offload_that_takes_a_session_is_guarded() -> None:
+    found = _all_session_offload_violations()
+    unexempted = [
+        msg for key, msg in found.items() if key not in SESSION_OFFLOAD_EXEMPTIONS
+    ]
+    assert not unexempted, "\n".join(unexempted)
+
+
+def test_session_offload_exemptions_are_live_and_explained() -> None:
+    found = _all_session_offload_violations()
+    for key, reason in SESSION_OFFLOAD_EXEMPTIONS.items():
+        assert reason.strip(), f"exemption {key} has no reason"
+        assert key in found, f"exemption {key} no longer matches a call; drop it"
+
+
+_PLANTED = """
+import asyncio
+import functools
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.core.thread_offload import to_thread_finish_on_cancel
+
+
+async def raw_lambda(db=None):
+    await asyncio.to_thread(lambda: db.query(1).all())
+
+
+async def raw_executor(session: Session):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, functools.partial(work, session))
+
+
+async def raw_kwarg(db=None):
+    await run_in_threadpool(service.search, q=1, db=db)
+
+
+async def raw_closure(db=None):
+    def _load():
+        return db.execute("select 1")
+
+    await asyncio.to_thread(_load)
+
+
+async def raw_local_session():
+    s = SessionLocal()
+    await asyncio.to_thread(s.commit)
+
+
+class Repo:
+    async def raw_self_method(self):
+        await asyncio.to_thread(self._load)
+
+    def _load(self):
+        return self.db.query(1)
+
+
+async def guarded_without_guard(db=None):
+    await to_thread_finish_on_cancel(lambda: db.commit())
+
+
+async def guarded_wrong_guard(db=None, other=None):
+    await to_thread_finish_on_cancel(lambda: db.commit(), guard_session=other)
+
+
+async def ok_guarded_any_name(sess: Session):
+    await to_thread_finish_on_cancel(lambda: sess.commit(), guard_session=sess)
+
+
+async def ok_async_session_awaited_on_loop(db: AsyncSession):
+    await asyncio.to_thread(render, await build(db))
+
+
+async def ok_db_only_awaited_on_loop(db=None):
+    await asyncio.to_thread(render, await build(db))
+
+
+async def ok_no_session():
+    await asyncio.to_thread(render, 1)
+"""
+
+
+def test_a_new_unguarded_session_offload_fails_the_guard() -> None:
+    found = session_offload_violations(ast.parse(_PLANTED), "planted.py")
+    functions = sorted({key.split(":")[1] for key in found})
+    assert functions == [
+        "guarded_without_guard",
+        "guarded_wrong_guard",
+        "raw_closure",
+        "raw_executor",
+        "raw_kwarg",
+        "raw_lambda",
+        "raw_local_session",
+        "raw_self_method",
+    ], found
