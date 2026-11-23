@@ -20,8 +20,8 @@ WebSocket service initializer that runs at every boot. Until GOO-686,
 GOO-686 registers the module in ``src.models``. That covers fresh databases
 through the r6h3 baseline. This revision backfills databases that already
 passed r6h3. Following r6h3, the ORM models stay the single source of truth:
-it calls ``create_all`` for just these four tables and only creates the ones
-that are missing. Existing tables, from a create_all-provisioned environment
+it builds the DDL from these four tables' models (``Table.create`` online,
+see below) and only creates the ones that are missing. Existing tables, from a create_all-provisioned environment
 or a manual fix, are left untouched, so the revision is safe to run anywhere
 and a rerun is a no-op.
 
