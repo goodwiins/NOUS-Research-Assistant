@@ -35,7 +35,9 @@ const charts = vi.hoisted(() => ({ props: [] as Array<Record<string, unknown>> }
 vi.mock('@/components/analytics/AnalyticsChart', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@/components/analytics/AnalyticsChart')>();
-  const Recorded = (props: Parameters<typeof actual.AnalyticsChart>[0]) => {
+  const Recorded = (
+    props: Parameters<typeof actual.AnalyticsChart>[0]
+  ): ReturnType<typeof actual.AnalyticsChart> => {
     charts.props.push(props as unknown as Record<string, unknown>);
     return actual.AnalyticsChart(props);
   };
