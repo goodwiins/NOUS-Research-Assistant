@@ -9,7 +9,6 @@ import {
   Clock,
   CheckCircle,
   FileText,
-  Plus,
   Trash2,
   Info,
   Network,
@@ -50,6 +49,12 @@ interface EntityDetailProps {
   onEdit?: () => void;
   onClose?: () => void;
   onEntityClick?: (entity: Entity) => void;
+  /**
+   * Bumped by the parent after it saves a relationship for this entity. The
+   * dialog stays open while the relationship dialog is used (GOO-767), so a
+   * change here refetches the list (GOO-794).
+   */
+  relationshipsVersion?: number;
 }
 
 const formatField = (key: string): string => {
@@ -62,8 +67,9 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
   onEdit,
   onClose,
   onEntityClick,
+  relationshipsVersion = 0,
 }) => {
-  const { canCreate, canEdit, canDelete } = useEntityPermissions();
+  const { canEdit, canDelete } = useEntityPermissions();
   const [relationships, setRelationships] = useState<GraphEdge[]>([]);
   const [loading, setLoading] = useState(true);
   const [relationshipToDelete, setRelationshipToDelete] =
@@ -74,7 +80,7 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
     if (entity?.id) {
       fetchRelationships();
     }
-  }, [entity?.id]);
+  }, [entity?.id, relationshipsVersion]);
 
   const fetchRelationships = async () => {
     try {
@@ -373,19 +379,6 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
                 />
                 Relationships
               </CardTitle>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!canCreate}
-                className="h-7 text-xs hover:text-primary hover:bg-primary/10 disabled:opacity-30 disabled:cursor-not-allowed"
-                title={
-                  !canCreate ? 'Admin access required' : 'Add relationship'
-                }
-              >
-                <Plus aria-hidden="true" className="h-3.5 w-3.5 mr-1.5" />
-                Add relationship
-                {!canCreate && <span className="ml-1 opacity-80">(admin)</span>}
-              </Button>
             </CardHeader>
             <CardContent className="p-0">
               {loading ? (

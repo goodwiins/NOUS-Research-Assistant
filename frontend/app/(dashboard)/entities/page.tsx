@@ -171,6 +171,9 @@ function EntityManagementContent() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const [relationshipDialogOpen, setRelationshipDialogOpen] = useState(false);
+  // Bumped after a saved relationship so the open detail dialog refetches its
+  // list (GOO-794). A failed save leaves it alone.
+  const [relationshipsVersion, setRelationshipsVersion] = useState(0);
   const [sourceEntityId, setSourceEntityId] = useState<string | null>(null);
   const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -636,6 +639,7 @@ function EntityManagementContent() {
     try {
       await entityService.createRelationship(data);
       toast.success('Relationship created successfully');
+      setRelationshipsVersion((version) => version + 1);
       setRelationshipDialogOpen(false);
       setSourceEntityId(null);
       // Refresh relationships if on graph tab
@@ -1234,6 +1238,7 @@ function EntityManagementContent() {
               <div className="py-4">
                 <EntityDetail
                   entity={selectedEntity}
+                  relationshipsVersion={relationshipsVersion}
                   onEdit={() => {
                     setDetailDialogOpen(false);
                     setEditDialogOpen(true);
