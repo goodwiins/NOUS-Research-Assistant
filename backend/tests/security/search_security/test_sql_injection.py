@@ -12,7 +12,6 @@ Tests comprehensive SQL injection prevention including:
 - Database-specific injection vectors
 """
 
-import time
 import uuid
 from typing import Any, Dict, List
 from unittest.mock import Mock, patch

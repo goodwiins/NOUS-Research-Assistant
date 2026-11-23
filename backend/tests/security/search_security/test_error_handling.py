@@ -766,11 +766,24 @@ class TestErrorHandlingEdgeCases(SecurityTestCase):
 
         # Generate multiple concurrent errors
         import concurrent.futures
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from src.main import app
+
+        # One TestClient per thread (GOO-780 review): a single shared client
+        # returned an occasional 404 under -n auto. The app, its dependency
+        # overrides and the per-test rate limiter are still shared, so the
+        # requests still load the same app concurrently.
+        local = threading.local()
+        url = f"{security_test_client.API_PREFIX}/search/"
 
         def generate_error():
-            return security_test_client.make_request(
-                "POST",
-                "/search/",
+            if not hasattr(local, "client"):
+                local.client = TestClient(app)
+            return local.client.post(
+                url,
                 headers=authentication_headers["valid_jwt"],
                 json={"query": "", "search_type": "fulltext"},
             )
@@ -783,7 +796,8 @@ class TestErrorHandlingEdgeCases(SecurityTestCase):
 
         # All errors should be handled consistently
         for response in responses:
-            assert (
-                response.status_code == 422
-            ), "Should handle concurrent errors consistently"
+            assert response.status_code == 422, (
+                "Should handle concurrent errors consistently: "
+                f"{response.status_code} {response.text[:300]}"
+            )
             self.assert_safe_error_response(response)
