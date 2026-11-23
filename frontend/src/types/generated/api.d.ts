@@ -15772,6 +15772,11 @@ export interface components {
             /** Processing Error */
             processing_error?: string | null;
             /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
+            /**
              * Processing Retry Count
              * @default 0
              */
@@ -15844,6 +15849,11 @@ export interface components {
             mime_type: string;
             /** Organization Id */
             organization_id: string;
+            /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
             processing_status: components["schemas"]["ApiDocumentStatus"];
             /** Tags */
             tags?: string[] | null;
