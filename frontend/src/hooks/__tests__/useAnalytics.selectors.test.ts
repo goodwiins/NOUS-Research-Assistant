@@ -55,7 +55,7 @@ beforeEach(() => {
 });
 
 describe('useUsageAnalytics select', () => {
-  const run = (data: object) => {
+  const run = (data: object): Record<string, unknown> => {
     renderHook(() => useUsageAnalytics());
     return lastQuery().select(data as never);
   };
@@ -110,7 +110,7 @@ describe('useUsageAnalytics select', () => {
     expect(patterns.uniqueQueries).toBe(6);
     expect(patterns.totalQueries).toBe(16);
     expect(patterns.averageQueryLength).toBe(Math.round((11 + 10 + 12 + 13 + 12 + 5) / 6));
-    const names = (key: string) => patterns.topCategories[key]!.map((q) => q.query);
+    const names = (key: string): string[] => patterns.topCategories[key]!.map((q) => q.query);
     expect(names('General Inquiry')).toEqual(['How to cite']);
     expect(names('Technical Documentation')).toEqual(['API limits']);
     expect(names('Code Examples')).toEqual(['code example']);
