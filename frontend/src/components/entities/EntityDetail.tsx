@@ -71,28 +71,35 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
 }) => {
   const { canEdit, canDelete } = useEntityPermissions();
   const [relationships, setRelationships] = useState<GraphEdge[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Which request's result is on screen. Loading is derived from it, so the
+  // effect never sets state synchronously; relationshipsVersion is bumped by
+  // the parent after a saved relationship (GOO-794).
+  const requestKey = `${entity?.id}:${relationshipsVersion}`;
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const loading = settledKey !== requestKey;
   const [relationshipToDelete, setRelationshipToDelete] =
     useState<GraphEdge | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    if (entity?.id) {
-      fetchRelationships();
-    }
-  }, [entity?.id, relationshipsVersion]);
-
-  const fetchRelationships = async () => {
-    try {
-      setLoading(true);
-      const response = await entityService.getEntityRelationships(entity.id);
-      setRelationships(response);
-    } catch (error) {
-      console.error('Error fetching relationships:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    if (!entity?.id) return;
+    let current = true;
+    entityService
+      .getEntityRelationships(entity.id)
+      .then((response) => {
+        if (current) setRelationships(response);
+      })
+      .catch((error: unknown) => {
+        console.error('Error fetching relationships:', error);
+      })
+      .finally(() => {
+        if (current) setSettledKey(requestKey);
+      });
+    // A response for an entity or version no longer shown is dropped.
+    return () => {
+      current = false;
+    };
+  }, [entity?.id, requestKey]);
 
   const handleConfirmDeleteRelationship = async () => {
     if (!relationshipToDelete) return;
@@ -100,7 +107,7 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
     try {
       setDeleting(true);
       await entityService.deleteRelationship(relationshipToDelete.id);
-      await fetchRelationships();
+      setRelationships(await entityService.getEntityRelationships(entity.id));
       setRelationshipToDelete(null);
     } catch (error) {
       console.error('Error deleting relationship:', error);
