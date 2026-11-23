@@ -15,7 +15,9 @@ GOO-732:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import socket
 from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -346,17 +348,237 @@ async def test_error_rate_is_null_when_the_health_check_cannot_connect() -> None
     assert metrics["error_rate"] is None
 
 
+# --- system health: real host values, null for what failed ---------------
+
+HOST = SimpleNamespace(
+    cpu=37.5, memory=61.0, disk=44.0, boot=1_000.0, sent=10, recv=20, ps=3, pr=4
+)
+
+
+def _fake_psutil(fail: Optional[BaseException] = None) -> Any:
+    def _cpu(interval: Any = None) -> float:
+        if fail is not None:
+            raise fail
+        return float(HOST.cpu)
+
+    return SimpleNamespace(
+        cpu_percent=_cpu,
+        virtual_memory=lambda: SimpleNamespace(percent=HOST.memory),
+        disk_usage=lambda _path: SimpleNamespace(percent=HOST.disk),
+        net_io_counters=lambda: SimpleNamespace(
+            bytes_sent=HOST.sent,
+            bytes_recv=HOST.recv,
+            packets_sent=HOST.ps,
+            packets_recv=HOST.pr,
+        ),
+        boot_time=lambda: HOST.boot,
+        Error=_PsutilError,
+    )
+
+
+class _PsutilError(Exception):
+    pass
+
+
+def _with_psutil(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    monkeypatch.setattr(svc_module, "PSUTIL_AVAILABLE", True)
+    monkeypatch.setattr(svc_module, "psutil", fake, raising=False)
+
+
 @pytest.mark.asyncio
-async def test_health_check_bug_propagates_and_the_fallback_has_no_error_rate() -> None:
-    service = PerformanceDashboardService()
+async def test_db_outage_keeps_the_real_host_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_psutil(monkeypatch, _fake_psutil())
+
+    health = await PerformanceDashboardService().get_system_health_metrics(
+        db=cast(Any, _FakeDB(_operational()))
+    )
+
+    assert (health.cpu_usage, health.memory_usage, health.disk_usage) == (
+        HOST.cpu,
+        HOST.memory,
+        HOST.disk,
+    )
+    assert health.network_io == {
+        "bytes_sent": 10.0,
+        "bytes_recv": 20.0,
+        "packets_sent": 3.0,
+        "packets_recv": 4.0,
+    }
+    assert health.uptime is not None and health.uptime > 0
+    # Only the DB-derived fields are null.
+    assert health.response_time_p50 is None
+    assert health.response_time_p95 is None
+    assert health.error_rate is None
+    assert health.active_connections is None
+
+
+@pytest.mark.asyncio
+async def test_health_check_bug_propagates_with_no_fallback_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_psutil(monkeypatch, _fake_psutil())
     bug = ProgrammingError("SELECT", {}, Exception("column does not exist"))
 
     with pytest.raises(ProgrammingError):
-        await service._get_db_health_metrics(db=cast(Any, _FakeDB(bug)))
+        await PerformanceDashboardService().get_system_health_metrics(
+            db=cast(Any, _FakeDB(bug))
+        )
 
-    # get_system_health_metrics' own fallback must not invent a 0.0 either.
-    health = await service.get_system_health_metrics(db=cast(Any, _FakeDB(bug)))
-    assert health.error_rate is None
+
+@pytest.mark.asyncio
+async def test_system_health_route_bug_is_a_safe_500_logged_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bug = ProgrammingError("SELECT", {}, Exception("column secret_col does not exist"))
+    with patch.object(
+        pd.performance_dashboard_service,
+        "get_system_health_metrics",
+        new=AsyncMock(side_effect=bug),
+    ):
+        with caplog.at_level(logging.ERROR, logger=pd.logger.name):
+            with pytest.raises(HTTPException) as raised:
+                await pd.get_system_health_metrics(current_user=_user())
+
+    assert raised.value.status_code == 500
+    assert "secret_col" not in str(raised.value.detail)
+    logged = [r for r in caplog.records if r.name == pd.logger.name]
+    assert len(logged) == 1 and logged[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [OSError("disk gone"), _PsutilError("denied")])
+async def test_psutil_failure_nulls_only_the_host_fields(
+    monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    _with_psutil(monkeypatch, _fake_psutil(fail=failure))
+    db = _FakeDB(
+        [SimpleNamespace(p50=10.0, p95=20.0)], [SimpleNamespace(active_sessions=2)]
+    )
+
+    health = await PerformanceDashboardService().get_system_health_metrics(
+        db=cast(Any, db)
+    )
+
+    assert health.cpu_usage is None and health.memory_usage is None
+    assert health.disk_usage is None and health.uptime is None
+    assert health.network_io is None
+    assert (health.response_time_p50, health.active_connections) == (10.0, 2)
+
+
+@pytest.mark.asyncio
+async def test_without_psutil_host_fields_are_null_not_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(svc_module, "PSUTIL_AVAILABLE", False)
+    db = _FakeDB(
+        [SimpleNamespace(p50=None, p95=None)], [SimpleNamespace(active_sessions=0)]
+    )
+
+    health = await PerformanceDashboardService().get_system_health_metrics(
+        db=cast(Any, db)
+    )
+
+    assert health.cpu_usage is None and health.uptime is None
+    assert health.network_io is None
+    # No timed search in the window: no percentile, not 0 ms.
+    assert health.response_time_p50 is None and health.response_time_p95 is None
+    assert health.active_connections == 0
+
+
+@pytest.mark.asyncio
+async def test_recommendations_skip_unmeasured_host_values() -> None:
+    from src.services.quality import quality_recommendations_service as qr
+
+    health = SimpleNamespace(cpu_usage=None, memory_usage=90.0)
+    with patch.object(
+        qr.performance_dashboard_service,
+        "get_system_health_metrics",
+        new=AsyncMock(return_value=health),
+    ):
+        recs = await qr.QualityRecommendationsService()._generate_infrastructure_recommendations(
+            [], ORG
+        )
+
+    # An unknown CPU is skipped; it does not abort the memory check.
+    titles = [r.title for r in recs]
+    assert len(titles) == 1 and "Memory" in titles[0]
+
+
+# --- what counts as "unavailable" -------------------------------------------
+
+
+def _unavailable_errors() -> List[BaseException]:
+    from sqlalchemy.exc import DisconnectionError, InterfaceError
+    from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+    return [
+        _operational(),
+        InterfaceError("SELECT 1", {}, Exception("connection closed")),
+        DisconnectionError("connection invalidated"),
+        PoolTimeoutError("QueuePool limit reached"),
+        ConnectionRefusedError(111, "Connect call failed"),
+        socket.gaierror(-2, "Name or service not known"),
+        asyncio.TimeoutError(),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", _unavailable_errors(), ids=lambda e: type(e).__name__)
+async def test_chart_session_open_failure_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    # asyncpg raises these when the pool opens a connection.
+    _patch_session(monkeypatch, _FakeDB(), open_error=cast(Exception, error))
+
+    with pytest.raises(MetricsUnavailable):
+        await PerformanceDashboardService().get_metric_chart_data(
+            ORG, "search_volume", MetricTimeRange.LAST_24H
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", _unavailable_errors(), ids=lambda e: type(e).__name__)
+async def test_db_health_connection_failures_null_the_db_fields(
+    error: BaseException,
+) -> None:
+    metrics = await PerformanceDashboardService()._get_db_health_metrics(
+        db=cast(Any, _FakeDB(error))
+    )
+
+    assert metrics == {
+        "p50": None,
+        "p95": None,
+        "error_rate": None,
+        "active_connections": None,
+    }
+
+
+# --- route details ----------------------------------------------------------
+
+
+def test_csv_export_keeps_null_metrics_as_empty_cells() -> None:
+    csv = pd._convert_to_csv(
+        {"system_health": {"error_rate": None, "cpu_usage": 12.5}, "label": "x"}
+    )
+
+    assert ["system_health_error_rate", ""] in csv["rows"]
+    assert ["system_health_cpu_usage", "12.5"] in csv["rows"]
+    assert all(row[0] != "label" for row in csv["rows"])
+
+
+@pytest.mark.asyncio
+async def test_error_rate_is_not_offered_as_a_chart() -> None:
+    with pytest.raises(HTTPException) as raised:
+        await pd.get_metric_chart_data(
+            metric_name="error_rate",
+            time_range=MetricTimeRange.LAST_24H,
+            granularity="hour",
+            current_user=_user(),
+        )
+
+    assert raised.value.status_code == 400
 
 
 @pytest.mark.asyncio

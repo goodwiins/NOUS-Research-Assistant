@@ -171,8 +171,8 @@ async def get_system_health_metrics(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Failed to get system health metrics: {e}")
+    except Exception:
+        logger.exception("Failed to get system health metrics")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -326,7 +326,8 @@ async def get_metric_chart_data(
             "cpu_usage",
             "memory_usage",
             "disk_usage",
-            "error_rate",
+            # error_rate is not offered: nothing records failed searches, so
+            # it has no series (GOO-732).
             "throughput",
             "latency",
         ]
@@ -788,7 +789,11 @@ def _convert_to_csv(data: Dict[str, Any]) -> Dict[str, Any]:
     rows = [headers]
 
     for key, value in flattened.items():
-        if isinstance(value, (int, float)):
+        # A null metric keeps its row with an empty cell: dropping it hid the
+        # column, and writing 0 would invent a value.
+        if value is None:
+            rows.append([key, ""])
+        elif isinstance(value, (int, float)):
             rows.append([key, str(value)])
 
     return {
