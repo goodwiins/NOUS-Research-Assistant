@@ -602,7 +602,7 @@ async function loadLinkTargets(projectId: string): Promise<LinkTarget[]> {
         documentId: cell.document_id,
         fieldId: cell.field_id as string,
         label: `${grid.name} · ${cell.column_name}: ${
-          cell.value === null
+          cell.value == null
             ? (cell.missingness ?? '—')
             : extractionCellText(cell.value)
         }`,
