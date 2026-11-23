@@ -12,7 +12,7 @@ vi.mock('@/services/scispaceService', () => ({
   resetPipeline: vi.fn(),
 }));
 
-import { usePipelineStore } from '@/store/pipelineStore';
+import { PIPELINE_ERRORS, usePipelineStore } from '@/store/pipelineStore';
 import * as scispaceService from '@/services/scispaceService';
 import type { PipelineState } from '@/types/scispace';
 
@@ -67,7 +67,7 @@ describe('pipelineStore project switch (GOO-762)', () => {
     await state().fetchPipeline('B');
 
     expect(state().pipeline).toBeNull();
-    expect(state().error).toBe('HTTP 503');
+    expect(state().error).toBe(PIPELINE_ERRORS.load);
     expect(state().loading).toBe(false);
   });
 
