@@ -19,7 +19,17 @@ then requires every table they map to be one of:
   shrink. An entry that becomes registered (or is deleted) must be removed
   here, so the list never lies.
 
+Every module under ``src/models`` must import, except the ones in
+``KNOWN_IMPORT_FAILURES`` (shrink-only, matched exactly). A module that raises
+at import would otherwise drop its tables from the inventory unnoticed.
+
 The retired analytics dashboard family must stay gone.
+
+Scope: this enforces *registration* on ``Base.metadata``. It does not prove a
+create migration exists for a registered table: ``r6h3_model_baseline``
+creates what is registered on fresh databases, and an already-migrated
+database needs its own create-if-missing revision (see
+``ws01_websocket_status_tables``).
 """
 
 from __future__ import annotations
@@ -78,6 +88,23 @@ KNOWN_UNREGISTERED = frozenset(
     }
 )
 
+# Model modules that raise at import today (GOO-690 inventory, 2026-11-22).
+# Shrink-only: fix or delete a module, then remove it here.
+KNOWN_IMPORT_FAILURES = frozenset(
+    {
+        # Redefine a table a registered model already owns
+        # (InvalidRequestError "already defined for this MetaData instance").
+        "src.models.ab_testing_models",
+        "src.models.enhanced_document",
+        "src.models.evaluation_metrics",
+        "src.models.knowledge_graph",
+        # `from sqlalchemy import Array`: no such name.
+        "src.models.qa_system_models",
+        # `import bleach`, which no requirements file installs.
+        "src.models.validation_rules",
+    }
+)
+
 RETIRED_ANALYTICS_TABLES = frozenset(
     {
         "analytics_metrics",
@@ -102,7 +129,7 @@ for info in pkgutil.walk_packages(src.models.__path__, "src.models."):
     try:
         importlib.import_module(info.name)
     except Exception as exc:
-        failed.append(info.name)
+        failed.append(f"{info.name}: {type(exc).__name__}: {exc}"[:300])
 mapped = {}
 for mapper in Base.registry.mappers:
     table = getattr(mapper, "local_table", None)
@@ -166,6 +193,17 @@ def test_known_unregistered_list_only_shrinks(inventory: dict) -> None:
     assert (
         not stale
     ), f"now registered or deleted; remove from KNOWN_UNREGISTERED: {stale}"
+
+
+def test_model_modules_import_or_are_known_failures(inventory: dict) -> None:
+    failures = {entry.split(":", 1)[0]: entry for entry in inventory["failed"]}
+    new = sorted(set(failures) - KNOWN_IMPORT_FAILURES)
+    assert not new, (
+        "src/models modules that raise at import, so their tables silently "
+        "drop out of this ratchet: " + "; ".join(failures[m] for m in new)
+    )
+    fixed = sorted(KNOWN_IMPORT_FAILURES - set(failures))
+    assert not fixed, f"now import cleanly; remove from KNOWN_IMPORT_FAILURES: {fixed}"
 
 
 def test_retired_analytics_dashboard_family_stays_gone(inventory: dict) -> None:
