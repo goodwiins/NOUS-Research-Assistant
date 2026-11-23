@@ -18,6 +18,33 @@ import {
 } from 'lucide-react';
 import { EmptyState } from '@/components/ui/EmptyState';
 import React, { useEffect, useRef, useState } from 'react';
+// Bundled from npm. The graph used to inject an unpinned d3js.org script at
+// runtime (no SRI, no onerror) that the CSP blocks, leaving it blank (FR-4).
+import { select } from 'd3-selection';
+import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+} from 'd3-force';
+import { zoom as d3Zoom, zoomIdentity } from 'd3-zoom';
+import { drag } from 'd3-drag';
+// Side-effect import: adds selection.transition(), used by the zoom buttons.
+import 'd3-transition';
+
+// Only the d3 modules this graph uses, so the full d3 bundle is not shipped.
+const d3 = {
+  select,
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  zoom: d3Zoom,
+  zoomIdentity,
+  drag,
+};
 
 interface EntityGraphProps {
   entities: Entity[];
@@ -68,7 +95,6 @@ export const EntityGraph: React.FC<EntityGraphProps> = ({
   // simulation that ran forever (CPU + memory leak).
   const simulationRef = useRef<any>(null);
   const [selectedEntity, setSelectedEntity] = useState<Entity | null>(null);
-  const [d3Loaded, setD3Loaded] = useState(false);
 
   const prepareGraphData = () => {
     // Create nodes
@@ -99,9 +125,8 @@ export const EntityGraph: React.FC<EntityGraphProps> = ({
   };
 
   const renderGraph = () => {
-    if (!svgRef.current || !window.d3 || entities.length === 0) return;
+    if (!svgRef.current || entities.length === 0) return;
 
-    const d3 = window.d3;
     const svg = d3.select(svgRef.current);
     svg.selectAll('*').remove();
 
@@ -273,8 +298,7 @@ export const EntityGraph: React.FC<EntityGraphProps> = ({
   };
 
   const handleZoomIn = () => {
-    if (!window.d3 || !svgRef.current || !zoomRef.current) return;
-    const d3 = window.d3;
+    if (!svgRef.current || !zoomRef.current) return;
     const svg = d3.select(svgRef.current);
     svg
       .transition()
@@ -283,8 +307,7 @@ export const EntityGraph: React.FC<EntityGraphProps> = ({
   };
 
   const handleZoomOut = () => {
-    if (!window.d3 || !svgRef.current || !zoomRef.current) return;
-    const d3 = window.d3;
+    if (!svgRef.current || !zoomRef.current) return;
     const svg = d3.select(svgRef.current);
     svg
       .transition()
@@ -293,8 +316,7 @@ export const EntityGraph: React.FC<EntityGraphProps> = ({
   };
 
   const handleReset = () => {
-    if (!window.d3 || !svgRef.current || !zoomRef.current) return;
-    const d3 = window.d3;
+    if (!svgRef.current || !zoomRef.current) return;
     const svg = d3.select(svgRef.current);
     svg
       .transition()
@@ -334,36 +356,12 @@ export const EntityGraph: React.FC<EntityGraphProps> = ({
   };
 
   useEffect(() => {
-    // Load D3 library if not already loaded
-    if (window.d3) {
-      setD3Loaded(true);
-      renderGraph();
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = 'https://d3js.org/d3.v7.min.js';
-    script.async = true;
-    script.onload = () => {
-      setD3Loaded(true);
-      renderGraph();
-    };
-    document.body.appendChild(script);
-
-    return () => {
-      document.body.removeChild(script);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (window.d3 && d3Loaded) {
-      renderGraph();
-    }
+    renderGraph();
     // Stop the running simulation on dep change / unmount.
     return () => {
       if (simulationRef.current) simulationRef.current.stop();
     };
-  }, [entities, relationships, d3Loaded]);
+  }, [entities, relationships]);
 
   return (
     <Card className="w-full bg-(--nous-bg-2) border-(--nous-border-1) shadow-lg">
@@ -536,9 +534,3 @@ export const EntityGraph: React.FC<EntityGraphProps> = ({
     </Card>
   );
 };
-
-declare global {
-  interface Window {
-    d3: any;
-  }
-}

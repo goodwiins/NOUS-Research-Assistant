@@ -361,11 +361,13 @@ class LoggingService {
   logSearchQuery(query: string, resultsCount: number, responseTime: number, filters?: Record<string, any>) {
     this.addLog({
       level: LogLevel.INFO,
-      message: `Search Query: "${query}" - ${resultsCount} results (${responseTime}ms)`,
+      // The query text is user data and this entry reaches the console
+      // (GOO-638); keep only its length.
+      message: `Search query - ${resultsCount} results (${responseTime}ms)`,
       category: 'search',
       action: 'search_query',
       data: {
-        query,
+        queryLength: query.length,
         resultsCount,
         responseTime,
         filters

@@ -102,6 +102,51 @@ class WebSocketMessage:
             self.priority = Priority(self.priority)
 
 
+_FILTER_SCALARS = (str, int, float, bool, type(None))
+
+# Cluster publishes run on the HTTP request path (thread/message events), so
+# a black-holed Redis must cost a bounded, short wait and then be skipped for
+# a while instead of stalling every request.
+_REDIS_CONNECT_TIMEOUT_S = 1.0
+_REDIS_SOCKET_TIMEOUT_S = 2.0  # > the listener's 1s get_message poll
+_PUBLISH_TIMEOUT_S = 0.5
+_PUBLISH_BACKOFF_S = 10.0
+
+
+def _validated_message_filter(raw: Any) -> Optional[Dict[str, Any]]:
+    """A client-supplied ``message_filter``, or None when it is malformed.
+
+    The filter arrives from the client (connect payload or status frame) and
+    is applied to every broadcast this connection is a candidate for. Only a
+    flat ``{str: scalar | [scalar, ...]}`` object is accepted; anything else
+    is dropped so one bad frame cannot raise inside delivery.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Ignoring non-object websocket message_filter type=%s", type(raw).__name__
+        )
+        return None
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            logger.warning("Ignoring websocket message_filter with non-string key")
+            return None
+        if isinstance(value, list):
+            if not all(isinstance(item, _FILTER_SCALARS) for item in value):
+                logger.warning(
+                    "Ignoring websocket message_filter with non-scalar list item"
+                )
+                return None
+        elif not isinstance(value, _FILTER_SCALARS):
+            logger.warning(
+                "Ignoring websocket message_filter value type=%s",
+                type(value).__name__,
+            )
+            return None
+    return raw
+
+
 @dataclass
 class ConnectionInfo:
     """Connection metadata"""
@@ -152,7 +197,11 @@ class ConnectionInfo:
             return False
 
         # Check message filter
-        if self.message_filter and message.data:
+        if (
+            isinstance(self.message_filter, dict)
+            and self.message_filter
+            and isinstance(message.data, dict)
+        ):
             # Apply filtering logic based on connection's filter
             for key, filter_value in self.message_filter.items():
                 if key in message.data:
@@ -254,6 +303,7 @@ class EnhancedConnectionManager(BaseService):
             settings, "WS_MAX_CONNECTIONS_PER_USER", 100
         )
         self.message_queue = asyncio.Queue(maxsize=1000)
+        self._publish_suspended_until = 0.0
 
     async def initialize(self):
         """Initialize the connection manager"""
@@ -266,6 +316,8 @@ class EnhancedConnectionManager(BaseService):
                 encoding="utf-8",
                 decode_responses=True,
                 health_check_interval=30,
+                socket_connect_timeout=_REDIS_CONNECT_TIMEOUT_S,
+                socket_timeout=_REDIS_SOCKET_TIMEOUT_S,
             )
 
             # Test Redis connection
@@ -357,7 +409,11 @@ class EnhancedConnectionManager(BaseService):
             connected_at=datetime.now(dt_timezone.utc),
             last_heartbeat=datetime.now(dt_timezone.utc),
             subscribed_channels=set(),
-            message_filter=client_info.get("message_filter") if client_info else None,
+            message_filter=(
+                _validated_message_filter(client_info.get("message_filter"))
+                if client_info
+                else None
+            ),
             client_info=client_info or {},
             expires_at=expires_at,
         )
@@ -629,6 +685,21 @@ class EnhancedConnectionManager(BaseService):
             "target_organization": message.target_organization,
         }
 
+    @staticmethod
+    def _accepts(conn: "ConnectionInfo", message: WebSocketMessage) -> bool:
+        """Per-connection gate that can never abort a whole broadcast: a gate
+        error skips this one connection (fail closed) and the rest still get it.
+        """
+        try:
+            return conn.should_receive_message(message)
+        except Exception:
+            logger.warning(
+                "Websocket delivery gate failed; skipping connection %s",
+                conn.connection_id,
+                exc_info=True,
+            )
+            return False
+
     async def _deliver_local(self, connection_ids: Set[str], message: WebSocketMessage):
         """Deliver to the given locally-connected ids CONCURRENTLY, honouring the
         per-connection tenant/channel/filter gate. Concurrency plus the per-send
@@ -644,7 +715,7 @@ class EnhancedConnectionManager(BaseService):
             cid
             for cid in list(connection_ids)
             if (conn := self.active_connections.get(cid))
-            and conn.should_receive_message(message)
+            and self._accepts(conn, message)
         ]
         if not targets:
             return
@@ -655,7 +726,11 @@ class EnhancedConnectionManager(BaseService):
         )
 
     async def _publish_to_cluster(
-        self, kind: str, target: str, message: WebSocketMessage
+        self,
+        kind: str,
+        target: str,
+        message: WebSocketMessage,
+        targets: Optional[List[str]] = None,
     ):
         """Publish to the OTHER worker processes / replicas so a push produced on
         one worker reaches sockets held by another. ``kind`` is
@@ -663,6 +738,8 @@ class EnhancedConnectionManager(BaseService):
         id. No-op in single-instance mode (no Redis)."""
         if not self.redis_client:
             return
+        if time.monotonic() < self._publish_suspended_until:
+            return  # Redis failed recently: local delivery only for now.
         try:
             payload = {
                 "kind": kind,
@@ -674,9 +751,21 @@ class EnhancedConnectionManager(BaseService):
                 "message": self._serialize_for_cluster(message),
                 "source_instance": self.instance_id,
             }
-            await self.redis_client.publish("websocket_broadcast", json.dumps(payload))
+            if targets is not None:
+                # kind="channels": a multi-channel broadcast. Workers that
+                # predate it fall back to ``channel`` (the first one) above.
+                payload["targets"] = list(targets)
+            await asyncio.wait_for(
+                self.redis_client.publish("websocket_broadcast", json.dumps(payload)),
+                timeout=_PUBLISH_TIMEOUT_S,
+            )
         except Exception as e:
-            logger.error(f"Failed to broadcast via Redis (kind={kind}): {e}")
+            # Never fatal: local subscribers already received the message.
+            self._publish_suspended_until = time.monotonic() + _PUBLISH_BACKOFF_S
+            logger.error(
+                f"Failed to broadcast via Redis (kind={kind}): {type(e).__name__}; "
+                f"skipping cluster publish for {_PUBLISH_BACKOFF_S:.0f}s"
+            )
 
     async def broadcast_to_channel(self, channel: str, message: WebSocketMessage):
         """Broadcast message to all subscribers of a channel (local + cluster)."""
@@ -690,6 +779,33 @@ class EnhancedConnectionManager(BaseService):
 
         await self._deliver_local(self.channel_subscribers.get(channel, set()), message)
         await self._publish_to_cluster("channel", channel, message)
+
+    async def broadcast_to_channels(
+        self, channels: List[str], message: WebSocketMessage
+    ) -> None:
+        """Broadcast one message to the union of several channels' subscribers
+        (local + cluster), delivering at most once per connection.
+
+        The subscriber sets are snapshotted before any await, so a connect or
+        disconnect mid-broadcast cannot raise "set changed size during
+        iteration"; delivery is concurrent with the per-send timeout of
+        ``_deliver_local``. Other workers get ONE publish carrying every
+        channel so they de-duplicate the same way.
+        """
+        channels = list(dict.fromkeys(channels))
+        if not channels:
+            return
+        for channel in channels:
+            if not re.match(r"^[a-zA-Z0-9_.:\-]+$", channel):
+                raise ValueError(f"Invalid channel name: {channel}")
+            if channel not in message.target_channels:
+                message.target_channels.append(channel)
+
+        recipients: Set[str] = set()
+        for channel in channels:
+            recipients |= set(self.channel_subscribers.get(channel, ()))
+        await self._deliver_local(recipients, message)
+        await self._publish_to_cluster("channels", channels[0], message, channels)
 
     async def broadcast_to_user(self, user_id: str, message: WebSocketMessage):
         """Broadcast message to all connections for a user (local + cluster).
@@ -863,7 +979,9 @@ class EnhancedConnectionManager(BaseService):
 
         # Update message filter if provided
         if "message_filter" in status_data:
-            connection_info.message_filter = status_data["message_filter"]
+            connection_info.message_filter = _validated_message_filter(
+                status_data["message_filter"]
+            )
 
         # Record status update in database
         await self._log_connection_event(
@@ -1006,7 +1124,13 @@ class EnhancedConnectionManager(BaseService):
         # ``target`` is the new field; fall back to the legacy ``channel`` key so
         # an in-flight message from a not-yet-upgraded worker still routes.
         target = broadcast_data.get("target") or broadcast_data.get("channel")
-        if kind == "user":
+        if kind == "channels":
+            recipients: Set[str] = set()
+            for channel in broadcast_data.get("targets") or [target]:
+                if isinstance(channel, str):
+                    recipients |= set(self.channel_subscribers.get(channel, ()))
+            await self._deliver_local(recipients, message)
+        elif kind == "user":
             await self._deliver_local(self.user_connections.get(target, set()), message)
         elif kind == "organization":
             await self._deliver_local(

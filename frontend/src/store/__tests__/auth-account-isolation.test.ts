@@ -22,6 +22,7 @@ import { projectService } from '@/services/projectService';
 import { projectChatService } from '@/services/projectChatService';
 import { citationService } from '@/services/citationService';
 import * as scispaceService from '@/services/scispaceService';
+import { uploadService } from '@/services/uploadService';
 
 const auth = vi.hoisted(() => ({
   listener: undefined as
@@ -47,7 +48,7 @@ vi.mock('@/lib/supabase/clearAuthCookies', () => ({
   clearSupabaseAuthCookies: vi.fn(),
 }));
 vi.mock('@/services/api-client', () => ({
-  api: { get: vi.fn(), clearAuth: vi.fn() },
+  api: { get: vi.fn(), clearAuth: vi.fn(), upload: vi.fn() },
 }));
 vi.mock('@/services/projectService', () => ({
   projectService: {
@@ -583,6 +584,37 @@ describe('private account lifetime', () => {
       );
     }
   );
+  it("cancels A's upload queue so B's token never uploads A's files", async () => {
+    // GOO-638 (FL-3): the upload queue is a module singleton that outlives
+    // client-side account changes.
+    let uploadSignal: AbortSignal | undefined;
+    vi.mocked(api.upload).mockImplementation(
+      (_path, _file, options) =>
+        new Promise((_resolve, reject) => {
+          uploadSignal = (options as { signal?: AbortSignal }).signal;
+          uploadSignal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          );
+        })
+    );
+    uploadService.addToQueue([
+      new File(['a'], 'A-uploading.pdf'),
+      new File(['b'], 'A-queued-1.pdf'),
+      new File(['c'], 'A-queued-2.pdf'),
+      new File(['d'], 'A-queued-3.pdf'),
+    ]);
+    await vi.waitFor(() => expect(uploadSignal).toBeDefined());
+    const uploadsBeforeSwitch = vi.mocked(api.upload).mock.calls.length;
+
+    await switchToB();
+    // Let any scheduled queue pass run under B.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(uploadSignal?.aborted).toBe(true);
+    expect(uploadService.getQueueItems()).toEqual([]);
+    expect(vi.mocked(api.upload).mock.calls.length).toBe(uploadsBeforeSwitch);
+  });
+
   it('clears the research-engine project and run cache', async () => {
     useResearchEngineStore.setState({
       projects: [{ id: 'A-only-project' } as never],

@@ -1,6 +1,7 @@
 import { clearSupabaseAuthCookies } from '@/lib/supabase/clearAuthCookies';
 import { createClient as createSupabaseBrowserClient } from '@/lib/supabase/client';
 import { api } from '@/services/api-client';
+import { uploadService } from '@/services/uploadService';
 import { clearWorkspaceServiceCache } from '@/services/workspaceService';
 import { getAppQueryClient } from '@/lib/query-client';
 import {
@@ -146,6 +147,9 @@ function clearUserScopedClientState(): void {
   api.clearAuth();
   getAppQueryClient()?.clear();
   resetAccountSession();
+  // The upload queue is a module singleton too: abort in-flight uploads and
+  // drop queued files so the next account's token never uploads them.
+  attempt('cancel queued uploads', () => uploadService.cancelAllUploads());
   attempt('reset the chat store', () => useChatStore.getState().reset());
   attempt('reset the agent chat store', () =>
     useAgentChatStore.getState().reset()

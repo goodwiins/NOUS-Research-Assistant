@@ -19,9 +19,11 @@ export const cacheWarmAfterProcessing = task({
     const query = documentTitle || documentId;
 
     try {
+      // Hybrid document search takes its inputs as query parameters.
+      const params = new URLSearchParams({ query, size: "5" });
       await backendClient.post(
-        "/api/v1/search",
-        { query, limit: 5, document_ids: [documentId] },
+        `/api/v1/documents/search?${params}`,
+        undefined,
         undefined,
         undefined,
         { idempotent: true },

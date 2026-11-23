@@ -111,3 +111,20 @@ export type ArxivIngestPaperPayload = z.infer<
 >;
 export type BatchProcessPayload = z.infer<typeof BatchProcessPayloadSchema>;
 export type CacheWarmPayload = z.infer<typeof CacheWarmPayloadSchema>;
+
+/** GET /api/v1/workers/status (`WorkerStatsResponse` in backend/openapi.json). */
+export const WorkerStatsResponseSchema = z.object({
+  active_workers: z.number(),
+  total_workers: z.number(),
+  active_tasks: z.number(),
+  pending_tasks: z.number(),
+  registered_tasks: z.number(),
+});
+export type WorkerStatsResponse = z.infer<typeof WorkerStatsResponseSchema>;
+
+/** GET /api/v1/workers/health (backend/src/api/infrastructure/workers.py). */
+export const WorkerHealthResponseSchema = z.object({
+  healthy: z.boolean(),
+  workers_online: z.number(),
+  issues: z.array(z.string()),
+});

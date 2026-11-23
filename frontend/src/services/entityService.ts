@@ -9,6 +9,7 @@ import { Entity, EntityResponse, EntityType, GraphEdge } from '@/types/entity';
 import { EntityDetails, GraphNode } from '@/types/graph-api';
 import { api } from '@/services/api-client';
 import { APIErrorClass } from '@/types/api';
+import { buildSearchParams } from '@/lib/typeGuards';
 
 /**
  * Retry wrapper utility for API calls
@@ -134,16 +135,14 @@ class EntityService {
     connectedOnly?: boolean
   ): Promise<PaginatedEntitiesResponse> {
     return withRetry(async () => {
-      const params: Record<string, any> = { limit, offset };
-      if (entityTypes && entityTypes.length > 0) {
-        params.entity_types = entityTypes;
-      }
-      if (connectedOnly) {
-        params.connected_only = true;
-      }
-      const qs = new URLSearchParams(
-        Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])
-      ).toString();
+      // FastAPI's `List[EntityType]` query wants repeated keys
+      // (`entity_types=A&entity_types=B`), not one comma-joined value (GOO-651).
+      const qs = buildSearchParams({
+        limit,
+        offset,
+        entity_types: entityTypes && entityTypes.length > 0 ? entityTypes : undefined,
+        connected_only: connectedOnly ? true : undefined,
+      }).toString();
       const response = await api.get(`${this.baseUrl}/entities${qs ? `?${qs}` : ''}`);
       return response as PaginatedEntitiesResponse;
     });
@@ -227,10 +226,12 @@ class EntityService {
     entityTypes?: string[],
     limit: number = 50
   ): Promise<Entity[]> {
-    const qs = new URLSearchParams(
-      Object.entries({ query, entity_types: entityTypes?.join(','), limit: String(limit) })
-        .filter(([, v]) => v !== undefined) as [string, string][]
-    ).toString();
+    // Repeated `entity_types` keys, as FastAPI's list query expects (GOO-651).
+    const qs = buildSearchParams({
+      query,
+      entity_types: entityTypes && entityTypes.length > 0 ? entityTypes : undefined,
+      limit,
+    }).toString();
     const response = await api.get<Entity[]>(
       `${this.baseUrl}/entities/search${qs ? `?${qs}` : ''}`
     );

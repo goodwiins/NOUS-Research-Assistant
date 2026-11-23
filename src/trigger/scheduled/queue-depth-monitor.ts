@@ -1,5 +1,6 @@
 import { logger, schedules } from "@trigger.dev/sdk";
 import { backendClient } from "../_lib/backend-client";
+import { WorkerStatsResponseSchema } from "../_lib/schemas";
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_DIGEST_WEBHOOK_URL;
 const PENDING_THRESHOLD = 50;
@@ -38,19 +39,20 @@ export const queueDepthMonitor = schedules.task({
     let pendingTasks = 0;
 
     try {
-      const status = await backendClient.get<{
-        workers?: Array<Record<string, unknown>>;
-        pending_tasks?: number;
-        active_tasks?: number;
-      }>("/api/v1/infrastructure/workers/status");
+      // The workers router is mounted at /api/v1/workers; the old
+      // /api/v1/infrastructure/workers/* path never existed (GOO-678).
+      const status = await backendClient.get(
+        "/api/v1/workers/status",
+        WorkerStatsResponseSchema,
+      );
 
-      workerCount = status.workers?.length ?? 0;
-      pendingTasks = status.pending_tasks ?? 0;
+      workerCount = status.active_workers;
+      pendingTasks = status.pending_tasks;
 
       logger.info("Queue depth check", {
         workerCount,
         pendingTasks,
-        activeTasks: status.active_tasks ?? 0,
+        activeTasks: status.active_tasks,
       });
     } catch (err) {
       logger.error("Failed to fetch worker status", { error: String(err) });

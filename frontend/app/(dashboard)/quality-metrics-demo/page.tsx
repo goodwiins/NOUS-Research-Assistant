@@ -32,10 +32,9 @@ export default function QualityMetricsDemo() {
                 />
               </div>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                Live retrieval quality for a query. When a real-time connection
-                is unavailable, the panel below shows representative sample
-                values, refreshed every couple of seconds, so you can preview
-                the layout.
+                Retrieval quality for a query. No live quality measurements are
+                connected yet, so the panel below shows each metric as
+                unavailable rather than sample values.
               </p>
             </div>
           </CardContent>

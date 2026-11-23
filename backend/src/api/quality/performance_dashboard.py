@@ -55,6 +55,33 @@ def _scope_overview_for(user: User, overview: Dict[str, Any]) -> Dict[str, Any]:
     return scoped
 
 
+def _section_value(overview: Dict[str, Any], section: str, key: str) -> Any:
+    """``overview[section][key]``, or None when either is missing."""
+    values = overview.get(section)
+    return values.get(key) if isinstance(values, dict) else None
+
+
+def _system_metrics(overview: Dict[str, Any]) -> Dict[str, Any]:
+    """``/dashboard`` summary built from the (already scoped) overview."""
+    return {
+        # The overview carries no document count.
+        "total_documents": None,
+        "total_searches": _section_value(
+            overview, "search_performance", "total_searches"
+        ),
+        "avg_response_time": _section_value(
+            overview, "search_performance", "avg_response_time"
+        ),
+        # No availability measurement exists. system_health.uptime is host
+        # uptime in seconds (and operator-only), not an availability figure.
+        "uptime": None,
+        # system_health is platform-operator only; others get null.
+        "error_rate": _section_value(overview, "system_health", "error_rate"),
+        # user_engagement is org-admin only; others get null.
+        "active_users": _section_value(overview, "user_engagement", "active_users"),
+    }
+
+
 @router.get("/dashboard")
 async def get_performance_dashboard(
     time_range: MetricTimeRange = Query(
@@ -72,16 +99,13 @@ async def get_performance_dashboard(
             ),
         )
 
-        # Transform data to match expected format from notebook
+        # Flatten the real nested sections (GOO-724). These keys used to be
+        # read from the top level of the overview, where they never exist, so
+        # every value was a default: zeros and a made-up "99.9%" uptime.
+        # A value with no measurement, or from a section this caller may not
+        # see (_scope_overview_for, GOO-633), is null, never a default.
         return {
-            "system_metrics": {
-                "total_documents": dashboard.get("total_documents", 0),
-                "total_searches": dashboard.get("total_searches", 0),
-                "avg_response_time": dashboard.get("avg_response_time", 0),
-                "uptime": dashboard.get("uptime", "99.9%"),
-                "error_rate": dashboard.get("error_rate", 0),
-                "active_users": dashboard.get("active_users", 0),
-            },
+            "system_metrics": _system_metrics(dashboard),
             "performance_trends": dashboard.get("performance_trends", []),
             "alerts": dashboard.get("alerts", []),
             "timestamp": dashboard.get("timestamp", datetime.utcnow().isoformat()),

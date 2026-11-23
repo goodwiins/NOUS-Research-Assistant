@@ -8,6 +8,7 @@
 import React, { useCallback, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { SafeMarkdownImage } from '@/components/markdown/SafeMarkdownImage';
 import { Download, FileText, Code, History } from 'lucide-react';
 import type { Draft } from '@/services/projectService';
 import { ToneToolbar } from './ToneToolbar';
@@ -65,6 +66,10 @@ export const DraftViewer: React.FC<DraftViewerProps> = ({
   // GOO-314: a peer-review "Old text / New text" link opens that version.
   const [passage, setPassage] = useState<PassageTarget | null>(null);
   const capabilities = useBackendCapabilities(Boolean(projectId));
+  // The rewrite, insert and outline tools only offer "Accept" when a caller
+  // can apply the result. Without `onTextRewrite` Accept was a silent no-op
+  // after a paid generation call, so the tools stay hidden (FR-7).
+  const canEditText = Boolean(onTextRewrite);
   const release = useDraftRelease(projectId, draft.id, draft.version);
 
   const handleTextSelect = useCallback((event: React.MouseEvent) => {
@@ -275,7 +280,7 @@ export const DraftViewer: React.FC<DraftViewerProps> = ({
         <div
           ref={contentRef}
           className="prose prose-sm max-w-none text-muted-foreground relative"
-          onMouseUp={handleTextSelect}
+          onMouseUp={canEditText ? handleTextSelect : undefined}
         >
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkDocBadges]}
@@ -291,6 +296,7 @@ export const DraftViewer: React.FC<DraftViewerProps> = ({
                 </h3>
               ),
               p: ({ children }) => <p className="mb-4">{children}</p>,
+              img: SafeMarkdownImage,
               a: ({ href, children }) => (
                 <a href={href} target="_blank" rel="noopener noreferrer">
                   {children}
@@ -309,7 +315,7 @@ export const DraftViewer: React.FC<DraftViewerProps> = ({
             {draft.content || ''}
           </ReactMarkdown>
         </div>
-        {toneToolbarPos && selectedText && !rewriteResult && (
+        {canEditText && toneToolbarPos && selectedText && !rewriteResult && (
           <ToneToolbar
             selectedText={selectedText}
             position={toneToolbarPos}
@@ -320,7 +326,8 @@ export const DraftViewer: React.FC<DraftViewerProps> = ({
             }}
           />
         )}
-        {writerToolbarPos &&
+        {canEditText &&
+          writerToolbarPos &&
           !selectedText &&
           !writeResult &&
           !rewriteResult && (
@@ -369,7 +376,7 @@ export const DraftViewer: React.FC<DraftViewerProps> = ({
 
       {/* Outline Dialog */}
       <OutlineDialog
-        isOpen={showOutlineDialog}
+        isOpen={canEditText && showOutlineDialog}
         onInsertOutline={handleInsertOutline}
         onClose={() => setShowOutlineDialog(false)}
       />
