@@ -23,7 +23,7 @@ export const SECURITY_CONFIG = {
     'default-src': ["'self'"],
     'script-src': ["'self'", "'unsafe-inline'"],
     'style-src': ["'self'", "'unsafe-inline'"],
-    'img-src': ["'self'", 'data:', 'https:'],
+    'img-src': ["'self'", 'data:', 'blob:'],
     'font-src': ["'self'"],
     'connect-src': ["'self'"],
     'frame-ancestors': ["'none'"],
