@@ -12,6 +12,10 @@ import {
 import { useArtifactPanelStore } from '@/store/artifactPanelStore';
 import { resetAccountSession } from '@/lib/account-session';
 import { discardForeignChatAuthRecovery } from '@/hooks/chat/chatAuthRecovery';
+import {
+  clearUnsentChatStorage,
+  discardForeignUnsentChat,
+} from '@/hooks/chat/unsentChatStorage';
 import { useChatStore } from '@/store/chat-store';
 import { useAgentChatStore } from '@/store/agentChatStore';
 import { useProjectStore } from '@/store/projectStore';
@@ -247,6 +251,9 @@ function observeIdentity(userId: string): void {
   // A rejected session keeps its staged chat draft for the same user's
   // re-login, so clearSession() cannot drop it; any other identity must.
   discardForeignChatAuthRecovery(userId);
+  // Same rule for unsent turns and drafts (GOO-788): the same account keeps
+  // them across a lost session, any other account never sees them.
+  discardForeignUnsentChat(userId);
   // In-memory identity answers first: a tab still holding A must clear on
   // B's event even when another tab already re-stamped the shared storage as
   // B. Only a fresh load, where memory knows nothing, consults the persisted
@@ -507,6 +514,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   signOut: async () => {
+    // Only an explicit sign-out drops this tab's unsent turns and drafts
+    // (GOO-788). clearSession() also runs when a session merely lapses or a
+    // profile check fails transiently; the owner stamp covers those.
+    attempt('clear unsent chat text', clearUnsentChatStorage);
     clearSession();
     const revision = authRevision;
 

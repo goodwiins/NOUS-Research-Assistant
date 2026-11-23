@@ -164,6 +164,7 @@ export const useChatStore = create<ChatStore>()(
 // ============================================================================
 
 export type { MessageFreshness, RefreshExpectation } from './chat/types';
+export { MAX_REINIT_RETRIES } from './chat/initialState';
 export {
   captureChatSession,
   onChatSessionReset,

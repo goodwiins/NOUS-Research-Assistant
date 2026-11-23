@@ -30,6 +30,7 @@ import {
   markChatAuthRecoveryReady,
   stageChatAuthRecovery,
 } from '@/hooks/chat/chatAuthRecovery';
+import { loadChatDraft, saveChatDraft } from '@/hooks/chat/unsentChatStorage';
 import {
   AgentStreamRequestFailed,
   agentChatService,
@@ -763,18 +764,25 @@ export function useChatStreaming(
       // this hook again (for example when a preflight is superseded). Resolve
       // the owner from the live stores so a draft entered in the new context
       // cannot be written under the old callback's key.
-      const contextKey = chatDraftContextKey(
-        useAuthStore.getState().user?.id,
+      const ownerUserId = useAuthStore.getState().user?.id;
+      const workspaceId =
         workspace?.id ??
-          dbConversation?.workspace_id ??
-          draftWorkspaceIdRef.current,
-        liveDraftThreadId()
+        dbConversation?.workspace_id ??
+        draftWorkspaceIdRef.current;
+      const threadId = liveDraftThreadId();
+      const contextKey = chatDraftContextKey(
+        ownerUserId,
+        workspaceId,
+        threadId
       );
       inputContextKeyRef.current = contextKey;
       if (contextKey) {
         if (next) draftValuesRef.current.set(contextKey, next);
         else draftValuesRef.current.delete(contextKey);
       }
+      // Survives a reload (GOO-788). A send clears the composer through here
+      // first, so a sent draft never comes back.
+      if (ownerUserId) saveChatDraft(ownerUserId, workspaceId, threadId, next);
       setInputState(next);
     },
     [dbConversation?.workspace_id, liveDraftThreadId, workspace?.id]
@@ -815,6 +823,9 @@ export function useChatStreaming(
       draftValuesRef.current.get(draftContextKey) ??
       pendingPreflightDraftsRef.current.get(draftContextKey) ??
       carriedDraft ??
+      (authenticatedUserId
+        ? loadChatDraft(authenticatedUserId, draftWorkspaceId, draftThreadId)
+        : undefined) ??
       '';
     if (pendingPreflightDraftsRef.current.has(draftContextKey)) {
       pendingPreflightDraftsRef.current.delete(draftContextKey);

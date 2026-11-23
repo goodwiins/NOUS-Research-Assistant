@@ -16,6 +16,7 @@ import { upsertConversationFromThread } from '@/components/chat/shared/threadCon
 import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
 import { useChatSessionGuard } from './useChatSessionGuard';
+import { loadUnsentTurns, saveUnsentTurns } from './unsentChatStorage';
 import { useChatStore, onChatSessionReset } from '@/store/chat-store';
 import { useAuthStore } from '@/stores/authStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -1014,15 +1015,30 @@ export function useChatSession(): UseChatSessionReturn {
     sessionUserIdRef.current = userId;
     isHydratedRef.current = false;
     parkedMessagesRef.current.clear();
-    localMessagesThreadIdRef.current = null;
     firstPageThreadsRef.current = [];
     threadsPageRef.current = 1;
     unavailableInitialUrlThreadRef.current = null;
     setWorkspace(null);
     setConversations([]);
-    setMessages([]);
     setHasMoreThreads(false);
+    // The account became known after the thread did (a reload restores the
+    // selection before the profile): give back this account's unsent turns
+    // for it (GOO-788). For any other account this finds none.
+    const threadId = userId ? useChatStore.getState().currentThreadId : null;
+    localMessagesThreadIdRef.current = threadId;
+    setMessages(userId && threadId ? loadUnsentTurns(userId, threadId) : []);
   }, [userId]);
+
+  // Mirror the displayed thread's rejected sends to sessionStorage so a
+  // reload does not lose them (GOO-788). Declared after the account effect
+  // and before the switch effect: in a commit that changes either, this reads
+  // the thread and owner the `messages` were rendered for.
+  useEffect(() => {
+    const threadId = localMessagesThreadIdRef.current;
+    const ownerUserId = sessionUserIdRef.current;
+    if (!threadId || !ownerUserId) return;
+    saveUnsentTurns(ownerUserId, threadId, messages);
+  }, [messages]);
 
   useEffect(() => {
     const outgoingThreadId = localMessagesThreadIdRef.current;
@@ -1080,7 +1096,10 @@ export function useChatSession(): UseChatSessionReturn {
       setMessages(parked);
       return;
     }
-    setMessages([]);
+    // Nothing parked in memory, as after a reload: restore the sends the
+    // server rejected from this tab's storage (GOO-788).
+    const ownerUserId = sessionUserIdRef.current;
+    setMessages(ownerUserId ? loadUnsentTurns(ownerUserId, activeThreadId) : []);
   }, [activeThreadId]);
 
   return {
