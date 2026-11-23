@@ -127,7 +127,11 @@ export function useChatComposerActions({
             documentId: result.response.document_id,
           }))
           .catch((err) => {
-            console.error('[Chat] Upload failed for', file.name, err);
+            // No file name: it is user data, and console.error reaches
+            // Sentry (GOO-638).
+            console.error('[Chat] Upload failed', {
+              errorType: err instanceof Error ? err.name : typeof err,
+            });
             return { file, ok: false as const };
           })
       );
