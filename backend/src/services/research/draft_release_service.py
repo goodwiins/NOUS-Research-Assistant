@@ -20,7 +20,6 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.document import Document
 from src.models.draft_release import DraftRelease
 from src.models.draft_task_result import DraftTaskResult
 from src.models.extraction_matrix import (
@@ -40,7 +39,7 @@ from src.models.research_project_role import ResearchProjectRole
 from src.models.user import User
 from src.services.research import claim_rules, extraction_rules
 from src.services.research import release_rules as rules
-from src.services.research.extraction_forms_service import _changed, document_pins
+from src.services.research.extraction_forms_service import _changed, load_document_pins
 from src.services.research_decisions import (
     DecisionIdempotencyConflict,
     append_decision,
@@ -294,17 +293,15 @@ async def _changed_sources(
         )
     }
     ids = {UUID(rules.parse_source(value)[0]) for _kind, value in sources}
-    documents = {
-        str(d.id): d
-        for d in await _all(db, select(Document).where(Document.id.in_(ids)))
+    pins = {
+        str(document_id_): pin
+        for document_id_, pin in (await load_document_pins(db, ids)).items()
     }
     changed = set()
     for source in sources:
         document_id_, source_hash, text_hash = rules.parse_source(source[1])
-        document = documents.get(document_id_)
-        if document is None or _changed(
-            document_pins(document), source_hash, text_hash
-        ):
+        pin = pins.get(document_id_)
+        if pin is None or _changed(pin, source_hash, text_hash):
             changed.add(source)
     return changed
 

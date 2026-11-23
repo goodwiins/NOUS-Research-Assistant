@@ -107,6 +107,15 @@ class EvidenceMeter(BaseModel):
     publication_retraction_check: PublicationRetractionCheck = (
         PublicationRetractionCheck.NOT_PERFORMED
     )
+    failed_sources: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Number of sources whose stance could not be classified (provider "
+            "error, timeout or ungrounded answer). A meter with failed sources "
+            "is partial and is never cached."
+        ),
+    )
     cached: bool = Field(..., description="Whether result was served from cache")
     reproducibility_hash: str = Field(
         ..., description="Hash for reproducibility tracking"

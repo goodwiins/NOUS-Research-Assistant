@@ -22,7 +22,7 @@ from typing import Any, Mapping, Sequence, cast
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import exists, select
+from sqlalchemy import Text, exists, func, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -98,6 +98,60 @@ def document_pins(document: Any) -> tuple[str, str]:
     text_hash = anchors.text_sha256(document.content_text or "")
     assert text_hash is not None
     return document_source_hash(document), text_hash
+
+
+def _pins_from_hashes(checksum: object, text_hash: str) -> tuple[str, str]:
+    """``document_pins`` from a stored checksum and a precomputed text hash."""
+    if isinstance(checksum, str) and _SHA256_RE.fullmatch(checksum.lower()):
+        return checksum.lower(), text_hash
+    return text_hash, text_hash
+
+
+async def load_document_pins(
+    db: AsyncSession, document_ids: Any
+) -> dict[UUID, tuple[str, str]]:
+    """``document_pins`` for many documents without loading their text.
+
+    Staleness checks run on every superseding write, under the project lock.
+    Hydrating whole ``Document`` rows only to hash ``content_text`` makes
+    every such write ship the project's full text to the app. On PostgreSQL
+    the hash is computed in the database (same bytes: SHA-256 of the UTF-8
+    text, ``''`` for NULL); other dialects (SQLite unit tests) fall back to
+    selecting the text column alone.
+    """
+    ids = list(document_ids)
+    if not ids:
+        return {}
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        text_hash = func.encode(
+            func.sha256(
+                func.convert_to(
+                    func.coalesce(Document.content_text, literal("", Text)), "UTF8"
+                )
+            ),
+            "hex",
+        )
+        rows = await db.execute(
+            select(Document.id, Document.checksum_sha256, text_hash).where(
+                Document.id.in_(ids)
+            )
+        )
+        return {
+            row[0]: _pins_from_hashes(row[1], cast(str, row[2]))
+            for row in rows.all()
+        }
+    rows = await db.execute(
+        select(Document.id, Document.checksum_sha256, Document.content_text).where(
+            Document.id.in_(ids)
+        )
+    )
+    return {
+        row[0]: _pins_from_hashes(
+            row[1], cast(str, anchors.text_sha256(row[2] or ""))
+        )
+        for row in rows.all()
+    }
 
 
 def _changed(pins: tuple[str, str], source_hash: str, text_hash: str | None) -> bool:
@@ -1266,14 +1320,7 @@ async def cell_view(
             if row.missingness
             else cast(str | None, row.anchor_status) or "unverified"
         )
-    # ponytail: loads text to hash it; add a stored text hash if that ever
-    # gets slow.
-    pins: dict[Any, tuple[str, str]] = {
-        document.id: document_pins(document)
-        for document in (
-            await db.execute(select(Document).where(Document.id.in_(allowed)))
-        ).scalars()
-    }
+    pins: dict[Any, tuple[str, str]] = await load_document_pins(db, allowed)
     hashes = {document_id: pin[0] for document_id, pin in pins.items()}
     accepted: dict[tuple[Any, str], list[rules.Accepted]] = {}
     for tip in await _tips(db, list(by_id)):

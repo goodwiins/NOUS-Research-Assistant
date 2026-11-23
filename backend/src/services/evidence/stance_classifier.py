@@ -46,9 +46,14 @@ def _normalize_grounding_text(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
-def _has_grounded_justification(source_excerpt: str, justification: object) -> bool:
-    if not isinstance(justification, str) or not justification.strip():
+def _has_grounded_justification(
+    source_excerpt: str, justification: object, stance: object = None
+) -> bool:
+    if not isinstance(justification, str):
         return False
+    if not justification.strip():
+        # A source that does not address the claim has nothing to quote.
+        return stance == "not_addressed"
     return _normalize_grounding_text(justification) in _normalize_grounding_text(
         source_excerpt
     )
@@ -81,6 +86,7 @@ class StanceClassifier:
         self.fallback_confidence_threshold = 0.85
         self.max_batch_sources = 100
         self.batch_timeout_seconds = 60.0
+        self.max_concurrent_classifications = 16
 
     @property
     def classifier_version(self) -> str:
@@ -305,7 +311,9 @@ Respond with ONLY a valid JSON object in this exact format:
                 if self._has_honest_cached_provenance(
                     cached_result
                 ) and _has_grounded_justification(
-                    source_excerpt, cached_result.get("justification_excerpt")
+                    source_excerpt,
+                    cached_result.get("justification_excerpt"),
+                    cached_result.get("stance"),
                 ):
                     cached_result = dict(cached_result)
                     cached_result["source_content_hash"] = source_content_hash
@@ -326,7 +334,7 @@ Respond with ONLY a valid JSON object in this exact format:
                 return None
 
             if not _has_grounded_justification(
-                source_excerpt, result.justification_excerpt
+                source_excerpt, result.justification_excerpt, result.stance
             ):
                 logger.warning(
                     "Rejecting ungrounded stance classification for source %s",
@@ -377,16 +385,21 @@ Respond with ONLY a valid JSON object in this exact format:
 
         self.validate_batch_size(len(sources))
 
-        tasks = []
-        for source in sources:
-            task = self.classify_stance(
-                claim=claim,
-                claim_hash=claim_hash,
-                source_id=source["source_id"],
-                source_excerpt=source["excerpt"],
-                source_content_hash=source["content_hash"],
-            )
-            tasks.append(task)
+        # Bound fan-out: an unbounded 100-source batch is the usual way to hit
+        # provider 429s, and every 429 becomes a failed source.
+        semaphore = asyncio.Semaphore(self.max_concurrent_classifications)
+
+        async def _bounded(source: Dict) -> Optional[Dict]:
+            async with semaphore:
+                return await self.classify_stance(
+                    claim=claim,
+                    claim_hash=claim_hash,
+                    source_id=source["source_id"],
+                    source_excerpt=source["excerpt"],
+                    source_content_hash=source["content_hash"],
+                )
+
+        tasks = [_bounded(source) for source in sources]
 
         # Run classifications in parallel
         try:

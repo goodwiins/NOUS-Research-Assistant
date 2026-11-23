@@ -12064,6 +12064,13 @@
             "$ref": "#/components/schemas/ConsensusLevel",
             "description": "Overall consensus level"
           },
+          "failed_sources": {
+            "default": 0,
+            "description": "Number of sources whose stance could not be classified (provider error, timeout or ungrounded answer). A meter with failed sources is partial and is never cached.",
+            "minimum": 0.0,
+            "title": "Failed Sources",
+            "type": "integer"
+          },
           "neutral": {
             "description": "Number of neutral sources",
             "minimum": 0.0,
