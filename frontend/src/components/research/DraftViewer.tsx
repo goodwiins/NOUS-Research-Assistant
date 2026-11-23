@@ -8,6 +8,7 @@
 import React, { useCallback, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { SafeMarkdownImage } from '@/components/markdown/SafeMarkdownImage';
 import { Download, FileText, Code, History } from 'lucide-react';
 import type { Draft } from '@/services/projectService';
 import { ToneToolbar } from './ToneToolbar';
@@ -291,6 +292,7 @@ export const DraftViewer: React.FC<DraftViewerProps> = ({
                 </h3>
               ),
               p: ({ children }) => <p className="mb-4">{children}</p>,
+              img: SafeMarkdownImage,
               a: ({ href, children }) => (
                 <a href={href} target="_blank" rel="noopener noreferrer">
                   {children}

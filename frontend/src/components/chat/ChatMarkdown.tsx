@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { rehypeFreshTail } from '@/lib/rehypeFreshTail';
 import dynamic from 'next/dynamic';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { SafeMarkdownImage } from '@/components/markdown/SafeMarkdownImage';
 
 const SyntaxHighlighter = dynamic(
   () =>
@@ -88,6 +89,8 @@ export const baseComponents: Components = {
   // rel="noopener noreferrer" so a malicious target can't reach back via
   // window.opener (reverse tabnabbing).
   a: MarkdownLink,
+  // SECURITY (GOO-636): never auto-load model-written remote images.
+  img: SafeMarkdownImage,
   // GFM tables can exceed the bubble width; scroll them instead of breaking
   // the chat column layout.
   table({ children }) {
