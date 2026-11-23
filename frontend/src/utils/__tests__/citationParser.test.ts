@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   extractCitationIndices,
   getReferencedCitations,
+  getVisibleCitations,
   hasCitations,
   parseMessageWithCitations,
 } from '@/utils/citationParser';
@@ -124,5 +125,71 @@ describe('chained bare citations (verification follow-up)', () => {
       citationCount: 3,
     });
     expect(segments.every((segment) => segment.type === 'text')).toBe(true);
+  });
+});
+
+describe('source selection ignores markers the renderer does not render (MX2-3)', () => {
+  const sources = [
+    { documentId: 'a', title: 'A', score: 1 },
+    { documentId: 'b', title: 'B', score: 1 },
+    { documentId: 'c', title: 'C', score: 1 },
+  ];
+  const ids = (list: { documentId?: string }[]): (string | undefined)[] =>
+    list.map((c) => c.documentId);
+
+  it.each([
+    [
+      'a fenced block',
+      'Here is the fix:\n\n```python\nprint(values[1])\n```\n',
+    ],
+    ['a tilde fence', 'Example:\n\n~~~\nsee [Doc 2]\n~~~\n'],
+    ['an unclosed fence', 'Partial:\n\n```\nrow = grid[2]\n'],
+    ['an inline code span', 'Index with `values[1]` to read it.'],
+    ['a double-backtick span', 'Write ``a `tick` then [2]`` literally.'],
+  ])('keeps every source when the only marker is in %s', (_label, content) => {
+    expect(getReferencedCitations(content, sources)).toEqual([]);
+    expect(ids(getVisibleCitations(content, sources))).toEqual(['a', 'b', 'c']);
+  });
+
+  it('still counts markers in prose around code', () => {
+    const content =
+      'As [2] shows:\n\n```\nx = arr[1]\n```\n\nand `y[3]` differs from [Doc 3].';
+    expect(ids(getVisibleCitations(content, sources))).toEqual(['b', 'c']);
+  });
+
+  it('counts a marker on a line that only mentions backticks unclosed', () => {
+    expect(ids(getVisibleCitations('A stray ` then [1].', sources))).toEqual([
+      'a',
+    ]);
+  });
+
+  it('does not close a backtick fence with a tilde line', () => {
+    const content = 'Code:\n\n```\n~~~\nsee [1]\n```\n';
+    expect(getReferencedCitations(content, sources)).toEqual([]);
+  });
+
+  it('does not close a long fence with a shorter one', () => {
+    const content = 'Nested:\n\n````md\n```\nsee [1]\n```\n````\n';
+    expect(getReferencedCitations(content, sources)).toEqual([]);
+  });
+
+  it('does not close a fence with a line that carries an info string', () => {
+    const content = 'Code:\n\n```\n```python\nsee [1]\n```\n';
+    expect(getReferencedCitations(content, sources)).toEqual([]);
+  });
+
+  it('closes a code span only with a run of the same length', () => {
+    const content = 'Use `` ` `` for [1] and `x`.';
+    expect(ids(getVisibleCitations(content, sources))).toEqual(['a']);
+  });
+
+  it('caps bare groups at the real source count, like the renderer', () => {
+    // [2, 5] with three sources renders as plain text, so it must not narrow
+    // the list to source 2.
+    expect(ids(getVisibleCitations('See [2, 5].', sources))).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
   });
 });

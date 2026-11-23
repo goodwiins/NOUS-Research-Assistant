@@ -235,8 +235,74 @@ export function extractCitationIndices(
   return Array.from(new Set(indices)).sort((a, b) => a - b);
 }
 
+const FENCE_OPEN_PATTERN = /^ {0,3}(`{3,}|~{3,})/;
+const BACKTICK_RUN_PATTERN = /`+/g;
+
+/** Blank out inline code spans: a run of N backticks closed by a run of
+ * exactly N. An unmatched run stays literal, as in CommonMark. */
+function maskInlineCode(text: string): string {
+  const runs = Array.from(text.matchAll(BACKTICK_RUN_PATTERN));
+  let masked = '';
+  let cursor = 0;
+  let i = 0;
+  while (i < runs.length) {
+    const open = runs[i];
+    const closeAt = runs.findIndex(
+      (run, j) => j > i && run[0].length === open[0].length
+    );
+    if (closeAt === -1) {
+      i += 1;
+      continue;
+    }
+    const close = runs[closeAt];
+    const end = (close.index ?? 0) + close[0].length;
+    masked += text.slice(cursor, open.index) + ' ';
+    cursor = end;
+    i = closeAt + 1;
+  }
+  return masked + text.slice(cursor);
+}
+
+/**
+ * The parts of Markdown the renderer scans for citations. CitationRenderer
+ * transforms only text nodes, so a `[1]` inside a fenced block or an inline
+ * code span never renders as a citation; source selection must not count it
+ * either (MX2-3). Fences follow CommonMark: up to 3 spaces of indent, 3+
+ * backticks or tildes, closed by the same character at least as long, and
+ * an unclosed fence runs to the end. Indented code blocks are not masked:
+ * telling them from list continuations needs a full Markdown parse.
+ */
+export function citationScanText(content: string): string {
+  const prose: string[] = [];
+  let fence: string | null = null;
+  for (const line of content.split('\n')) {
+    const marker = FENCE_OPEN_PATTERN.exec(line)?.[1];
+    if (fence !== null) {
+      if (
+        marker &&
+        marker[0] === fence[0] &&
+        marker.length >= fence.length &&
+        line.trim() === marker
+      ) {
+        fence = null;
+      }
+      prose.push('');
+      continue;
+    }
+    if (marker) {
+      fence = marker;
+      prose.push('');
+      continue;
+    }
+    prose.push(line);
+  }
+  return maskInlineCode(prose.join('\n'));
+}
+
 /**
  * Select the array items referenced by inline citation markers in the content.
+ * Uses the same rules as CitationRenderer: markers in code are ignored, and a
+ * bare index above `items.length` is not a citation.
  *
  * @param content - Assistant message content containing inline citations
  * @param items - Source array aligned to citation numbering (1-based in content)
@@ -246,7 +312,9 @@ export function getReferencedItemsByCitationIndex<T>(
   content: string,
   items: T[]
 ): T[] {
-  const indices = extractCitationIndices(content);
+  const indices = extractCitationIndices(citationScanText(content), {
+    citationCount: items.length,
+  });
 
   if (indices.length === 0) {
     return [];
