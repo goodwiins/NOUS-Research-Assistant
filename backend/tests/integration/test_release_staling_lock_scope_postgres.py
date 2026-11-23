@@ -26,7 +26,10 @@ Mutation verification (docs/engineering/testing.md):
 - a new link or first assessment resolving through ``resolve_for_staling``:
   ``test_writes_that_cannot_stale_skip_the_snapshot`` sees a snapshot;
 - the identity-map expunge removed from ``snapshot_edges``:
-  ``test_snapshot_leaves_no_rows_in_the_session`` finds the graph rows.
+  ``test_snapshot_leaves_no_rows_in_the_session`` finds the graph rows;
+- ``_require_read_committed`` dropped from ``resolve_for_staling`` or from
+  ``invalidate_dependents``, or accepting ``repeatable read`` (GOO-777):
+  ``test_staling_refuses_a_repeatable_read_transaction`` sees no error.
 
 Command (from ``backend/``): ``ORCHESTRATION_TEST_DATABASE_URL=... pytest -q
 tests/integration/test_release_staling_lock_scope_postgres.py``.
@@ -413,3 +416,52 @@ async def test_writes_that_cannot_stale_skip_the_snapshot(
             db=db,
         )
     assert snapshots == [1]
+
+
+async def _repeatable_read(db: Any) -> None:
+    """Start this session's transaction at REPEATABLE READ (as
+    ``prisma_service._begin_snapshot`` does)."""
+    await db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+    level = (await db.execute(text("SHOW transaction_isolation"))).scalar_one()
+    assert level == "repeatable read"
+
+
+@pytest.mark.asyncio
+async def test_staling_refuses_a_repeatable_read_transaction(
+    screening_factory: Factory,
+) -> None:
+    """GOO-777: under REPEATABLE READ the post-lock head re-read and the
+    rebuild under the lock both see the transaction's first snapshot, so a
+    release promoted in between would be missed silently. Both entry points
+    refuse instead, and nothing is staled."""
+    w = await _setup(screening_factory)
+    draft_id, claim, assessment = await _releasable(w)
+    release, _ = await _promote(w, "S", draft_id, 2, "s-1", _sha(V2))
+
+    async with w.factory() as db:
+        await _repeatable_read(db)
+        with pytest.raises(RuntimeError, match=svc.STALING_ISOLATION_ERROR):
+            await svc.resolve_for_staling(db, w.p1, w.ids["A"], ADJUDICATE)
+        await db.rollback()
+
+    async with w.factory() as db:
+        await _repeatable_read(db)
+        with pytest.raises(RuntimeError, match=svc.STALING_ISOLATION_ERROR):
+            await svc.invalidate_dependents(
+                db,
+                collection_id=w.p1,
+                changed={("assessment", str(assessment))},
+                actor_id=w.ids["A"],
+                actor_role="adjudicator",
+                cause={"family": "test", "event_id": None, "kind": "test"},
+            )
+        await db.rollback()
+
+    assert await _stale_at(w, release.id) is None
+    # The default (READ COMMITTED) still stales it.
+    async with w.factory() as db:
+        level = (await db.execute(text("SHOW transaction_isolation"))).scalar_one()
+        assert level == "read committed"
+        await db.rollback()
+        await _reassess(db, w, claim, assessment, "a-rc")
+    assert await _stale_at(w, release.id) is not None

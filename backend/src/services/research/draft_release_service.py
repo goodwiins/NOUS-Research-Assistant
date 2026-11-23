@@ -16,7 +16,7 @@ from typing import Any, Iterable, Sequence, cast
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -149,13 +149,37 @@ async def _stream_heads(
     appraisal, evidence table, certainty, contradiction, synthesis result,
     run manifest, figure) is written by a function that appends a decision
     to one of this Collection's streams in the same transaction, so equal
-    heads mean equal edges."""
+    heads mean equal edges. ``tests/unit/architecture/
+    test_release_graph_writers_append.py`` enforces that rule (GOO-777)."""
     rows = await db.execute(
         select(ResearchDecisionStream.id, ResearchDecisionStream.next_seq)
         .where(ResearchDecisionStream.collection_id == collection_id)
         .order_by(ResearchDecisionStream.id)
     )
     return tuple((str(stream_id), int(head)) for stream_id, head in rows.all())
+
+
+STALING_ISOLATION_ERROR = "release staling requires READ COMMITTED"
+
+
+async def _require_read_committed(db: AsyncSession) -> None:
+    """Fail closed unless this transaction is READ COMMITTED (GOO-777).
+
+    The staling race analysis (GOO-721) needs every statement to see the
+    commits that landed before it: the heads re-read once the Collection
+    lock is held, and the graph rebuilt under that lock, must include a
+    release promoted between the pre-lock snapshot and the lock. Under
+    REPEATABLE READ or SERIALIZABLE they read the transaction's first
+    snapshot instead, so a concurrent promotion would be missed silently and
+    a release that should be stale would stay live. PostgreSQL's default
+    (and this app's engine) is READ COMMITTED; a caller that raised it gets
+    an error, not a wrong answer. SQLite (unit tests) runs one connection, so
+    no commit can land between the reads."""
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    level = (await db.execute(text("SHOW transaction_isolation"))).scalar_one()
+    if level != "read committed":
+        raise RuntimeError(STALING_ISOLATION_ERROR)
 
 
 async def _live_release_ids(db: AsyncSession, collection_id: UUID) -> list[UUID]:
@@ -209,6 +233,7 @@ async def resolve_for_staling(
     superseding an old one): their edges cannot reach a release in the same
     transaction. A writer that adds edges between existing nodes (a review
     version's accepted delta) must keep resolving with ``resolve_project``."""
+    await _require_read_committed(db)
     viewer = await resolve_project(db, project_id, user_id)
     snapshot = await snapshot_edges(db, _cid(viewer))
     context = await resolve_project(db, project_id, user_id, action)
@@ -815,7 +840,10 @@ async def invalidate_dependents(
     Collection lock was taken (``resolve_for_staling``). None rebuilds the
     graph here, under the lock (GOO-721)."""
     changed = set(changed)
-    if not changed or not await _live_release_ids(db, collection_id):
+    if not changed:
+        return []
+    await _require_read_committed(db)
+    if not await _live_release_ids(db, collection_id):
         return []
     if edges is None:
         edges = await load_edges(db, collection_id)
