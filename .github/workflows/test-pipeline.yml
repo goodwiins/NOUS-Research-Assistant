@@ -1048,15 +1048,21 @@ jobs:
           PDF_EXPORT_TEST_REQUIRE_RENDERER: "1"
       - name: Run ingestion recovery PostgreSQL tests
         if: matrix.shard == 1
-        # Every PostgreSQL test under backend/tests/unit runs here, once, on a
-        # real database: the Unit Tests job has none, so they skip there. The
-        # lane started with ingestion recovery and the PDF-chat branch suites
-        # (GOO-436); GOO-702 made it pick up every *_postgres.py file instead
-        # of a hand-kept list, plus the PostgreSQL tests that live in files
-        # named otherwise (listed below; tests/unit/ci/test_shard_tests.py
-        # fails if one is missing). REQUIRE_POSTGRES_TESTS=1 makes a skipped
-        # PostgreSQL test fail (backend/tests/conftest.py), and the check
-        # below rejects any skip in the junit report as well.
+        # Every PostgreSQL test outside backend/tests/integration runs here,
+        # once, on a real database: the Unit Tests job has none, so they skip
+        # there (or, marked integration, are deselected). The lane started with
+        # ingestion recovery and the PDF-chat branch suites (GOO-436); GOO-702
+        # made it pick up every *_postgres.py file under backend/tests/unit.
+        # GOO-731 added the directories whose tests use the local-database
+        # fixtures of backend/tests/db/conftest.py; the fixture falls back to
+        # ORCHESTRATION_TEST_DATABASE_URL. A PostgreSQL test is one marked
+        # requires_postgres; backend/tests/conftest.py adds the mark to every
+        # test in a *_postgres.py file and every test using a PostgreSQL
+        # fixture, so -m requires_postgres selects exactly those.
+        # tests/unit/ci/test_shard_tests.py fails if a PostgreSQL test sits in
+        # a file or directory this list misses. REQUIRE_POSTGRES_TESTS=1 makes
+        # a skipped PostgreSQL test fail, and the check below rejects any skip
+        # in the junit report as well.
         run: |
           mkdir -p test-results
           # shellcheck disable=SC2207 # repo paths, no spaces
@@ -1066,9 +1072,13 @@ jobs:
             backend/tests/unit/tasks/test_stuck_recovery_terminal_retry.py
             backend/tests/unit/services/integrations/test_account_connections.py
             backend/tests/unit/services/integrations/test_account_scope.py
+            backend/tests/db
+            backend/tests/unit/services/threads
+            backend/tests/api/agent
+            backend/tests/api/threads
           )
           pytest "${postgres_tests[@]}" \
-            -c backend/pytest.ini -m "integration or requires_postgres" \
+            -c backend/pytest.ini -m requires_postgres \
             --junitxml=test-results/ingestion-recovery.xml -q -ra
           python - <<'PY'
           import xml.etree.ElementTree as ET
