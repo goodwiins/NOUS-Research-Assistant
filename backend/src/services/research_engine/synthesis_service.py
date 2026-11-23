@@ -490,6 +490,7 @@ async def execute(
                 "event_id": str(event_id),
                 "kind": "synthesis.executed",
             },
+            edges=context.release_edges,
         )
     await db.commit()
     await db.refresh(row)
