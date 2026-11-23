@@ -47,6 +47,28 @@ export interface UseDocumentUploadReturn {
   getFileIcon: (file: File) => string;
 }
 
+// The upload queue is a page-lifetime singleton. Only unfinished items count
+// toward maxFiles: completed and failed items used to count too, so after
+// maxFiles uploads in one tab every new batch was rejected with
+// TOO_MANY_FILES until a reload (GOO-723).
+const isUnfinished = (item: UploadQueueItem): boolean =>
+  item.status === 'pending' ||
+  item.status === 'uploading' ||
+  item.status === 'processing';
+
+const countUnfinished = (): number =>
+  uploadService.getQueueItems().filter(isUnfinished).length;
+
+// Finished items belong to an earlier batch; drop them when a new batch
+// starts so the queue (and the wizard's processing list) shows only the
+// current one. Unfinished items are left alone.
+const removeFinishedItems = (): void => {
+  uploadService
+    .getQueueItems()
+    .filter((item) => !isUnfinished(item))
+    .forEach((item) => uploadService.removeFromQueue(item.id));
+};
+
 export const useDocumentUpload = (options: UseDocumentUploadOptions = {}): UseDocumentUploadReturn => {
   const {
     // Reserved for a future concurrent-upload limiter; not yet wired up.
@@ -109,10 +131,10 @@ export const useDocumentUpload = (options: UseDocumentUploadOptions = {}): UseDo
 
   // Add files to queue
   const addToQueue = useCallback((files: File[]) => {
-    // Validate files
+    // Validate files against the uploads still in flight only.
     const validation = validateFileBatch(
       files,
-      queueItems.length,
+      countUnfinished(),
       currentQuotaUsed,
       {
         maxFileSize,
@@ -123,13 +145,14 @@ export const useDocumentUpload = (options: UseDocumentUploadOptions = {}): UseDo
     );
 
     if (validation.isValid) {
+      removeFinishedItems();
       const fileIds = uploadService.addToQueue(files);
       return { success: fileIds, errors: [] };
     }
 
     // If validation failed, return only the errors
     return { success: [], errors: validation.errors };
-  }, [queueItems.length, currentQuotaUsed, maxFileSize, maxFiles, allowedTypes, maxQuota]);
+  }, [currentQuotaUsed, maxFileSize, maxFiles, allowedTypes, maxQuota]);
 
   // Remove item from queue
   const removeFromQueue = useCallback((fileId: string) => {
@@ -155,7 +178,7 @@ export const useDocumentUpload = (options: UseDocumentUploadOptions = {}): UseDo
   const validateFiles = useCallback((files: File[]) => {
     return validateFileBatch(
       files,
-      queueItems.length,
+      countUnfinished(),
       currentQuotaUsed,
       {
         maxFileSize,
@@ -164,7 +187,7 @@ export const useDocumentUpload = (options: UseDocumentUploadOptions = {}): UseDo
         maxQuota,
       }
     );
-  }, [queueItems.length, currentQuotaUsed, maxFileSize, maxFiles, allowedTypes, maxQuota]);
+  }, [currentQuotaUsed, maxFileSize, maxFiles, allowedTypes, maxQuota]);
 
   // Calculate derived status
   const isUploading = stats.uploadingFiles > 0;
