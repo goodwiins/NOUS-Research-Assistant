@@ -848,6 +848,13 @@ jobs:
         run: |
           pnpm --filter @nous/harness-bridge type-check
           pnpm --filter @nous/harness-bridge test
+      - name: Check Trigger.dev tasks (node:test)
+        # src/trigger deploys from main with no other CI coverage. Includes
+        # the backend-path contract against backend/openapi.json (GOO-678).
+        # src/trigger and backend/openapi.json changes select the full
+        # profile, so this job runs for both.
+        working-directory: .
+        run: node --experimental-transform-types --experimental-test-module-mocks --no-warnings --test tests/trigger/*.test.mjs
       - name: Check NOUS QA runner (node:test)
         # tests/e2e/qa (pnpm qa:nous) and its nous-verify selection/evidence
         # code have no other CI coverage; the suites need no browser.

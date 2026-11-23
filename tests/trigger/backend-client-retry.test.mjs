@@ -55,3 +55,15 @@ test("an opted-in idempotent POST is retried", { timeout: 10_000 }, async () => 
   );
   assert.equal(calls.length, 3);
 });
+
+// GOO-678: a response that fails its schema is a contract mismatch, not a
+// transient fault. Retrying it only delays the same ZodError.
+test("a response that fails its schema is fetched once, even when idempotent", async () => {
+  const { z } = await import("zod");
+  const calls = stubFetch(200);
+  await assert.rejects(
+    backendClient.get("/api/v1/workers/status", z.object({ active_workers: z.number() })),
+    (err) => err instanceof z.ZodError,
+  );
+  assert.equal(calls.length, 1);
+});

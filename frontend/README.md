@@ -29,7 +29,7 @@ pnpm --dir frontend dev:offline       # next dev; `dev` wraps `infisical run` an
 | `app/(dashboard)/`    | the signed-in app, see below                                                                                    |
 | `app/(public)/`       | unauthenticated pages (`arxiv`)                                                                                 |
 | `app/auth/`           | OAuth callbacks (`callback`, `orcid`)                                                                           |
-| `app/api/`            | Next route handlers: `backend-capabilities`, `health`, `trigger`, `webhooks/github`                              |
+| `app/api/`            | Next route handlers: `backend-capabilities`, `health`, `trigger`                                                 |
 | `app/page.tsx`        | landing page                                                                                                    |
 
 Dashboard sub-routes under `app/(dashboard)/`: `chat` (including `new` and
