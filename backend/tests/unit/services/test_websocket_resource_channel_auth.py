@@ -32,9 +32,11 @@ from src.services.websocket.websocket_manager import (
 
 pytestmark = pytest.mark.unit
 
-CALLER = str(uuid4())
-THREAD = str(uuid4())
-CONVERSATION = str(uuid4())
+# Fixed ids: CALLER appears in parametrize ids, which must be identical on
+# every xdist worker.
+CALLER = "11111111-1111-4111-8111-111111111111"
+THREAD = "22222222-2222-4222-8222-222222222222"
+CONVERSATION = "33333333-3333-4333-8333-333333333333"
 
 
 def _manager() -> tuple[EnhancedConnectionManager, ConnectionInfo]:
