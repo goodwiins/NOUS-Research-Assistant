@@ -133,6 +133,54 @@ describe('useDocuments.deleteDocuments', () => {
     expect(mockGet).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps failed ids selected so the user can retry them (GOO-727)', async () => {
+    mockDelete.mockImplementation((path: string) =>
+      path === '/documents/b'
+        ? Promise.reject(new Error('boom'))
+        : Promise.resolve(undefined)
+    );
+    const { result } = renderHook(() => useDocuments({ autoFetch: false }));
+    act(() => {
+      result.current.selectDocument('a');
+      result.current.selectDocument('b');
+    });
+    // After the batch, the refetch still returns the one that failed.
+    mockGet.mockResolvedValue({
+      documents: [{ id: 'b', title: 'Kept', filename: 'b.pdf' }],
+      pagination: {
+        page: 1,
+        page_size: 20,
+        total: 1,
+        total_pages: 1,
+        has_next: false,
+        has_prev: false,
+      },
+    });
+
+    await act(async () => {
+      await result.current.deleteDocuments(['a', 'b']).catch(() => undefined);
+    });
+
+    expect(result.current.selectedDocuments.has('a')).toBe(false);
+    expect(result.current.selectedDocuments.has('b')).toBe(true);
+    expect(result.current.selectedCount).toBe(1);
+  });
+
+  it('drops a failed id from the selection once it no longer exists', async () => {
+    mockDelete.mockRejectedValue(new Error('timeout'));
+    const { result } = renderHook(() => useDocuments({ autoFetch: false }));
+    act(() => {
+      result.current.selectDocument('gone');
+    });
+
+    await act(async () => {
+      await result.current.deleteDocuments(['gone']).catch(() => undefined);
+    });
+
+    // The refetch (empty list) shows it was deleted after all.
+    expect(result.current.selectedDocuments.has('gone')).toBe(false);
+  });
+
   it('stops the loop on a mid-batch auth failure, skips the rest, and calls handleAuthError once', async () => {
     mockDelete.mockImplementation((path: string) => {
       if (path === '/documents/b') {

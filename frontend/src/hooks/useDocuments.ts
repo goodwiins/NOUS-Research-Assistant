@@ -389,7 +389,7 @@ export const useDocuments = (
             return;
           }
           if (error.error.status_code === 401) {
-            handleAuthError();
+            handleAuthError(error);
             if (isStale()) return;
             setState((prev) => ({
               ...prev,
@@ -414,25 +414,6 @@ export const useDocuments = (
         // Handle other error types (network errors, etc.)
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
-
-        // Check for various authentication error patterns in error messages
-        const isAuthError =
-          errorMessage.includes('Could not validate credentials') ||
-          errorMessage.includes('Authentication failed') ||
-          errorMessage.includes('Unauthorized') ||
-          errorMessage.includes('Invalid token') ||
-          errorMessage.includes('Session expired');
-
-        if (isAuthError) {
-          handleAuthError();
-          if (isStale()) return;
-          setState((prev) => ({
-            ...prev,
-            loading: false,
-            error: 'Your session has expired. Please log in again.',
-          }));
-          return;
-        }
 
         if (isStale()) return;
         setState((prev) => ({
@@ -529,7 +510,7 @@ export const useDocuments = (
           return { message: FORBIDDEN_MESSAGES.delete, isAuth: false };
         }
         if (error.error.status_code === 401) {
-          handleAuthError();
+          handleAuthError(error);
           return {
             message: 'Your session has expired. Please log in again.',
             isAuth: true,
@@ -544,20 +525,6 @@ export const useDocuments = (
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
 
-      const isAuthError =
-        errorMessage.includes('Could not validate credentials') ||
-        errorMessage.includes('Authentication failed') ||
-        errorMessage.includes('Unauthorized') ||
-        errorMessage.includes('Invalid token') ||
-        errorMessage.includes('Session expired');
-
-      if (isAuthError) {
-        handleAuthError();
-        return {
-          message: 'Your session has expired. Please log in again.',
-          isAuth: true,
-        };
-      }
       return { message: errorMessage, isAuth: false };
     },
     [handleAuthError]
@@ -643,10 +610,14 @@ export const useDocuments = (
 
       await fetchDocuments();
 
+      // Deselect what was deleted; keep failed and skipped ids that still
+      // exist selected so the user can retry them in one step (GOO-727).
+      const failedIds = new Set(failures.map(({ id }) => id));
       setState((prev) => {
+        const present = new Set(prev.documents.map((d) => d.id));
         const newSelected = new Set(prev.selectedDocuments);
         for (const id of documentIds) {
-          newSelected.delete(id);
+          if (!failedIds.has(id) || !present.has(id)) newSelected.delete(id);
         }
         return { ...prev, selectedDocuments: newSelected };
       });
@@ -695,7 +666,7 @@ export const useDocuments = (
             throw new Error(FORBIDDEN_MESSAGES.reprocess);
           }
           if (error.error.status_code === 401) {
-            handleAuthError();
+            handleAuthError(error);
             setState((prev) => ({
               ...prev,
               loading: false,
@@ -718,24 +689,6 @@ export const useDocuments = (
         // Handle other error types (network errors, etc.)
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
-
-        // Check for various authentication error patterns in error messages
-        const isAuthError =
-          errorMessage.includes('Could not validate credentials') ||
-          errorMessage.includes('Authentication failed') ||
-          errorMessage.includes('Unauthorized') ||
-          errorMessage.includes('Invalid token') ||
-          errorMessage.includes('Session expired');
-
-        if (isAuthError) {
-          handleAuthError();
-          setState((prev) => ({
-            ...prev,
-            loading: false,
-            error: 'Your session has expired. Please log in again.',
-          }));
-          return;
-        }
 
         setState((prev) => ({
           ...prev,

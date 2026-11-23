@@ -54,6 +54,7 @@ import {
   SortOrder,
 } from '@/components/entities/EntityFilters';
 import { Pagination } from '@/components/entities/Pagination';
+import { entityPagination } from '@/components/entities/entityPagination';
 import {
   needsClientEntityTypeFilter,
   serverEntityTypeFilter,
@@ -596,9 +597,12 @@ function EntityManagementContent() {
         currentPage * pageSize
       )
     : filteredEntities;
-  const totalPages = Math.ceil(
-    (hasClientFilters ? filteredEntities.length : totalEntities) / pageSize
-  );
+  const { totalItems: paginationTotal, totalPages } = entityPagination({
+    hasClientFilters,
+    filteredCount: filteredEntities.length,
+    serverTotal: totalEntities,
+    pageSize,
+  });
 
   // Keyboard shortcuts
   useKeyboardShortcuts(
@@ -925,7 +929,7 @@ function EntityManagementContent() {
                   currentPage={currentPage}
                   totalPages={totalPages}
                   pageSize={pageSize}
-                  totalItems={totalEntities}
+                  totalItems={paginationTotal}
                   onPageChange={handlePageChange}
                   onPageSizeChange={handlePageSizeChange}
                 />
