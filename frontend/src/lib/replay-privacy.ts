@@ -153,7 +153,9 @@ let uninstall: (() => void) | undefined;
  * through this guard: client navigations, `router.refresh()`, Next's own
  * URL writes and code calling `history` directly. A change TO a sensitive
  * URL stops replay before the address bar changes; a change to a clean URL
- * resumes it afterwards. Back/forward arrive as `popstate`.
+ * resumes it afterwards. Back/forward arrive as `popstate`; in the app,
+ * Next's restore then also writes the URL with `replaceState`, which passes
+ * the wrapper too (the listener covers entries Next does not manage).
  */
 export function installReplayUrlGuard(
   getReplay: () => ReplayControl | undefined

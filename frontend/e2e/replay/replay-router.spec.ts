@@ -28,7 +28,27 @@ async function capture(page: Page): Promise<Captured> {
 
 type NextWindow = Window & {
   next?: { router?: { refresh(): void; push(href: string): void } };
+  __NEXT_HYDRATED?: boolean;
 };
+
+/**
+ * Load a page and wait until React has hydrated it. `window.next.router`
+ * exists as soon as the client bundle loads, but a push issued before
+ * hydration commits is dropped (#2277 CI flake). Next sets
+ * `window.__NEXT_HYDRATED` from its root effect in test mode
+ * (`__NEXT_TEST_MODE`, set by playwright.replay-router.config.ts); child
+ * effects, including the app router's, have run by then.
+ */
+async function gotoHydrated(page: Page, url: string): Promise<void> {
+  await page.goto(url);
+  await page
+    .waitForFunction(() => (window as NextWindow).__NEXT_HYDRATED === true, undefined, {
+      timeout: 60_000,
+    })
+    .catch(() => {
+      throw new Error('Next never reported hydration: is __NEXT_TEST_MODE set on the server?');
+    });
+}
 
 const router = (page: Page, call: 'refresh' | 'push', href?: string): Promise<void> =>
   page.evaluate(
@@ -65,7 +85,7 @@ test('verify-email: the stripped token stays out after refresh, navigation and b
   page,
 }) => {
   const captured = await capture(page);
-  await page.goto(`/verify-email?token_hash=${TOKEN}&type=signup`);
+  await gotoHydrated(page, `/verify-email?token_hash=${TOKEN}&type=signup`);
   await expect.poll(() => search(page)).toBe('');
 
   // Next's history entry still carries its own state (back/forward work).
@@ -100,7 +120,7 @@ test('a client navigation to a sensitive URL sends no replay of it; a clean one 
   page,
 }) => {
   const captured = await capture(page);
-  await page.goto('/login');
+  await gotoHydrated(page, '/login');
   const sensitive = `/login?next=${encodeURIComponent(`/cli-auth?session_id=${SESSION}`)}`;
   await router(page, 'push', sensitive);
   await expect.poll(() => page.url()).toContain(SESSION);
@@ -109,6 +129,36 @@ test('a client navigation to a sensitive URL sends no replay of it; a clean one 
   expect(captured.text.join('\n')).not.toContain(SESSION);
 
   await router(page, 'push', '/register');
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/register');
+  await throwAndWait(page, captured, true);
+  expect(captured.text.join('\n')).not.toContain(SESSION);
+});
+
+test('back/forward into a sensitive history entry sends no replay of it', async ({ page }) => {
+  const captured = await capture(page);
+  await gotoHydrated(page, '/login');
+  const sensitive = `/login?next=${encodeURIComponent(`/cli-auth?session_id=${SESSION}`)}`;
+  await router(page, 'push', sensitive);
+  await expect.poll(() => page.url()).toContain(SESSION);
+  await router(page, 'push', '/register');
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/register');
+
+  // Back into the sensitive entry: the guard stops replay on popstate.
+  await page.goBack();
+  await expect.poll(() => page.url()).toContain(SESSION);
+  await throwAndWait(page, captured, false);
+  expect(captured.recordings).toEqual([]);
+
+  // Forward out of it: replay resumes on the clean URL.
+  await page.goForward();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/register');
+  await throwAndWait(page, captured, true);
+
+  // Back once more, then a replay from the next clean page: no envelope
+  // (errors or recordings) ever carries the session id.
+  await page.goBack();
+  await expect.poll(() => page.url()).toContain(SESSION);
+  await page.goForward();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/register');
   await throwAndWait(page, captured, true);
   expect(captured.text.join('\n')).not.toContain(SESSION);
