@@ -100,6 +100,12 @@ function errorStatusCode(error: unknown): number | undefined {
 
 let authStateListenerRegistered = false;
 
+// FL2E-2: a transient /auth/me failure after getUser() verified the user is
+// retried on this schedule, with isLoading held so the shell does not settle
+// into signed-out and redirect, before it settles as "profile unavailable".
+const PROFILE_RETRY_DELAYS_MS = [1000, 3000] as const;
+let profileRetryAttempt = 0;
+
 // The latest explicit login or signup owns its profile request. signIn fetches /auth/me itself
 // with the freshly issued access token, so the SIGNED_IN the same call emits
 // must NOT kick off a second, concurrent profile fetch for the same login.
@@ -161,7 +167,9 @@ function clearUserScopedClientState(): void {
   attempt('reset the pipeline store', () =>
     usePipelineStore.getState().reset()
   );
-  attempt('clear citations', () => useCitationStore.getState().clearCitations());
+  attempt('clear citations', () =>
+    useCitationStore.getState().clearCitations()
+  );
   attempt('reset the research engine store', () =>
     useResearchEngineStore.setState(useResearchEngineStore.getInitialState())
   );
@@ -188,6 +196,7 @@ function clearUserScopedClientState(): void {
 function clearSession(): void {
   authRevision += 1;
   profileFetchInFlight = null;
+  profileRetryAttempt = 0;
   sessionUserId = null;
   activeSignIn = null;
   clearUserScopedClientState();
@@ -560,6 +569,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     // SDK callbacks can re-enter this action.
     const request = Promise.resolve().then(async () => {
       if (revision !== authRevision) return;
+      // Set once getUser() has verified the JWT for this request.
+      let verifiedUserId: string | null = null;
       try {
         const supabase = getSupabaseClient();
         // SECURITY (audit #7): gate on getUser(), which verifies the JWT with
@@ -580,6 +591,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         observeIdentity(user.id);
         revision = authRevision;
         profileFetchInFlight = request;
+        verifiedUserId = user.id;
 
         const {
           data: { session },
@@ -598,6 +610,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         if (revision !== authRevision) return;
         observeIdentity(profileData.user.id);
         publishVerifiedAccount(profileData.user.id);
+        profileRetryAttempt = 0;
 
         set({
           user: profileData.user,
@@ -622,6 +635,34 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // above still clear it, so a genuinely dead session is never kept.
         if (get().isAuthenticated && get().user !== null && !tokenRejected) {
           set({ isLoading: false, error: message });
+          return;
+        }
+
+        // FL2E-2: the same holds on a first load. getUser() has already
+        // verified this user, so a non-401/403 failure means the profile is
+        // unavailable, not that the session is dead. Keep the identity and
+        // every cache; retry a few times while still loading, then settle
+        // with the error. A later fetchProfile (TOKEN_REFRESHED, a reload)
+        // can still recover.
+        if (!tokenRejected && verifiedUserId !== null) {
+          const delay = PROFILE_RETRY_DELAYS_MS[profileRetryAttempt];
+          if (delay === undefined) {
+            profileRetryAttempt = 0;
+            set({ isLoading: false, error: message });
+            return;
+          }
+          profileRetryAttempt += 1;
+          const retryRevision = authRevision;
+          setTimeout(() => {
+            if (
+              retryRevision === authRevision &&
+              !activeSignIn &&
+              !get().user
+            ) {
+              void get().fetchProfile();
+            }
+          }, delay);
+          set({ error: message });
           return;
         }
 
