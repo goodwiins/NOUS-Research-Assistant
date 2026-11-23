@@ -12,8 +12,12 @@
 # directory-docs lint, mypy on added files, the alembic head check, the
 # API-contract gates (OpenAPI snapshot + generated TS types), the targeted
 # evidence migration-delta probe (blocking when it runs; visible skip when
-# PostgreSQL is unavailable), and the unit suite. The truly-empty Alembic
-# replay remains a visible advisory measurement of legacy-chain health.
+# PostgreSQL is unavailable), the backend architecture tests (even with
+# --skip-tests), and the unit suite run from the repo root as CI runs it.
+# --frontend adds type-check, the lint ratchets, and vitest with the coverage
+# ratchet. The truly-empty Alembic replay remains a visible advisory
+# measurement of legacy-chain health. Untracked (not yet `git add`-ed) files
+# count as changed, so a new file is ratcheted before it is committed.
 #
 # The three contract gates, and when each one runs:
 #   * OpenAPI snapshot drift        — ALWAYS (offline: in-memory SQLite + placeholder env)
@@ -405,17 +409,44 @@ else
   fi
 fi
 
+# Backend pytest the way the unit-tests job runs it: bare `pytest` from the
+# repo root with -c backend/pytest.ini and the job's placeholder env. Running
+# from backend/ (or `python -m pytest`, which also puts the cwd on sys.path)
+# hides import-path bugs in tests that start subprocesses; -P (Python 3.11+,
+# the CI version) keeps sys.path the way the console script sees it.
+BACKEND_UNIT_MARKERS="unit or not (integration or e2e or slow)"
+backend_pytest() {
+  ENVIRONMENT=testing \
+    DATABASE_URL="sqlite:///:memory:" \
+    AZURE_OPENAI_CHAT_ENDPOINT="https://example.invalid" \
+    AZURE_OPENAI_CHAT_API_KEY="test-key-not-real" \
+    AZURE_OPENAI_CHAT_DEPLOYMENT_NAME="test-deployment" \
+    AZURE_OPENAI_CHAT_API_VERSION="2024-02-01" \
+    AZURE_OPENAI_ENDPOINT="https://example.invalid" \
+    AZURE_OPENAI_API_KEY="test-key-not-real" \
+    "$PY" -P -m pytest "$@" -c backend/pytest.ini -m "$BACKEND_UNIT_MARKERS" \
+    -q -p no:cacheprovider --no-cov
+}
+
+# Static architecture contracts (no dangling create_task, router/service
+# boundaries, ...). CI runs them inside the unit suite; they are cheap and
+# easy to break without noticing, so they run here even with --skip-tests.
+step "Backend architecture tests (blocking, runs even with --skip-tests)"
+backend_pytest backend/tests/unit/architecture
+check $? "backend architecture tests"
+
 if [ "$SKIP_TESTS" -eq 0 ]; then
   step "NOUS workflow contract tests (blocking)"
   "$PY" -m pytest tests/unit/scripts/ --confcutdir=tests/unit/scripts \
     -q -p no:cacheprovider --no-cov
   check $? "NOUS workflow contract tests"
 
-  step "Unit tests (blocking)"
-  ( cd backend && "$PY" -m pytest tests/ -c pytest.ini \
-    -m "unit or not (integration or e2e or slow)" \
-    -q -p no:cacheprovider --no-cov )
+  step "Unit tests (blocking, from the repo root like CI)"
+  # The architecture tests already ran above; everything else CI selects.
+  backend_pytest backend/tests/ --ignore=backend/tests/unit/architecture
   check $? "pytest"
+else
+  skipped "NOUS workflow contract tests + backend unit tests" "--skip-tests"
 fi
 
 if [ "$DO_FRONTEND" -eq 1 ]; then
@@ -452,6 +483,26 @@ if [ "$DO_FRONTEND" -eq 1 ]; then
     printf '\033[32m  ✓ pnpm lint (advisory)\033[0m\n'
   else
     warn "  ⚠ pnpm lint (advisory) exited $FULL_LINT_RC; full lint output is shown above"
+  fi
+
+  # Mirrors the frontend-tests job: `pnpm test:coverage` with CI=true (same
+  # retries and reporters), then the blocking coverage ratchet against the
+  # floors in frontend/quality-baseline.json. The old summary is removed first
+  # so a failed or crashed run can never be ratcheted on stale numbers.
+  if [ "$SKIP_TESTS" -eq 0 ]; then
+    step "Frontend unit tests + coverage ratchet (blocking)"
+    COVERAGE_SUMMARY="frontend/coverage/coverage-summary.json"
+    rm -f -- "$COVERAGE_SUMMARY"
+    ( cd frontend && CI=true pnpm test:coverage ); check $? "pnpm test:coverage"
+    if [ -f "$COVERAGE_SUMMARY" ]; then
+      node scripts/ci/check_frontend_coverage.mjs "$COVERAGE_SUMMARY"
+      check $? "frontend coverage ratchet"
+    else
+      warn "  $COVERAGE_SUMMARY was not written; the coverage ratchet cannot run"
+      check 1 "frontend coverage ratchet (no coverage summary)"
+    fi
+  else
+    skipped "pnpm test:coverage + frontend coverage ratchet" "--skip-tests"
   fi
 fi
 

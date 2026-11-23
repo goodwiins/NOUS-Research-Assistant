@@ -229,3 +229,70 @@ class TestGitEdgeCases:
         result = _run(repo, "--base", base, "--kind", "python")
         assert result.returncode == 0
         assert "backend/src/wip.py" in result.stdout.splitlines()
+
+
+class TestUntrackedFiles:
+    """A file that was never ``git add``-ed is still a change (GOO-738).
+
+    ``git diff <merge-base>`` skips untracked files, so a brand-new test file
+    escaped the local ratchet and only failed in CI once it was committed.
+    """
+
+    def test_untracked_python_file_is_changed_and_added(self, repo: Path) -> None:
+        base = _base_sha(repo)
+        _write(repo, "backend/tests/test_new.py")
+        changed = _run(repo, "--base", base, "--kind", "python")
+        added = _run(repo, "--base", base, "--kind", "python-added")
+        assert changed.returncode == 0, changed.stderr
+        assert changed.stdout.splitlines() == ["backend/tests/test_new.py"]
+        assert added.stdout.splitlines() == ["backend/tests/test_new.py"]
+
+    def test_untracked_frontend_file_with_space_is_changed(self, repo: Path) -> None:
+        base = _base_sha(repo)
+        _write(repo, "frontend/src/with space.tsx")
+        result = _run(repo, "--base", base, "--kind", "frontend")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["frontend/src/with space.tsx"]
+
+    def test_gitignored_files_are_not_changed(self, repo: Path) -> None:
+        base = _base_sha(repo)
+        _write(repo, ".gitignore", "ignored/\nfrontend/coverage/\n")
+        _write(repo, "ignored/scratch.py")
+        _write(repo, "frontend/coverage/prettify.js")
+        result = _run(repo, "--base", base)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload == {"python": [], "python_added": [], "frontend": []}
+
+    def test_untracked_and_tracked_changes_are_merged(self, repo: Path) -> None:
+        base = _base_sha(repo)
+        (repo / "backend/src/existing.py").write_text("changed\n", encoding="utf-8")
+        _write(repo, "backend/src/untracked.py")
+        result = _run(repo, "--base", base)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["python"] == [
+            "backend/src/existing.py",
+            "backend/src/untracked.py",
+        ]
+        assert payload["python_added"] == ["backend/src/untracked.py"]
+
+    def test_untracked_paths_are_repo_relative_from_a_subdirectory(
+        self, repo: Path
+    ) -> None:
+        # `git diff` prints repo-root paths from any cwd; ls-files would print
+        # cwd-relative ones (and only under cwd) unless run at the top level.
+        base = _base_sha(repo)
+        _write(repo, "backend/src/untracked.py")
+        _write(repo, "frontend/src/untracked.ts")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--base", base],
+            cwd=repo / "backend",
+            env=dict(GIT_ENV),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["python"] == ["backend/src/untracked.py"]
+        assert payload["frontend"] == ["frontend/src/untracked.ts"]

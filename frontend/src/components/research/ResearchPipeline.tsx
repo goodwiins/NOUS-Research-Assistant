@@ -61,6 +61,29 @@ export const ResearchPipeline: React.FC<ResearchPipelineProps> = ({
     fetchPipeline(projectId);
   }, [projectId, fetchPipeline]);
 
+  // The first load failed (GOO-666 FL2E-3): there is no pipeline to show and
+  // nothing in flight, so a spinner would spin forever. Offer a retry.
+  if (!loading && !pipeline && error) {
+    return (
+      <div
+        role="alert"
+        className="flex flex-col items-center justify-center gap-3 py-16 text-center"
+      >
+        <p className="text-sm text-destructive">
+          Couldn&apos;t load the research pipeline.
+        </p>
+        <button
+          type="button"
+          onClick={() => void fetchPipeline(projectId)}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (loading || !pipeline) {
     return (
       <div className="flex items-center justify-center py-16">

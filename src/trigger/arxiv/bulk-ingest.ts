@@ -1,7 +1,7 @@
 import { logger, task, metadata } from "@trigger.dev/sdk";
 import { ingestPaper } from "./ingest-paper";
 import { backendClient } from "../_lib/backend-client";
-import { emptyTally, tallyIngestRuns } from "./tally";
+import { bulkIngestStatus, emptyTally, tallyIngestRuns } from "./tally";
 import {
   ArxivSearchResponseSchema,
   type ArxivBulkIngestPayload,
@@ -71,14 +71,13 @@ export const bulkIngestArxiv = task({
         })),
       );
 
-      // A child that returned failed/timeout/skipped still has run.ok;
-      // count by the child's reported outcome, not by run.ok alone.
+      // Each child POSTs the paper and returns `accepted` (the backend
+      // queues it; the outcome is not observable) or throws once its task
+      // retries run out. Count by the reported outcome, not by run.ok alone.
       tallyIngestRuns(results.runs, tally);
 
       metadata.set("progress", (batchIdx + 1) / batches.length);
-      metadata.set("ingested", tally.ingested);
       metadata.set("accepted", tally.accepted);
-      metadata.set("skipped", tally.skipped);
       metadata.set("failed", tally.failed);
 
       logger.info("Batch complete", {
@@ -88,7 +87,14 @@ export const bulkIngestArxiv = task({
       });
     }
 
-    metadata.set("status", "completed");
-    return { status: "completed", ...tally, total: papers.length };
+    // Never report `completed` when a child failed (GOO-764). The run itself
+    // still succeeds: re-running the bulk task would re-ingest the papers
+    // that were accepted, so a total failure is reported, not thrown.
+    const status = bulkIngestStatus(tally);
+    metadata.set("status", status);
+    if (status !== "completed") {
+      logger.warn("Bulk ingest had failed papers", { status, ...tally });
+    }
+    return { status, ...tally, total: papers.length };
   },
 });

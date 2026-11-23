@@ -225,7 +225,9 @@ async def create_evaluation_job(
             # .delay() is a blocking broker round-trip (GOO-466 / GOO-643).
             await asyncio.to_thread(run_rag_triad_evaluation.delay, job_id_str)
         except OperationalError:
-            await to_thread_finish_on_cancel(_fail_job_quietly, db, job, job_id_str)
+            await to_thread_finish_on_cancel(
+                _fail_job_quietly, db, job, job_id_str, guard_session=db
+            )
             raise HTTPException(
                 status_code=503,
                 detail="Evaluation queue unavailable. Please retry.",
