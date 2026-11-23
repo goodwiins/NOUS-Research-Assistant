@@ -123,6 +123,47 @@ describe('projectStore list ownership (FL2E-4)', () => {
         expect(loading()).toBe(false);
       });
 
+      it('A→B→A: the oldest request for A, resolving while the latest is in flight, never commits', async () => {
+        // Ownership is per request, not per project id: the first and the
+        // third request are both for A, and only the third may commit.
+        const a1 = deferred<unknown>();
+        const b = deferred<unknown>();
+        const a3 = deferred<unknown>();
+        mock()
+          .mockReturnValueOnce(a1.promise)
+          .mockReturnValueOnce(b.promise)
+          .mockReturnValueOnce(a3.promise);
+
+        const first = fetch('A');
+        const second = fetch('B');
+        const third = fetch('A');
+        a1.resolve(payload('A-oldest'));
+        await first;
+        expect(shown()).toBeUndefined();
+        b.resolve(payload('B'));
+        await second;
+        expect(shown()).toBeUndefined();
+        a3.resolve(payload('A-latest'));
+        await third;
+
+        expect(shown()).toBe(label(kind, 'A-latest'));
+        expect(loading()).toBe(false);
+      });
+
+      it('setCurrentProject(null) drops an in-flight request and its spinner', async () => {
+        state().setCurrentProject(project('A'));
+        const a = deferred<unknown>();
+        mock().mockReturnValueOnce(a.promise);
+
+        const pending = fetch('A');
+        state().setCurrentProject(null);
+        a.resolve(payload('A'));
+        await pending;
+
+        expect(shown()).toBeUndefined();
+        expect(loading()).toBe(false);
+      });
+
       it('a response for the previous project is dropped after a switch, and its spinner cleared', async () => {
         state().setCurrentProject(project('A'));
         const a = deferred<unknown>();

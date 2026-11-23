@@ -399,11 +399,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setCurrentProject: (project) => {
     const prev = get().currentProject;
-    if (project && prev?.id !== project.id) {
-      // Switching project: drop lists that belong to another one.
+    if (prev?.id !== project?.id) {
+      // Switching project (or to none): drop lists and in-flight list
+      // requests that belong to another one.
       set({
         currentProject: project,
-        ...releaseListsNotOwnedBy(project.id, prev?.id ?? null),
+        ...releaseListsNotOwnedBy(project?.id ?? null, prev?.id ?? null),
       });
     } else {
       set({ currentProject: project });
