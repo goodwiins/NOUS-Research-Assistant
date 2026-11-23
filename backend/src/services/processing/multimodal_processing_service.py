@@ -237,7 +237,10 @@ class MultimodalProcessingService:
         # Common steps for all document types
         common_steps = [
             ProcessingStep("Text Extraction", self.extract_text_content),
-            ProcessingStep("Entity Extraction", self.extract_entities),
+            # Advisory: it returns transient entities (the persisted entity
+            # pipeline is processing_tasks), and its spaCy model is optional
+            # in the image, so it must never fail ingestion.
+            ProcessingStep("Entity Extraction", self.extract_entities, required=False),
             ProcessingStep(
                 "Knowledge Graph Storage",
                 self.store_entities_in_knowledge_graph,
@@ -874,12 +877,13 @@ class MultimodalProcessingService:
         (delete-before-insert on the same document).
         """
         try:
-            if not self.entity_service:
-                self.entity_service = EntityExtractionService(self.db)
-
             text_content = document.content_text or ""
             if not text_content:
                 return {"entities": [], "entity_count": 0, "extraction_method": "none"}
+
+            if not self.entity_service:
+                # The service takes no arguments and loads spaCy eagerly.
+                self.entity_service = EntityExtractionService()
 
             results = {
                 "entities": [],
@@ -890,20 +894,23 @@ class MultimodalProcessingService:
 
             start_time = time.time()
 
-            # Extract entities
-            entities = await self.entity_service.extract_entities_from_text(
+            # Synchronous, CPU-bound spaCy call: keep it off the event loop.
+            # (It used to be awaited with the wrong arguments, which raised a
+            # TypeError for every document with text, and the step was
+            # required, so every run and every retry failed the job: IS-5.)
+            entities = await asyncio.to_thread(
+                self.entity_service.extract_entities_from_text,
+                document,
                 text_content,
-                document_id=document.id,
-                organization_id=document.organization_id,
             )
 
             results["entities"] = [
                 {
                     "text": entity.name,
                     "label": entity.entity_type.value,
-                    "confidence": entity.confidence_score,
-                    "start": entity.metadata.get("start", 0) if entity.metadata else 0,
-                    "end": entity.metadata.get("end", 0) if entity.metadata else 0,
+                    "confidence": entity.confidence,
+                    "start": (entity.properties or {}).get("start", 0),
+                    "end": (entity.properties or {}).get("end", 0),
                 }
                 for entity in entities
             ]
