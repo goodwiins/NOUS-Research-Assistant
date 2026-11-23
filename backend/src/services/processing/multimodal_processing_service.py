@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import os
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -75,6 +76,33 @@ from src.services.processing.entity_extraction_service import EntityExtractionSe
 logger = logging.getLogger(__name__)
 
 
+_entity_service_lock = threading.Lock()
+_entity_service_instance: Optional[EntityExtractionService] = None
+
+
+def _shared_entity_service() -> EntityExtractionService:
+    """One EntityExtractionService (one loaded spaCy model) per process.
+
+    Blocking; call it via ``asyncio.to_thread``. A failed load is not cached,
+    so the next document tries again.
+    """
+    global _entity_service_instance
+    with _entity_service_lock:
+        if _entity_service_instance is None:
+            _entity_service_instance = EntityExtractionService()
+        return _entity_service_instance
+
+
+def _entity_span(properties: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """Character span of an entity: spaCy entities carry ``start_char`` /
+    ``end_char``, the regex ones ``start`` / ``end``."""
+    props = properties or {}
+    return {
+        "start": int(props.get("start_char", props.get("start", 0)) or 0),
+        "end": int(props.get("end_char", props.get("end", 0)) or 0),
+    }
+
+
 class ProcessingStep:
     """Represents a processing step in the pipeline"""
 
@@ -137,7 +165,10 @@ class MultimodalProcessingService:
             "quality_assessment": {},
             "processing_time": 0,
             "success": False,
+            # Required-step failures: the document and the job fail.
             "errors": [],
+            # Optional-step failures: recorded and surfaced, never fatal.
+            "warnings": [],
         }
 
         try:
@@ -176,6 +207,20 @@ class MultimodalProcessingService:
                     step.end_time = time.time()
 
                     error_msg = f"Processing step '{step.name}' failed: {str(e)}"
+
+                    if not step.required:
+                        # Optional means optional: the document still
+                        # completes. The failure is a warning, stored on the
+                        # document (processing_warnings) and in the job result.
+                        logger.warning(
+                            "Optional processing step '%s' failed for document %s",
+                            step.name,
+                            getattr(document, "id", "?"),
+                            exc_info=True,
+                        )
+                        processing_results["warnings"].append(error_msg)
+                        continue
+
                     logger.error(error_msg)
                     processing_results["errors"].append(error_msg)
 
@@ -875,54 +920,52 @@ class MultimodalProcessingService:
         in ``processing_tasks.process_document_ingestion``, which is made
         idempotent separately via ``_reset_pipeline_entities``
         (delete-before-insert on the same document).
+
+        Errors propagate; ``process_document`` records them once, as a
+        warning, because this step is optional.
         """
-        try:
-            text_content = document.content_text or ""
-            if not text_content:
-                return {"entities": [], "entity_count": 0, "extraction_method": "none"}
+        text_content = document.content_text or ""
+        if not text_content:
+            return {"entities": [], "entity_count": 0, "extraction_method": "none"}
 
-            if not self.entity_service:
-                # The service takes no arguments and loads spaCy eagerly.
-                self.entity_service = EntityExtractionService()
+        if not self.entity_service:
+            # spacy.load is slow and blocking: load it off the event loop, and
+            # once per process, not per document.
+            self.entity_service = await asyncio.to_thread(_shared_entity_service)
 
-            results = {
-                "entities": [],
-                "entity_count": 0,
-                "extraction_method": "spacy",
-                "processing_time": 0,
+        results: Dict[str, Any] = {
+            "entities": [],
+            "entity_count": 0,
+            "extraction_method": "spacy",
+            "processing_time": 0,
+        }
+
+        start_time = time.time()
+
+        # Synchronous, CPU-bound spaCy call: keep it off the event loop.
+        # (It used to be awaited with the wrong arguments, which raised a
+        # TypeError for every document with text, and the step was
+        # required, so every run and every retry failed the job: IS-5.)
+        entities = await asyncio.to_thread(
+            self.entity_service.extract_entities_from_text,
+            document,
+            text_content,
+        )
+
+        results["entities"] = [
+            {
+                "text": entity.name,
+                "label": entity.entity_type.value,
+                "confidence": entity.confidence,
+                **_entity_span(entity.properties),
             }
+            for entity in entities
+        ]
 
-            start_time = time.time()
+        results["entity_count"] = len(entities)
+        results["processing_time"] = time.time() - start_time
 
-            # Synchronous, CPU-bound spaCy call: keep it off the event loop.
-            # (It used to be awaited with the wrong arguments, which raised a
-            # TypeError for every document with text, and the step was
-            # required, so every run and every retry failed the job: IS-5.)
-            entities = await asyncio.to_thread(
-                self.entity_service.extract_entities_from_text,
-                document,
-                text_content,
-            )
-
-            results["entities"] = [
-                {
-                    "text": entity.name,
-                    "label": entity.entity_type.value,
-                    "confidence": entity.confidence,
-                    "start": (entity.properties or {}).get("start", 0),
-                    "end": (entity.properties or {}).get("end", 0),
-                }
-                for entity in entities
-            ]
-
-            results["entity_count"] = len(entities)
-            results["processing_time"] = time.time() - start_time
-
-            return results
-
-        except Exception as e:
-            logger.error(f"Entity extraction failed: {str(e)}")
-            raise
+        return results
 
     async def store_entities_in_knowledge_graph(
         self, document: Document, job: ProcessingJob
@@ -1384,7 +1427,13 @@ class MultimodalProcessingService:
             # Update processing timestamps
             document.processing_completed_at = datetime.utcnow()
 
-            # Store processing results in metadata
+            # Store processing results in metadata. Optional-step failures are
+            # kept visible: processing_partial marks a document that completed
+            # without some optional output (GOO-658). Written every run, so a
+            # clean retry clears them.
+            warnings = list(results.get("warnings") or [])
+            document.add_metadata("processing_warnings", warnings)
+            document.add_metadata("processing_partial", bool(warnings))
             document.add_metadata("processing_results", results)
             document.add_metadata("processed_at", datetime.utcnow().isoformat())
 

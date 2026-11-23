@@ -99,6 +99,36 @@ def test_paper_with_no_stored_date_is_not_a_candidate(
         assert _miss(tracker, NOW - timedelta(days=7)) == []
 
 
+def test_truncated_scans_never_count_misses(
+    tracker: ArXivChangeTracker,
+) -> None:
+    # A paper inside the window, absent from scans that were capped: the
+    # absence is no evidence, so no miss accrues and nothing is deleted, however
+    # many truncated scans run. A later full scan starts from zero misses.
+    tracker.detect_changes([_paper("capped", NOW - timedelta(days=1))], ORG)
+    window_start = NOW - timedelta(days=7)
+
+    for _ in range(ArXivChangeTracker.DELETION_MISS_THRESHOLD + 2):
+        changes = tracker.detect_changes(
+            [],
+            ORG,
+            tracked_categories={"cs.AI"},
+            scan_truncated=True,
+            window_start=window_start,
+        )
+        assert changes == []
+    data = tracker._org_state(ORG)["capped"]
+    assert "deleted" not in data
+    assert data.get("miss_count", 0) == 0
+
+    results = [
+        _miss(tracker, window_start)
+        for _ in range(ArXivChangeTracker.DELETION_MISS_THRESHOLD)
+    ]
+    assert results[:-1] == [[]] * (ArXivChangeTracker.DELETION_MISS_THRESHOLD - 1)
+    assert results[-1] == ["deleted"]
+
+
 def test_resighting_backfills_the_date_for_rows_stored_without_it(
     tracker: ArXivChangeTracker,
 ) -> None:
