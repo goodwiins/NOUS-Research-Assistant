@@ -238,44 +238,52 @@ def test_configured_python_resolution_is_stable_across_local_ci_gates(
     ]
 
 
-def test_local_ci_executes_configured_python_from_space_containing_root(
-    tmp_path: Path,
-) -> None:
-    """A root-relative interpreter remains executable after normalization."""
+ESLINT_STALE_NAME = "run_local_ci-eslint.XXXXXX.json"
+
+
+def _write_executable(path: Path, contents: str) -> None:
+    path.write_text(contents, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _fake_local_ci_root(
+    tmp_path: Path, *, pnpm_eslint: str = ""
+) -> tuple[Path, Path, dict[str, str]]:
+    """Build a fake checkout whose tools only log, for running run_local_ci.
+
+    Returns ``(fake_root, private_tmpdir, env)``. ``pnpm_eslint`` is extra
+    shell that the fake ``pnpm`` runs for ``pnpm exec eslint``.
+    """
 
     fake_root = tmp_path / "repository root with spaces"
     command_dir = tmp_path / "commands"
+    private_tmp = tmp_path / "private tmp"
     interpreter = fake_root / ".venv" / "bin" / "python"
-    log_path = tmp_path / "python-invocations.log"
-    tool_log = tmp_path / "tool-invocations.log"
     (fake_root / "backend").mkdir(parents=True)
     (fake_root / "frontend").mkdir()
     interpreter.parent.mkdir(parents=True)
     (fake_root / "node_modules" / ".bin").mkdir(parents=True)
     command_dir.mkdir()
-    for command in ("bash", "mktemp", "rm", "sort", "tail"):
+    private_tmp.mkdir()
+    for command in ("bash", "mktemp", "rm", "sort", "tail", "sleep", "kill", "cat"):
         executable = shutil.which(command)
         assert executable is not None
         (command_dir / command).symlink_to(executable)
 
-    def write_executable(path: Path, contents: str) -> None:
-        path.write_text(contents, encoding="utf-8")
-        path.chmod(0o755)
-
-    write_executable(
+    _write_executable(
         interpreter,
         '#!/usr/bin/env bash\nprintf \'%s|%s\\n\' "$PWD" "$*" >> "$CI_PY_LOG"\n',
     )
-    write_executable(
+    _write_executable(
         fake_root / "node_modules" / ".bin" / "openapi-typescript",
         "#!/usr/bin/env bash\nexit 0\n",
     )
     # The Trigger.dev gates need an installed tsc (GOO-764); pnpm runs it.
-    write_executable(
+    _write_executable(
         fake_root / "node_modules" / ".bin" / "tsc",
         "#!/usr/bin/env bash\nexit 0\n",
     )
-    write_executable(
+    _write_executable(
         command_dir / "git",
         """#!/usr/bin/env bash
 case "$1" in
@@ -286,24 +294,35 @@ esac
 """,
     )
     for command in ("ruff", "black", "isort", "mypy"):
-        write_executable(command_dir / command, "#!/usr/bin/env bash\nexit 0\n")
-    write_executable(
+        _write_executable(command_dir / command, "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(
         command_dir / "node",
         '#!/usr/bin/env bash\nprintf \'%s|node %s\\n\' "$PWD" "$*" >> "$CI_TOOL_LOG"\n',
     )
-    # `pnpm test:coverage` writes the summary the coverage ratchet reads.
+    # `pnpm test:coverage` writes the summary the coverage ratchet reads, and
+    # `pnpm exec eslint` records and writes the report it was pointed at.
     (fake_root / "frontend" / "coverage").mkdir()
-    write_executable(
+    _write_executable(
         command_dir / "pnpm",
         """#!/usr/bin/env bash
 printf '%s|pnpm %s\\n' "$PWD" "$*" >> "$CI_TOOL_LOG"
 if [ "$1" = "test:coverage" ]; then
   printf '{}\\n' > coverage/coverage-summary.json
 fi
+if [ "$1 $2" = "exec eslint" ]; then
+  report=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--output-file" ]; then report="$2"; fi
+    shift
+  done
+  printf '%s\\n' "$report" >> "$CI_ESLINT_LOG"
+  printf '[]\\n' > "$report"
+  PNPM_ESLINT_HOOK
+fi
 exit 0
-""",
+""".replace("PNPM_ESLINT_HOOK", pnpm_eslint or ":"),
     )
-    write_executable(
+    _write_executable(
         command_dir / "docker",
         """#!/usr/bin/env bash
 case "$1" in
@@ -314,29 +333,42 @@ exit 1
 """,
     )
 
+    env = {
+        **os.environ,
+        "CI_PY_LOG": str(tmp_path / "python-invocations.log"),
+        "CI_TOOL_LOG": str(tmp_path / "tool-invocations.log"),
+        "CI_ESLINT_LOG": str(tmp_path / "eslint-reports.log"),
+        "FAKE_ROOT": str(fake_root),
+        "PATH": str(command_dir),
+        "PYTHON": ".venv/bin/python",
+        "TMPDIR": str(private_tmp),
+    }
+    return fake_root, private_tmp, env
+
+
+def _run_local_ci_cmd() -> list[str]:
+    return [
+        "bash",
+        str(REPO_ROOT / "scripts" / "ci" / "run_local_ci.sh"),
+        "--base",
+        "origin/develop",
+        "--frontend",
+    ]
+
+
+def test_local_ci_executes_configured_python_from_space_containing_root(
+    tmp_path: Path,
+) -> None:
+    """A root-relative interpreter remains executable after normalization."""
+
+    fake_root, _, env = _fake_local_ci_root(tmp_path)
+
     result = subprocess.run(
-        [
-            "bash",
-            str(REPO_ROOT / "scripts" / "ci" / "run_local_ci.sh"),
-            "--base",
-            "origin/develop",
-            "--frontend",
-        ],
-        cwd=fake_root,
-        env={
-            **os.environ,
-            "CI_PY_LOG": str(log_path),
-            "CI_TOOL_LOG": str(tool_log),
-            "FAKE_ROOT": str(fake_root),
-            "PATH": str(command_dir),
-            "PYTHON": ".venv/bin/python",
-        },
-        capture_output=True,
-        text=True,
+        _run_local_ci_cmd(), cwd=fake_root, env=env, capture_output=True, text=True
     )
 
     assert result.returncode == 0, result.stderr
-    invocations = log_path.read_text(encoding="utf-8").splitlines()
+    invocations = Path(env["CI_PY_LOG"]).read_text(encoding="utf-8").splitlines()
     assert all(str(fake_root) in invocation for invocation in invocations)
     for argument in (
         "scripts/docs/check_dir_docs.py",
@@ -354,7 +386,7 @@ exit 1
     ):
         assert any(argument in invocation for invocation in invocations), invocations
     # The Trigger.dev gates ran, each the way the frontend-tests job runs it.
-    tools = tool_log.read_text(encoding="utf-8").splitlines()
+    tools = Path(env["CI_TOOL_LOG"]).read_text(encoding="utf-8").splitlines()
     assert f"{fake_root / 'frontend'}|pnpm exec tsc --noEmit -p ../tsconfig.json" in (
         tools
     ), tools
@@ -365,3 +397,70 @@ exit 1
     ), tools
     assert "Trigger.dev type-check" in result.stdout
     assert "Trigger.dev node tests" in result.stdout
+
+
+def test_local_ci_eslint_report_survives_a_stale_report_in_tmpdir(
+    tmp_path: Path,
+) -> None:
+    """GOO-771: BSD mktemp randomises only trailing Xs.
+
+    The old ``run_local_ci-eslint.XXXXXX.json`` template was used literally on
+    macOS, so one leftover file (an interrupted run, or a concurrent one)
+    failed every later ``--frontend`` run with "File exists".
+    """
+
+    fake_root, private_tmp, env = _fake_local_ci_root(tmp_path)
+    stale = private_tmp / ESLINT_STALE_NAME
+    stale.write_text("stale", encoding="utf-8")
+
+    result = subprocess.run(
+        _run_local_ci_cmd(), cwd=fake_root, env=env, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "report unavailable" not in result.stdout
+    reports = Path(env["CI_ESLINT_LOG"]).read_text(encoding="utf-8").splitlines()
+    assert len(reports) == 1, reports
+    report = Path(reports[0])
+    # The report got a fresh, randomised home under TMPDIR, not the stale name.
+    assert report.parent.parent == private_tmp, report
+    assert "XXXXXX" not in str(report), report
+    tools = Path(env["CI_TOOL_LOG"]).read_text(encoding="utf-8")
+    assert f"check_frontend_quality.mjs --report {report} " in tools, tools
+    # The stale file is left alone, and the run cleans up after itself.
+    assert stale.read_text(encoding="utf-8") == "stale"
+    assert sorted(p.name for p in private_tmp.iterdir()) == [ESLINT_STALE_NAME]
+
+
+@pytest.mark.parametrize("signal_name, expected_rc", [("TERM", 143), ("INT", 130)])
+def test_local_ci_removes_the_eslint_report_when_interrupted(
+    tmp_path: Path, signal_name: str, expected_rc: int
+) -> None:
+    """An interrupt during the long ESLint run must not leave the report behind."""
+
+    pid_file = tmp_path / "run_local_ci.pid"
+    fake_root, private_tmp, env = _fake_local_ci_root(
+        tmp_path,
+        pnpm_eslint=f'kill -{signal_name} "$(cat "$CI_PID_FILE")"; sleep 5; exit 1',
+    )
+    env["CI_PID_FILE"] = str(pid_file)
+
+    process = subprocess.Popen(
+        _run_local_ci_cmd(),
+        cwd=fake_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    pid_file.write_text(str(process.pid), encoding="utf-8")
+    stdout, stderr = process.communicate(timeout=60)
+
+    reports = Path(env["CI_ESLINT_LOG"]).read_text(encoding="utf-8").splitlines()
+    assert len(reports) == 1, stdout + stderr
+    assert process.returncode == expected_rc, stdout + stderr
+    assert not Path(reports[0]).exists()
+    assert list(private_tmp.iterdir()) == [], list(private_tmp.iterdir())
+    # The interrupt stops the run; the later frontend stages never start.
+    tools = Path(env["CI_TOOL_LOG"]).read_text(encoding="utf-8")
+    assert "check_frontend_quality.mjs" not in tools
