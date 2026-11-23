@@ -53,6 +53,10 @@ export interface UseSlashCommandsParams {
   /** Regenerate-most-recent-assistant-turn (useChatComposerActions) — the
    * /retry command dispatches to it rather than re-implementing regenerate. */
   retryLast: () => void;
+  /** A send or stream is in flight; synthesis commands must not replace the
+   * draft with a template that handleSubmit's single-flight lock will drop. */
+  isLoading: boolean;
+  storeIsStreaming: boolean;
   conversations: ChatConversation[];
   activeThreadId: string | null;
   setCurrentThread: (threadId: string | null) => void;
@@ -87,6 +91,8 @@ export function useSlashCommands({
   setInput,
   handleSubmit,
   retryLast,
+  isLoading,
+  storeIsStreaming,
   conversations,
   activeThreadId,
   setCurrentThread,
@@ -325,7 +331,9 @@ export function useSlashCommands({
           // send path useChatComposerActions.retryLast/handleRegenerate use:
           // setInput so the composer reflects what was sent, then a deferred
           // handleSubmit(template) so it doesn't read the stale pre-setInput
-          // value from its closure.
+          // value from its closure. Same guards too: nothing while a turn is
+          // in flight, and the deferred send is fenced to this account.
+          if (isLoading || storeIsStreaming) return;
           const SYNTHESIS_TEMPLATES: Record<
             'summarize' | 'keypoints' | 'gaps' | 'timeline',
             string
@@ -341,7 +349,9 @@ export function useSlashCommands({
           const template = SYNTHESIS_TEMPLATES[id];
           setCommandOutputs([]);
           setInput(template);
-          setTimeout(() => handleSubmit(template), 0);
+          setTimeout(() => {
+            if (isCurrentSession()) void handleSubmit(template);
+          }, 0);
           return;
         }
         case 'help':
@@ -467,6 +477,8 @@ export function useSlashCommands({
       retryLast,
       setInput,
       handleSubmit,
+      isLoading,
+      storeIsStreaming,
       conversations,
       activeThreadId,
       appendOutput,

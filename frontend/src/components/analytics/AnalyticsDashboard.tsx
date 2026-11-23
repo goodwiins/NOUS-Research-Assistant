@@ -6,14 +6,18 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/hooks/useAuth';
 import {
+  countInFlightDocuments,
   documentAnalyticsApi,
-  DocumentResponse,
-  FileTypeStats,
+  type CombinedSearchQueryRow,
+  type DailyPoint,
+  type DocumentResponse,
+  type FileTypeStats,
+  type PaginationInfo,
   performanceApi,
-  ProcessingStats,
+  type ProcessingStats,
   searchAnalyticsApi,
-  TrendDataPoint,
   userBehaviorApi,
 } from '@/services/documentAnalyticsApi';
 import {
@@ -33,9 +37,10 @@ import {
   XCircle,
 } from 'lucide-react';
 import { motion, MotionConfig } from 'framer-motion';
-import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
 import { AnalyticsChart } from './AnalyticsChart';
-import { AnalyticsOverview } from './AnalyticsOverview';
+import { AnalyticsOverview, type AnalyticsOverviewData } from './AnalyticsOverview';
 import {
   AnalyticsTable,
   createDocumentAnalyticsTable,
@@ -45,27 +50,6 @@ import {
 interface AnalyticsDashboardProps {
   className?: string;
 }
-
-// Generate fallback trend data when API returns empty
-const generateFallbackTrendData = (): TrendDataPoint[] => {
-  const now = new Date();
-  const data: TrendDataPoint[] = [];
-
-  for (let i = 29; i >= 0; i--) {
-    const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-    data.push({
-      date: date.toISOString().split('T')[0],
-      name: date.toISOString().split('T')[0],
-      pageViews: 0,
-      uniqueVisitors: 0,
-      documentsUploaded: 0,
-      searchesPerformed: 0,
-      chatsInitiated: 0,
-    });
-  }
-
-  return data;
-};
 
 // Transform API document to table format
 const transformDocumentToTableRow = (doc: DocumentResponse) => ({
@@ -102,216 +86,170 @@ const transformProcessingStats = (stats: ProcessingStats[]) => {
   }));
 };
 
-export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
-  const [activeTab, setActiveTab] = useState('overview');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  // Names of the data sources that failed to load on the last fetch. Each
-  // endpoint still falls back to an empty shape so the page never blanks, but
-  // we record the failures so partial outages aren't silently shown as zeros.
-  const [partialFailures, setPartialFailures] = useState<string[]>([]);
-  const [data, setData] = useState<any>({
-    overview: null,
-    documents: [],
-    searches: [],
-    chartData: [],
-    fileTypeDistribution: [],
-    processingStats: [],
-    realtimeMetrics: null,
-  });
+/** A figure the backend reported, or `null` when its source failed to load. */
+type Figure = number | null;
 
-  // Load data from API
-  const loadData = async () => {
-    setLoading(true);
-    setError(null);
-
-    // Track which sources fail so we can tell the user honestly rather than
-    // rendering a failed endpoint as a real "0".
-    const failed: string[] = [];
-    const note = (label: string) => failed.push(label);
-
-    try {
-      // Fetch data from multiple API endpoints in parallel
-      const [
-        fileStats,
-        documentsResponse,
-        searchAnalytics,
-        userTrends,
-        dashboardOverview,
-        realtimeMetrics,
-        trendData,
-      ] = await Promise.all([
-        documentAnalyticsApi.getFileStats().catch(() => {
-          note('Documents');
-          return {
-            files_by_type: [],
-            processing_stats: [],
-          };
-        }),
-        documentAnalyticsApi.getDocuments({ page: 1, size: 25 }).catch(() => {
-          note('Document list');
-          return {
-            documents: [],
-            pagination: {
-              page: 1,
-              page_size: 25,
-              total: 0,
-              total_pages: 0,
-              has_next: false,
-              has_prev: false,
-            },
-          };
-        }),
-        searchAnalyticsApi.getCombinedSearchAnalytics().catch(() => {
-          note('Search');
-          return {
-            topQueries: [],
-            searchTypes: [],
-            totalSearches: 0,
-            avgResponseTime: 0,
-          };
-        }),
-        userBehaviorApi.getOrganizationTrends(30).catch(() => {
-          note('User trends');
-          return {
-            stats: {
-              total_users: 0,
-              active_users_today: 0,
-              active_users_week: 0,
-              active_users_month: 0,
-              total_sessions: 0,
-              avg_session_duration: 0,
-              bounce_rate: 0,
-              search_volume_today: 0,
-              search_volume_week: 0,
-              new_users: 0,
-              returning_users: 0,
-            },
-            trendData: [],
-          };
-        }),
-        performanceApi.getDashboardOverview().catch(() => {
-          note('Overview');
-          return {
-            totalUsers: 0,
-            activeUsers: 0,
-            totalSessions: 0,
-            totalSearches: 0,
-            avgResponseTime: 0,
-            errorRate: 0,
-          };
-        }),
-        performanceApi.getRealtimeMetrics().catch(() => {
-          note('Real-time metrics');
-          return {
-            activeUsers: 0,
-            currentSearches: 0,
-            processingFiles: 0,
-            requestsPerMinute: 0,
-          };
-        }),
-        performanceApi.getTrendData(30).catch(() => {
-          note('Trends');
-          return [];
-        }),
-      ]);
-
-      // Transform API data
-      const documentTableData = documentsResponse.documents.map(
-        transformDocumentToTableRow
-      );
-      const fileTypeDistribution = transformFileTypeForChart(
-        fileStats.files_by_type
-      );
-      const processingStats = transformProcessingStats(
-        fileStats.processing_stats
-      );
-
-      // Use API trend data or fallback
-      const chartData =
-        trendData.length > 0
-          ? trendData
-          : userTrends.trendData.length > 0
-            ? userTrends.trendData
-            : generateFallbackTrendData();
-
-      // Calculate totals from real data
-      let totalDocuments = 0;
-      fileStats.files_by_type.forEach((item) => {
-        totalDocuments += item.count;
-      });
-      const completedDocs =
-        fileStats.processing_stats.find((s) => s.status === 'completed')
-          ?.count || 0;
-
-      // Use real data from APIs, with fallbacks
-      const totalUsers =
-        dashboardOverview.totalUsers || userTrends.stats.total_users || 0;
-      const activeUsers =
-        dashboardOverview.activeUsers ||
-        userTrends.stats.active_users_today ||
-        0;
-      const totalSessions =
-        dashboardOverview.totalSessions || userTrends.stats.total_sessions || 0;
-      const totalSearches =
-        searchAnalytics.totalSearches ||
-        dashboardOverview.totalSearches ||
-        userTrends.stats.search_volume_week ||
-        0;
-
-      setData({
-        overview: {
-          totalUsers,
-          activeUsers,
-          totalSessions,
-          totalPageViews: chartData.reduce(
-            (sum: number, d: TrendDataPoint) => sum + d.pageViews,
-            0
-          ),
-          averageSessionDuration: userTrends.stats.avg_session_duration || 0,
-          bounceRate: userTrends.stats.bounce_rate || 0,
-          documentsUploaded: totalDocuments,
-          documentsCompleted: completedDocs,
-          searchesPerformed: totalSearches,
-          chatsInitiated: chartData.reduce(
-            (sum: number, d: TrendDataPoint) => sum + d.chatsInitiated,
-            0
-          ),
-          errorRate: dashboardOverview.errorRate || 0,
-        },
-        chartData,
-        documents: documentTableData,
-        searches: searchAnalytics.topQueries,
-        searchTypes: searchAnalytics.searchTypes,
-        fileTypeDistribution,
-        processingStats,
-        pagination: documentsResponse.pagination,
-        realtimeMetrics,
-      });
-
-      // Surface a non-blocking note for any sources that didn't load, so a
-      // partial outage isn't mistaken for genuine zero activity.
-      setPartialFailures(Array.from(new Set(failed)));
-    } catch (err) {
-      console.error('Failed to load analytics data:', err);
-      setError('Failed to load analytics data. Please try again.');
-    } finally {
-      setLoading(false);
-    }
+interface DashboardData {
+  overview: AnalyticsOverviewData;
+  summary: {
+    documents: Figure;
+    searches7d: Figure;
+    inFlight: Figure;
+    /** Admin only; `undefined` hides it. */
+    activeUsers24h?: Figure;
   };
+  fileStatsAvailable: boolean;
+  documents: ReturnType<typeof transformDocumentToTableRow>[];
+  pagination: PaginationInfo | null;
+  searches: CombinedSearchQueryRow[] | null;
+  searchTypes: Array<{ name: string; value: number }> | null;
+  fileTypeDistribution: ReturnType<typeof transformFileTypeForChart>;
+  processingStats: ReturnType<typeof transformProcessingStats>;
+  /** The last 7 UTC calendar days, already windowed by the service. */
+  searchVolume: DailyPoint[] | null;
+  /** Admin only; `undefined` for other roles. */
+  activeUserTrend?: DailyPoint[] | null;
+}
 
-  useEffect(() => {
-    loadData();
-  }, []);
+const UNAVAILABLE = '—';
+
+function ChartNotice({ title, message }: { title: string; message: string }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base font-medium">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div
+          role="status"
+          className="flex h-[300px] items-center justify-center text-center text-sm text-muted-foreground"
+        >
+          {message}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export interface AnalyticsDashboardResult {
+  data: DashboardData;
+  /** Names of the sources that failed to load, shown in a note. */
+  failed: string[];
+}
+
+/**
+ * Loads every analytics source in parallel. A failed source becomes `null` and
+ * is named in `failed`; it is never replaced by zeros (GOO-649). Organization
+ * trends are admin-only on the backend (403 otherwise), so other roles never
+ * request them.
+ */
+export async function fetchAnalyticsDashboard(
+  isAdmin: boolean
+): Promise<AnalyticsDashboardResult> {
+  const failed: string[] = [];
+  const settle = <T,>(label: string, request: Promise<T>) =>
+    request.catch((): null => {
+      failed.push(label);
+      return null;
+    });
+
+  const [
+    fileStats,
+    documentsResponse,
+    searchAnalytics,
+    overview,
+    searchVolume,
+    activeUserTrend,
+  ] = await Promise.all([
+    settle('Documents', documentAnalyticsApi.getFileStats()),
+    settle(
+      'Document list',
+      documentAnalyticsApi.getDocuments({ page: 1, size: 25 })
+    ),
+    settle('Search', searchAnalyticsApi.getCombinedSearchAnalytics()),
+    settle('Overview', performanceApi.getDashboardOverview()),
+    settle('Search volume', performanceApi.getSearchVolumeTrend()),
+    isAdmin
+      ? settle(
+          'Active users trend',
+          userBehaviorApi.getOrganizationActiveUserTrend(30)
+        )
+      : Promise.resolve(undefined),
+  ]);
+
+  const documentsIndexed = fileStats
+    ? fileStats.files_by_type.reduce((sum, item) => sum + item.count, 0)
+    : null;
+  // Admin-only figures: `undefined` hides them for other roles (the backend
+  // leaves `user_engagement` out for them, GOO-633); `null` for an admin whose
+  // overview failed or came back without the section.
+  const adminFigure = (value: number | undefined): Figure | undefined =>
+    isAdmin ? (value ?? null) : undefined;
+
+  return {
+    data: {
+      overview: {
+        documentsIndexed,
+        searches24h: overview ? overview.totalSearches : null,
+        avgSearchTimeMs24h: overview ? overview.avgSearchTimeMs : null,
+        activeUsers24h: adminFigure(overview?.engagement?.activeUsers),
+        searchSessions24h: adminFigure(overview?.engagement?.searchSessions),
+      },
+      summary: {
+        documents: documentsIndexed,
+        searches7d: searchAnalytics ? searchAnalytics.totalSearches : null,
+        inFlight: fileStats
+          ? countInFlightDocuments(fileStats.processing_stats)
+          : null,
+        activeUsers24h: adminFigure(overview?.engagement?.activeUsers),
+      },
+      fileStatsAvailable: fileStats !== null,
+      documents: documentsResponse
+        ? documentsResponse.documents.map(transformDocumentToTableRow)
+        : [],
+      pagination: documentsResponse ? documentsResponse.pagination : null,
+      searches: searchAnalytics ? searchAnalytics.topQueries : null,
+      searchTypes: searchAnalytics ? searchAnalytics.searchTypes : null,
+      fileTypeDistribution: transformFileTypeForChart(
+        fileStats?.files_by_type ?? []
+      ),
+      processingStats: transformProcessingStats(
+        fileStats?.processing_stats ?? []
+      ),
+      searchVolume,
+      activeUserTrend,
+    },
+    failed: Array.from(new Set(failed)),
+  };
+}
+
+export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
+  const { user, isLoading: authLoading } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const [activeTab, setActiveTab] = useState('overview');
+
+  // Keyed on the role so an admin whose session resolves after mount still
+  // gets the admin-only trend.
+  const query = useQuery({
+    queryKey: ['analytics-dashboard', isAdmin],
+    queryFn: () => fetchAnalyticsDashboard(isAdmin),
+    enabled: !authLoading,
+  });
+  const data = query.data?.data ?? null;
+  const partialFailures = query.data?.failed ?? [];
+  const loading = query.isFetching;
+  const error = query.isError
+    ? 'Failed to load analytics data. Please try again.'
+    : null;
 
   const handleRefresh = () => {
-    loadData();
+    void query.refetch();
   };
 
   // Serialize the currently loaded document rows to CSV and trigger a download.
   // This exports exactly the rows on screen, not an invented full-corpus export.
   const handleExport = () => {
-    const rows = data.documents ?? [];
+    const rows = data?.documents ?? [];
     if (rows.length === 0) return;
 
     const headers = ['Filename', 'Type', 'Size (bytes)', 'Uploaded', 'Status'];
@@ -321,7 +259,7 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
     };
     const lines = [
       headers.join(','),
-      ...rows.map((row: any) =>
+      ...rows.map((row) =>
         [row.filename, row.type, row.size, row.uploadedAt, row.status]
           .map(escape)
           .join(',')
@@ -349,7 +287,8 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
     const tabForMetric: Record<string, string> = {
       documents: 'documents',
       searches: 'search',
-      activeUsers: 'realtime',
+      activeUsers: 'activity',
+      sessions: 'activity',
     };
     setActiveTab(tabForMetric[metric] ?? 'overview');
   };
@@ -359,30 +298,26 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
 
   // Summary stats shown in the top row. Consistent neutral cards with a single
   // warm-gold accent on the icon, matching the dashboard vocabulary.
-  const summaryStats = [
+  const summaryStats: Array<{
+    label: string;
+    value: Figure | undefined;
+    icon: typeof Users;
+  }> = [
+    { label: 'Documents', value: data?.summary.documents, icon: FileText },
     {
-      label: 'Active users',
-      value: data.overview?.totalUsers ?? 0,
-      icon: Users,
-    },
-    {
-      label: 'Documents',
-      value: data.overview?.documentsUploaded ?? 0,
-      icon: FileText,
-    },
-    {
-      label: 'Searches',
-      value: data.overview?.searchesPerformed ?? 0,
+      label: 'Searches, last 7 days',
+      value: data?.summary.searches7d,
       icon: Search,
     },
+    { label: 'In processing', value: data?.summary.inFlight, icon: Clock },
     {
-      label: 'Conversations',
-      value: data.overview?.chatsInitiated ?? 0,
-      icon: MessageSquare,
+      label: 'Active users, last 24 hours',
+      value: data?.summary.activeUsers24h,
+      icon: Users,
     },
-  ];
+  ].filter((stat) => stat.value !== undefined);
 
-  if (loading && !data.overview) {
+  if (!data && !error) {
     return (
       <div className={cn('w-full space-y-6', className)}>
         {/* Header skeleton */}
@@ -427,7 +362,7 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
     );
   }
 
-  if (error) {
+  if (error || !data) {
     return (
       <div className={cn('w-full', className)}>
         <div
@@ -521,9 +456,14 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
                 <stat.icon aria-hidden="true" className="h-4 w-4" />
               </div>
               <p className="mt-4 text-2xl font-semibold tabular-nums text-foreground">
-                {stat.value.toLocaleString()}
+                {stat.value == null ? UNAVAILABLE : stat.value.toLocaleString()}
               </p>
-              <p className="mt-1 text-xs text-muted-foreground">{stat.label}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {stat.label}
+                {stat.value == null && (
+                  <span className="block">Unavailable right now</span>
+                )}
+              </p>
             </div>
           ))}
         </motion.div>
@@ -576,11 +516,11 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
               Search
             </TabsTrigger>
             <TabsTrigger
-              value="realtime"
+              value="activity"
               className="flex min-h-[44px] items-center gap-2 sm:min-h-0"
             >
               <Activity aria-hidden="true" className="h-4 w-4 shrink-0" />
-              Real-time
+              Activity
             </TabsTrigger>
           </TabsList>
 
@@ -594,32 +534,58 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
               onMetricClick={handleMetricClick}
             />
 
-            {/* Charts Grid */}
+            {/* Charts Grid. Each chart reads a real daily series; a failed or
+                admin-only source says so instead of drawing zeros. */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <AnalyticsChart
-                title="Page views trend"
-                description="Daily page views over the last 30 days"
-                data={data.chartData}
-                dataKeys={['pageViews', 'uniqueVisitors']}
-                labels={{
-                  pageViews: 'Page views',
-                  uniqueVisitors: 'Unique visitors',
-                }}
-                height={300}
-              />
+              {data.searchVolume === null ? (
+                <ChartNotice
+                  title="Searches per day (last 7 days)"
+                  message="Search volume is unavailable right now."
+                />
+              ) : data.searchVolume.length === 0 ? (
+                <ChartNotice
+                  title="Searches per day (last 7 days)"
+                  message="No searches in the last 7 days."
+                />
+              ) : (
+                <AnalyticsChart
+                  title="Searches per day (last 7 days)"
+                  description="Daily search totals for your organization"
+                  data={data.searchVolume}
+                  labels={{ value: 'Searches' }}
+                  height={300}
+                  // The response is a fixed 7-day window: no prior period to
+                  // compare against, and no other range to select.
+                  showTrend={false}
+                  showTimeRange={false}
+                />
+              )}
 
-              <AnalyticsChart
-                title="User activity"
-                description="Document uploads and search activity"
-                data={data.chartData}
-                type="bar"
-                dataKeys={['documentsUploaded', 'searchesPerformed']}
-                labels={{
-                  documentsUploaded: 'Documents',
-                  searchesPerformed: 'Searches',
-                }}
-                height={300}
-              />
+              {data.activeUserTrend === undefined ? (
+                <ChartNotice
+                  title="Active users"
+                  message="Active-user trends are available to organization admins."
+                />
+              ) : data.activeUserTrend === null ? (
+                <ChartNotice
+                  title="Active users"
+                  message="Active-user trends are unavailable right now."
+                />
+              ) : data.activeUserTrend.length === 0 ? (
+                <ChartNotice
+                  title="Active users"
+                  message="No user activity in the last 30 days."
+                />
+              ) : (
+                <AnalyticsChart
+                  title="Active users"
+                  description="Users active per day, up to the last 30 days"
+                  data={data.activeUserTrend}
+                  type="bar"
+                  labels={{ value: 'Active users' }}
+                  height={300}
+                />
+              )}
             </div>
           </TabsContent>
 
@@ -656,8 +622,9 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
                     ) : (
                       <div className="flex h-[250px] items-center justify-center text-center text-muted-foreground">
                         <p className="text-sm">
-                          No documents indexed yet. Upload a document to see the
-                          breakdown here.
+                          {data.fileStatsAvailable
+                            ? 'No documents indexed yet. Upload a document to see the breakdown here.'
+                            : 'File statistics are unavailable right now.'}
                         </p>
                       </div>
                     )}
@@ -672,7 +639,7 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
                   </CardHeader>
                   <CardContent className="space-y-4">
                     {data.processingStats.length > 0 ? (
-                      data.processingStats.map((item: any) => (
+                      data.processingStats.map((item) => (
                         <div
                           key={item.status}
                           className="flex items-center justify-between"
@@ -691,7 +658,11 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
                       ))
                     ) : (
                       <div className="flex items-center justify-center py-4 text-muted-foreground">
-                        <p className="text-sm">No processing data yet.</p>
+                        <p className="text-sm">
+                          {data.fileStatsAvailable
+                            ? 'No processing data yet.'
+                            : 'Processing status is unavailable right now.'}
+                        </p>
                       </div>
                     )}
                   </CardContent>
@@ -704,13 +675,20 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
           <TabsContent value="search" className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2">
-                <AnalyticsTable
-                  title="Search analytics"
-                  description="Your most popular search queries and how they performed"
-                  data={data.searches}
-                  columns={searchTableConfig.columns}
-                  loading={loading}
-                />
+                {data.searches === null ? (
+                  <ChartNotice
+                    title="Search analytics"
+                    message="Search analytics are unavailable right now."
+                  />
+                ) : (
+                  <AnalyticsTable
+                    title="Search analytics"
+                    description="Your most frequent search queries over the last 7 days"
+                    data={data.searches}
+                    columns={searchTableConfig.columns}
+                    loading={loading}
+                  />
+                )}
               </div>
 
               <div className="space-y-6">
@@ -733,8 +711,9 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
                     ) : (
                       <div className="flex h-[250px] items-center justify-center text-center text-muted-foreground">
                         <p className="text-sm">
-                          No search data yet. Run a few searches to see how they
-                          break down.
+                          {data.searchTypes === null
+                            ? 'Search types are unavailable right now.'
+                            : 'No search data yet. Run a few searches to see how they break down.'}
                         </p>
                       </div>
                     )}
@@ -762,48 +741,56 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
             </div>
           </TabsContent>
 
-          {/* Real-time Tab */}
-          <TabsContent value="realtime" className="space-y-6">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-              {[
-                {
-                  label: 'Active users',
-                  value:
-                    data.realtimeMetrics?.activeUsers ||
-                    data.overview?.activeUsers ||
-                    0,
-                  icon: Users,
-                },
-                {
-                  label: 'Current searches',
-                  value: data.realtimeMetrics?.currentSearches || 0,
-                  icon: Search,
-                },
-                {
-                  label: 'Processing files',
-                  value: data.realtimeMetrics?.processingFiles || 0,
-                  icon: FileText,
-                },
-                {
-                  label: 'Requests / min',
-                  value: data.realtimeMetrics?.requestsPerMinute || 0,
-                  icon: Activity,
-                },
-              ].map((metric) => (
-                <Card key={metric.label}>
-                  <CardContent className="p-5">
-                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted text-primary">
-                      <metric.icon aria-hidden="true" className="h-4 w-4" />
-                    </div>
-                    <p className="mt-4 text-2xl font-semibold tabular-nums text-foreground">
-                      {metric.value.toLocaleString()}
-                    </p>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {metric.label}
-                    </p>
-                  </CardContent>
-                </Card>
-              ))}
+          {/* Activity Tab. Only figures the backend reports: there is no
+              source for live searches or request rates, so none are shown. */}
+          <TabsContent value="activity" className="space-y-6">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              {(
+                [
+                  {
+                    label: 'Documents in processing',
+                    value: data.summary.inFlight,
+                    icon: FileText,
+                  },
+                  {
+                    label: 'Active users, last 24 hours',
+                    value: data.overview.activeUsers24h,
+                    icon: Users,
+                  },
+                  {
+                    label: 'Search sessions, last 24 hours',
+                    value: data.overview.searchSessions24h,
+                    icon: Search,
+                  },
+                ] as Array<{
+                  label: string;
+                  value: Figure | undefined;
+                  icon: typeof Users;
+                }>
+              )
+                .filter((metric) => metric.value !== undefined)
+                .map((metric) => (
+                  <Card key={metric.label}>
+                    <CardContent className="p-5">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted text-primary">
+                        <metric.icon aria-hidden="true" className="h-4 w-4" />
+                      </div>
+                      <p className="mt-4 text-2xl font-semibold tabular-nums text-foreground">
+                        {metric.value == null
+                          ? UNAVAILABLE
+                          : metric.value.toLocaleString()}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {metric.label}
+                        {metric.value == null && (
+                          <span className="block text-xs">
+                            Unavailable right now
+                          </span>
+                        )}
+                      </p>
+                    </CardContent>
+                  </Card>
+                ))}
             </div>
 
             <Card>
@@ -819,11 +806,11 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
                       <Activity aria-hidden="true" className="h-5 w-5" />
                     </div>
                     <p className="text-sm font-medium text-foreground">
-                      No recent activity
+                      Activity feed not available yet
                     </p>
                     <p className="max-w-xs text-sm text-muted-foreground">
-                      Uploads, searches, and conversations will appear here as
-                      they happen across your workspace.
+                      There is no activity source to read from yet, so no
+                      events are listed here.
                     </p>
                   </div>
                 </ScrollArea>

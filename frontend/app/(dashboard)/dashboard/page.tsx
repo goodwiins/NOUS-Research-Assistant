@@ -3,15 +3,12 @@
 import { useAuth } from '@/hooks/useAuth';
 import { useDocuments } from '@/hooks/useDocuments';
 import { getAnalytics } from '@/lib/analytics';
-import { cn } from '@/lib/utils';
 import {
+  countInFlightDocuments,
   documentAnalyticsApi,
   searchAnalyticsApi,
-  performanceApi,
 } from '@/services/documentAnalyticsApi';
 import type { FileTypeStats } from '@/services/documentAnalyticsApi';
-import analyticsService from '@/services/analyticsService';
-import type { ServiceStatus } from '@/services/analyticsService';
 import { motion, MotionConfig } from 'framer-motion';
 import {
   Activity,
@@ -26,7 +23,6 @@ import {
   FileVideo,
   Gauge,
   Image as ImageIcon,
-  MessageSquare,
   Music,
   Network,
   Search,
@@ -51,10 +47,17 @@ const DOC_TYPE_ICON_MAP: Record<string, typeof FileText> = {
   audio: Music,
 };
 
+/** `undefined` while loading, `null` when the source failed. */
+type StatValue = number | null | undefined;
+
 export default function DashboardPage() {
   const { isAuthenticated, isLoading: authLoading, user } = useAuth();
   // Only the total count is needed here, so fetch a single page, not 100 docs.
-  const { pagination } = useDocuments({
+  const {
+    pagination,
+    hasLoaded: documentsLoaded,
+    error: documentsError,
+  } = useDocuments({
     initialPageSize: 1,
     autoFetch: isAuthenticated && !authLoading,
   });
@@ -63,17 +66,12 @@ export default function DashboardPage() {
   const [showKeyboardShortcuts, setShowKeyboardShortcuts] = useState(false);
   const [showQuickSearch, setShowQuickSearch] = useState(false);
 
-  // Live data state
-  const [totalSearches, setTotalSearches] = useState<number>(0);
-  const [totalChats, setTotalChats] = useState<number>(0);
-  const [processingCount, setProcessingCount] = useState<number>(0);
+  // Live data state. `undefined` while loading and `null` when the source
+  // failed, so an outage shows as unavailable instead of a real-looking 0.
+  const [totalSearches, setTotalSearches] = useState<StatValue>(undefined);
+  const [avgSearchTimeMs, setAvgSearchTimeMs] = useState<StatValue>(undefined);
+  const [processingCount, setProcessingCount] = useState<StatValue>(undefined);
   const [filesByType, setFilesByType] = useState<FileTypeStats[]>([]);
-  const [services, setServices] = useState<
-    Array<{ name: string; status: string; latency: string; load: number }>
-  >([]);
-  const [servicesState, setServicesState] = useState<
-    'loading' | 'loaded' | 'error'
-  >('loading');
   const [recentActivity] = useState<
     Array<{ type: string; text: string; time: string }>
   >([]);
@@ -114,56 +112,32 @@ export default function DashboardPage() {
   const fetchDashboardData = useCallback(async () => {
     if (!isAuthenticated || authLoading) return;
 
-    // Fetch search stats
+    // Search totals for the last 7 days.
     searchAnalyticsApi
       .getCombinedSearchAnalytics()
       .then((data) => {
-        setTotalSearches(data.totalSearches ?? 0);
+        setTotalSearches(data.totalSearches);
+        setAvgSearchTimeMs(Math.round(data.avgResponseTimeMs));
       })
       .catch(() => {
-        /* graceful fallback — keeps existing state */
+        setTotalSearches(null);
+        setAvgSearchTimeMs(null);
       });
 
-    // Fetch performance/realtime metrics (processing files + chat proxy)
-    performanceApi
-      .getDashboardOverview()
-      .then((data) => {
-        setTotalChats(data.totalSessions ?? 0);
-      })
-      .catch(() => {});
-
-    // Fetch file stats (type breakdown + processing counts)
+    // File stats: type breakdown and documents still being processed.
     documentAnalyticsApi
       .getFileStats()
       .then((data) => {
-        setFilesByType(data.files_by_type ?? []);
-        const pending = (data.processing_stats ?? [])
-          .filter((s) => s.status === 'pending' || s.status === 'processing')
-          .reduce((sum, s) => sum + s.count, 0);
-        setProcessingCount(pending);
-      })
-      .catch(() => {});
-
-    // Fetch service status via performance metrics
-    analyticsService
-      .getPerformanceMetrics()
-      .then((data) => {
-        const mappedServices = (data.services ?? []).map(
-          (svc: ServiceStatus) => ({
-            name: svc.name,
-            status: svc.status === 'healthy' ? 'online' : svc.status,
-            latency: `${svc.response_time}ms`,
-            load: Math.min(100, Math.round((svc.response_time / 500) * 100)),
-          })
-        );
-        if (mappedServices.length > 0) {
-          setServices(mappedServices);
-        }
-        setServicesState('loaded');
+        setFilesByType(data.files_by_type);
+        setProcessingCount(countInFlightDocuments(data.processing_stats));
       })
       .catch(() => {
-        setServicesState('error');
+        setProcessingCount(null);
       });
+
+    // Service health has no backend source yet (`/analytics/performance` is
+    // not a route; GOO-720), so the panel below is static and nothing is
+    // requested for it.
 
     // TODO: wire to /activity or /events endpoint when available
   }, [isAuthenticated, authLoading]);
@@ -172,13 +146,17 @@ export default function DashboardPage() {
     fetchDashboardData();
   }, [fetchDashboardData]);
 
-  // Stats — wired to real data, documents from useDocuments hook
-  const stats = {
-    documents: documentCount,
-    searches: totalSearches,
-    chats: totalChats,
-    processing: processingCount,
-  };
+  // `useDocuments` starts with a total of 0 before any fetch, so the card
+  // waits for the first successful response instead of showing that default.
+  // Signed out once auth has settled: nothing will be fetched, so every card
+  // is unavailable rather than loading forever.
+  const signedOut = !authLoading && !isAuthenticated;
+  const settled = (value: StatValue): StatValue => (signedOut ? null : value);
+
+  const documentsStat: StatValue = settled(
+    documentsError ? null : documentsLoaded ? documentCount : undefined
+  );
+  const processingStat = settled(processingCount);
 
   // Quick actions
   const quickActions = [
@@ -187,10 +165,6 @@ export default function DashboardPage() {
     { icon: Bot, label: 'Chat', href: '/chat' },
     { icon: Database, label: 'arXiv', href: '/arxiv' },
   ];
-
-  // System services — real data only. Loading / empty / error states render
-  // honestly in the panel below; no fabricated "online" placeholders.
-  const hasServiceData = services.length > 0;
 
   // Recent activity — real data only; an honest empty state renders below.
   // TODO: wire to /activity or /events endpoint when available
@@ -205,11 +179,21 @@ export default function DashboardPage() {
   }));
   const hasDocTypes = docTypes.length > 0;
 
+  // No organization-wide conversation count exists, so there is no
+  // "Conversations" card (the old one read search sessions as chats).
   const statCards = [
-    { label: 'Documents', value: stats.documents, icon: FileText },
-    { label: 'Searches', value: stats.searches, icon: Search },
-    { label: 'Conversations', value: stats.chats, icon: MessageSquare },
-    { label: 'Processing', value: stats.processing, icon: Zap },
+    { label: 'Documents', value: documentsStat, icon: FileText },
+    {
+      label: 'Searches, last 7 days',
+      value: settled(totalSearches),
+      icon: Search,
+    },
+    {
+      label: 'Avg search time (ms), last 7 days',
+      value: settled(avgSearchTimeMs),
+      icon: Clock,
+    },
+    { label: 'Processing', value: processingStat, icon: Zap },
   ];
 
   const insights = [
@@ -339,10 +323,25 @@ export default function DashboardPage() {
                   </div>
                 </div>
                 <div className="text-2xl font-semibold text-foreground tabular-nums">
-                  {stat.value}
+                  {stat.value === undefined ? (
+                    <span
+                      aria-hidden="true"
+                      className="block h-8 w-16 animate-pulse rounded bg-muted"
+                    />
+                  ) : stat.value === null ? (
+                    '—'
+                  ) : (
+                    stat.value.toLocaleString()
+                  )}
                 </div>
                 <div className="text-xs text-muted-foreground mt-1">
                   {stat.label}
+                  {stat.value === undefined && (
+                    <span className="sr-only"> loading</span>
+                  )}
+                  {stat.value === null && (
+                    <span className="block">Unavailable right now</span>
+                  )}
                 </div>
               </motion.div>
             ))}
@@ -365,102 +364,9 @@ export default function DashboardPage() {
               </div>
 
               <div className="p-5">
-                {servicesState === 'error' ? (
-                  <div
-                    role="alert"
-                    className="flex flex-col items-start gap-3 p-4 rounded-xl border border-border bg-muted/20"
-                  >
-                    <p className="text-sm text-foreground">
-                      Couldn&apos;t reach the service health endpoint.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setServicesState('loading');
-                        fetchDashboardData();
-                      }}
-                      className="text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
-                    >
-                      Retry
-                    </button>
-                  </div>
-                ) : !hasServiceData ? (
-                  <div
-                    role="status"
-                    className="p-4 text-sm text-muted-foreground"
-                  >
-                    {servicesState === 'loading'
-                      ? 'Checking service health…'
-                      : 'No service data available.'}
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                    {services.map((service) => {
-                      const online = service.status === 'online';
-                      const statusLabel = online ? 'Online' : service.status;
-                      return (
-                        <div
-                          key={service.name}
-                          className="p-4 rounded-xl border border-border bg-muted/20 hover:border-(--nous-helios) hover:shadow-md transition-all group"
-                        >
-                          <div className="flex items-center justify-between mb-3">
-                            <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors">
-                              {service.name}
-                            </span>
-                            <span className="flex items-center gap-1.5">
-                              <span
-                                aria-hidden="true"
-                                className={cn(
-                                  'w-1.5 h-1.5 rounded-full',
-                                  online
-                                    ? 'bg-(--nous-terra)'
-                                    : 'bg-(--nous-mars)'
-                                )}
-                              />
-                              <span className="text-[11px] text-muted-foreground">
-                                {statusLabel}
-                              </span>
-                            </span>
-                          </div>
-                          <div className="flex items-baseline gap-2 mb-3">
-                            <span className="text-lg font-medium text-foreground tabular-nums">
-                              {service.latency}
-                            </span>
-                            <span className="text-[11px] text-muted-foreground">
-                              latency
-                            </span>
-                          </div>
-                          {/* Load bar */}
-                          <div
-                            className="h-1 bg-border rounded-full overflow-hidden"
-                            role="progressbar"
-                            aria-valuenow={service.load}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                            aria-label={`${service.name} resource load`}
-                          >
-                            <motion.div
-                              initial={{ width: 0 }}
-                              animate={{ width: `${service.load}%` }}
-                              transition={{ duration: 1, delay: 0.5 }}
-                              className={cn(
-                                'h-full rounded-full',
-                                service.load < 50 && 'bg-(--nous-terra)',
-                                service.load >= 50 &&
-                                  service.load < 75 &&
-                                  'bg-(--nous-helios)',
-                                service.load >= 75 && 'bg-(--nous-mars)'
-                              )}
-                            />
-                          </div>
-                          <div className="text-[11px] text-muted-foreground mt-2">
-                            {service.load}% resource load
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                <p role="status" className="p-4 text-sm text-muted-foreground">
+                  Service health isn&apos;t available yet.
+                </p>
               </div>
             </motion.div>
 
@@ -536,7 +442,11 @@ export default function DashboardPage() {
               </div>
 
               <div className="p-6">
-                {!hasDocTypes ? (
+                {processingStat === null ? (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    Document types are unavailable right now.
+                  </p>
+                ) : !hasDocTypes ? (
                   <p className="text-sm text-muted-foreground">
                     No documents indexed yet.{' '}
                     <Link

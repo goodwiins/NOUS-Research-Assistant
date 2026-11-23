@@ -28,9 +28,6 @@ const ALLOWED: Record<string, string> = {
   'src/components/citations/CitationGraph.tsx': 'node layout shuffle',
   'src/components/citations/CitationGraphSkeleton.tsx':
     'skeleton placeholder size',
-  // Fabricated search results/click rates; removed by #2248 (GOO-649),
-  // which owns this file. Drop this entry once that lands.
-  'src/services/documentAnalyticsApi.ts': 'owned by #2248 (GOO-649)',
 };
 
 const isTestFile = (path: string): boolean =>
