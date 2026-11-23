@@ -1240,6 +1240,43 @@ function EntityManagementContent() {
                     setSelectedEntity(entity);
                   }}
                 />
+                {/* The only entry point to the relationship dialog (GOO-767).
+                    Disabled until the graph's own relationship types load:
+                    the form has nothing to offer without them (GOO-756). */}
+                <div className="mt-4 flex items-center justify-end gap-3 border-t border-border pt-4">
+                  {relationshipTypeList.status !== 'loaded' && (
+                    <span
+                      id="add-relationship-status"
+                      className="text-xs text-muted-foreground"
+                    >
+                      {relationshipTypeList.status === 'loading'
+                        ? 'Loading relationship types…'
+                        : "Couldn't load relationship types"}
+                    </span>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      !canCreate || relationshipTypeList.status !== 'loaded'
+                    }
+                    aria-describedby={
+                      relationshipTypeList.status !== 'loaded'
+                        ? 'add-relationship-status'
+                        : undefined
+                    }
+                    onClick={() => {
+                      setDetailDialogOpen(false);
+                      handleAddRelationship(selectedEntity.id);
+                    }}
+                  >
+                    <Plus aria-hidden="true" className="h-4 w-4 mr-1.5" />
+                    Add relationship
+                    {!canCreate && (
+                      <span className="ml-1 text-xs opacity-80">(admin)</span>
+                    )}
+                  </Button>
+                </div>
               </div>
             )}
           </DialogContent>
