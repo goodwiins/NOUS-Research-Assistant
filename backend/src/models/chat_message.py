@@ -141,6 +141,9 @@ class ChatMessage(BaseModel):
             ondelete="SET NULL",
         ),
         nullable=True,
+        # Leading index for the purge's SET NULL check; ix_chat_messages_parent
+        # leads with thread_id and does not serve it (GOO-655).
+        index=True,
     )
     selected_at = Column(DateTime(timezone=True), nullable=True)
 

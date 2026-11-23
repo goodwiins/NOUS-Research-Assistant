@@ -20,7 +20,7 @@ checked (see docs/engineering/gotchas.md).
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import Column, ForeignKey, Integer, MetaData, Table
+from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, Table
 
 import src.models  # noqa: F401  register every table on Base.metadata
 from src.models.base import Base
@@ -101,9 +101,19 @@ def test_the_walk_rejects_set_null_on_a_not_null_column() -> None:
 
 
 def _leading_index_columns(table: Table) -> set[str]:
-    """Columns that lead some index, unique constraint or primary key."""
+    """Columns that lead some full index, unique constraint or primary key.
+
+    A partial index (``WHERE ...``) covers only some rows, so it cannot serve
+    the RI check for every deleted parent; a column that is not first in an
+    index is not served by it either.
+    """
     leading: set[str] = set()
     for index in table.indexes:
+        if any(
+            index.dialect_options[dialect].get("where") is not None
+            for dialect in ("postgresql", "sqlite")
+        ):
+            continue
         columns = list(index.columns)
         if columns:
             leading.add(columns[0].name)
@@ -155,3 +165,38 @@ def test_the_index_check_reports_an_unindexed_fk() -> None:
         Column("thread_id", ForeignKey("threads.id", ondelete="CASCADE"), index=True),
     )
     assert _unindexed(metadata) == ["notes.message_id -> chat_messages.id"]
+
+
+def test_a_partial_or_non_leading_index_does_not_count() -> None:
+    # agent_runs.thread_id had only the partial uq_agent_runs_active_thread,
+    # and chat_messages.parent_message_id was second in ix_chat_messages_parent:
+    # neither serves the per-row RI check, so both must be reported.
+    metadata = MetaData()
+    Table("threads", metadata, Column("id", Integer, primary_key=True))
+    Table("chat_messages", metadata, Column("id", Integer, primary_key=True))
+    runs = Table(
+        "runs",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("thread_id", ForeignKey("threads.id", ondelete="SET NULL")),
+        Column("active", Integer),
+    )
+    Index(
+        "uq_runs_active_thread",
+        runs.c.thread_id,
+        unique=True,
+        postgresql_where=runs.c.active == 1,
+    )
+    notes = Table(
+        "notes",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("thread_id", ForeignKey("threads.id", ondelete="CASCADE"), index=True),
+        Column("message_id", ForeignKey("chat_messages.id", ondelete="SET NULL")),
+    )
+    Index("ix_notes_thread_message", notes.c.thread_id, notes.c.message_id)
+
+    assert _unindexed(metadata) == [
+        "notes.message_id -> chat_messages.id",
+        "runs.thread_id -> threads.id",
+    ]
