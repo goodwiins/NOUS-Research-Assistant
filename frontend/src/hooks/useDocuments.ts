@@ -133,6 +133,8 @@ interface UseDocumentsState {
   documents: Document[];
   loading: boolean;
   error: string | null;
+  /** True once a fetch has succeeded, so `pagination.total` is real. */
+  hasLoaded: boolean;
   pagination: {
     page: number;
     pageSize: number;
@@ -154,6 +156,11 @@ interface UseDocumentsReturn {
   documents: Document[];
   loading: boolean;
   error: string | null;
+  /**
+   * False until the first fetch succeeds. Before that `pagination.total` is
+   * the initial 0, not a count, so callers showing a total wait for this.
+   */
+  hasLoaded: boolean;
   pagination: UseDocumentsState['pagination'];
   filters: DocumentFilters;
   selectedDocuments: Set<string>;
@@ -217,6 +224,7 @@ export const useDocuments = (
     documents: [],
     loading: false,
     error: null,
+    hasLoaded: false,
     pagination: {
       page: 1,
       pageSize: initialPageSize,
@@ -371,6 +379,7 @@ export const useDocuments = (
           },
           loading: false,
           error: null,
+          hasLoaded: true,
         }));
       } catch (error) {
         console.error('Error fetching documents:', error);
@@ -794,6 +803,7 @@ export const useDocuments = (
     documents: state.documents,
     loading: state.loading,
     error: state.error,
+    hasLoaded: state.hasLoaded,
     pagination: state.pagination,
     filters: state.filters,
     selectedDocuments: state.selectedDocuments,
