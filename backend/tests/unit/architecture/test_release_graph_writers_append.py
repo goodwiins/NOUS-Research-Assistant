@@ -19,6 +19,15 @@ This test enforces that rule instead of leaving it in a docstring:
    ``INSERT INTO``/``UPDATE``/``DELETE FROM`` SQL for its table.
 3. Each writer must reach ``append_decision`` through its own module's call
    graph, or be a helper whose same-module callers all do.
+4. Each writer must also hold the Collection lock, or the heads check proves
+   nothing: it reaches a lock through its own calls, or every caller in
+   ``src`` does (calls resolved across modules through imports). The lock
+   is ``lock_active_project``, ``resolve_for_staling``, or ``resolve_project``
+   with a literal action in ``project_access._MUTATING_ACTIONS``, called
+   directly, through a local alias, or through a wrapper that forwards its
+   ``action`` parameter. The lock functions are terminal: ``resolve_project``
+   calls ``lock_active_project`` itself, so passing through it would count a
+   ``VIEW`` caller as locked.
 
 Not covered: ORM attribute assignment on a loaded row (``row.x = ...``) is
 not visible to an AST scan. Graph rows are append-only by design (new
@@ -27,7 +36,12 @@ sanctioned in-place update (``update(DraftRelease)``), which is covered.
 
 Mutation check (GOO-777): adding ``def _rogue(): return DraftRelease()`` to
 any ``src`` module makes ``test_every_graph_writer_appends_a_decision`` fail
-and name it.
+and name it. So does each lock mutant, one at a time:
+- a planted writer that calls ``append_decision`` but takes no lock
+- the figure route resolving with ``resolve_project(..., VIEW)``
+- the claim-link route's aliased ``resolve(..., VIEW)``
+- the observation route calling ``_matrix_context(..., VIEW)``
+- ``_matrix_context`` passing ``VIEW`` instead of forwarding ``action``
 """
 
 from __future__ import annotations
@@ -47,6 +61,10 @@ GRAPH_MODULE = SRC / "services/research/draft_release_service.py"
 GRAPH_FUNCTION = "_graph"
 APPEND = "append_decision"
 WRITE_CALLS = frozenset({"insert", "update", "delete", "pg_insert"})
+# The Collection lock: ``resolve_project`` with a mutating action takes it
+# (Workspace SHARE -> Collection UPDATE); these two always do.
+LOCKS = frozenset({"lock_active_project", "resolve_for_staling"})
+RESOLVE = "resolve_project"
 
 # Read by a graph reader but not a graph *input* in the heads sense. Each
 # entry must still be read (the test fails if it goes stale).
@@ -254,6 +272,182 @@ def _writes(fn: Function, models: frozenset[str], aliases: dict[str, str]) -> se
     return found | _raw_sql_writes(fn)
 
 
+Key = tuple[Path, str]
+
+
+def _module_path(dotted: str) -> Path | None:
+    base = SRC.parent / dotted.replace(".", "/")
+    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+@lru_cache(maxsize=None)
+def _imports(path: Path) -> dict[str, tuple[Path, str | None]]:
+    """Local name -> (module file, None) for an imported module, or
+    (module file, function name) for an imported function."""
+    package = path.parent.relative_to(SRC.parent).parts
+    out: dict[str, tuple[Path, str | None]] = {}
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.ImportFrom):
+            parts = package[: len(package) - node.level + 1] if node.level else ()
+            module = ".".join((*parts, *(node.module or "").split("."))).strip(".")
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if sub := _module_path(f"{module}.{alias.name}"):
+                    out[local] = (sub, None)
+                elif parent := _module_path(module):
+                    out[local] = (parent, alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname and (mod := _module_path(alias.name)):
+                    out[alias.asname] = (mod, None)
+    return out
+
+
+def _resolve(call: ast.Call, path: Path, local: dict[str, Function]) -> Key | None:
+    """The function a call lands on, across modules, when the AST names it."""
+    func, imports = call.func, _imports(path)
+    if isinstance(func, ast.Name):
+        if func.id in local:
+            return (path, func.id)
+        module, name = imports.get(func.id, (None, None))
+        if module and name:
+            return (module, name)
+    elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        if func.value.id in {"self", "cls"}:
+            return (path, func.attr)
+        module, name = imports.get(func.value.id, (None, None))
+        if module and name is None:
+            return (module, func.attr)
+    return None
+
+
+def _call_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return getattr(call.func, "attr", None)
+
+
+@lru_cache(maxsize=1)
+def _mutating_actions() -> frozenset[str]:
+    from src.services.research_engine.project_access import _MUTATING_ACTIONS
+
+    return frozenset(action.name for action in _MUTATING_ACTIONS)
+
+
+def _mutating(call: ast.Call) -> bool:
+    """``resolve_project`` locks the Collection only for a mutating action,
+    so the call must pass one as a literal ``ResearchAction.X``. A variable
+    action proves nothing here; a wrapper that forwards its own ``action``
+    parameter is judged at its call sites instead (``_action_forwarders``)."""
+    return any(
+        isinstance(arg, ast.Attribute)
+        and isinstance(arg.value, ast.Name)
+        and arg.value.id == "ResearchAction"
+        and arg.attr in _mutating_actions()
+        for arg in [*call.args, *(k.value for k in call.keywords)]
+    )
+
+
+@lru_cache(maxsize=1)
+def _action_forwarders() -> frozenset[str]:
+    """Functions with an ``action`` parameter that pass it straight to
+    ``resolve_project`` (e.g. ``extraction_matrix._matrix_context``): a call
+    to one with a literal mutating action takes the lock."""
+    found = set()
+    for path in SRC.rglob("*.py"):
+        for name, fn in _functions(_parse(path)).items():
+            if name == RESOLVE or "action" not in {a.arg for a in fn.args.args}:
+                continue
+            for call in ast.walk(fn):
+                if (
+                    isinstance(call, ast.Call)
+                    and _call_name(call) == RESOLVE
+                    and any(
+                        isinstance(arg, ast.Name) and arg.id == "action"
+                        for arg in [*call.args, *(k.value for k in call.keywords)]
+                    )
+                ):
+                    found.add(name)
+    return frozenset(found)
+
+
+def _takes_lock(fn: Function) -> bool:
+    """Calls ``lock_active_project`` or ``resolve_for_staling``, or calls
+    ``resolve_project`` with a literal mutating ``ResearchAction``: directly,
+    through a local alias (``resolve = resolve_for_staling if ... else
+    resolve_project``) or through an action-forwarding wrapper."""
+    resolvers = {RESOLVE} | _action_forwarders()
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            named = {
+                n.id if isinstance(n, ast.Name) else n.attr
+                for n in ast.walk(node.value)
+                if isinstance(n, (ast.Name, ast.Attribute))
+            }
+            if named & (LOCKS | {RESOLVE}):
+                resolvers.add(node.targets[0].id)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            name = _call_name(node)
+            if name in LOCKS or (name in resolvers and _mutating(node)):
+                return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def _lock_graph() -> tuple[dict[Key, set[Key]], frozenset[Key]]:
+    """(callers of each function, functions that reach a Collection lock
+    through their own calls), over every function in ``src``."""
+    # The primitives are terminal: ``resolve_project`` itself calls
+    # ``lock_active_project``, so propagating through it would count a
+    # ``resolve_project(..., VIEW)`` caller as locked. Only ``_takes_lock``
+    # judges a call to one.
+    primitives = LOCKS | {RESOLVE}
+    edges: dict[Key, set[Key]] = {}
+    reaches: set[Key] = set()
+    for path in SRC.rglob("*.py"):
+        local = _functions(_parse(path))
+        for name, fn in local.items():
+            edges[(path, name)] = {
+                key
+                for call in ast.walk(fn)
+                if isinstance(call, ast.Call)
+                and (key := _resolve(call, path, local))
+                and key[1] not in primitives
+            }
+            if name not in primitives and _takes_lock(fn):
+                reaches.add((path, name))
+    grew = True
+    while grew:
+        grew = False
+        for key, callees in edges.items():
+            if key not in reaches and callees & reaches:
+                reaches.add(key)
+                grew = True
+    callers: dict[Key, set[Key]] = {key: set() for key in edges}
+    for key, callees in edges.items():
+        for callee in callees:
+            callers.setdefault(callee, set()).add(key)
+    return callers, frozenset(reaches)
+
+
+def _holds_lock(key: Key, seen: frozenset[Key] = frozenset()) -> bool:
+    """Reaches a Collection lock itself, or every caller (in any module)
+    does. A function nothing calls must take the lock itself."""
+    callers, reaches = _lock_graph()
+    if key in reaches:
+        return True
+    up = callers.get(key, set()) - seen - {key}
+    return bool(up) and all(_holds_lock(c, seen | {key}) for c in up)
+
+
 def _violations_in(path: Path, models: frozenset[str]) -> Iterator[str]:
     tree = _parse(path)
     aliases = _import_aliases(tree)
@@ -278,9 +472,13 @@ def _violations_in(path: Path, models: frozenset[str]) -> Iterator[str]:
 
     for name, fn in functions.items():
         written = _writes(fn, models, aliases)
-        if written and not appends(name, frozenset()):
-            rel = path.relative_to(SRC.parent)
-            yield f"{rel}:{fn.lineno} {name} writes {sorted(written)}"
+        if not written:
+            continue
+        rel = path.relative_to(SRC.parent)
+        if not appends(name, frozenset()):
+            yield f"{rel}:{fn.lineno} {name} writes {sorted(written)} without append_decision"
+        if not _holds_lock((path, name)):
+            yield f"{rel}:{fn.lineno} {name} writes {sorted(written)} without a Collection lock"
 
 
 def test_graph_inputs_are_derived_from_the_graph_readers() -> None:
@@ -303,10 +501,9 @@ def test_every_graph_writer_appends_a_decision() -> None:
     ]
     assert not violations, (
         "These functions write a release-graph input without appending a "
-        "decision (append_decision) in the same transaction, so the "
-        "Collection's stream heads would not move and resolve_for_staling "
-        "could trust a stale pre-lock snapshot (GOO-721/GOO-777):\n"
-        + "\n".join(violations)
+        "decision (append_decision) in the same transaction, or without "
+        "holding the Collection lock, so resolve_for_staling could trust a "
+        "stale pre-lock snapshot (GOO-721/GOO-777):\n" + "\n".join(violations)
     )
 
 

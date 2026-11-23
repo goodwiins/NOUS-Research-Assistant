@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from importlib import import_module
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
@@ -84,7 +84,9 @@ def world(monkeypatch: pytest.MonkeyPatch) -> _World:
 
 async def _patch(w: _World, request: UpdateMatrixRequest) -> dict[str, Any]:
     user = SimpleNamespace(id=uuid4())
-    return await _routes().update_matrix(w.matrix.id, request, user, w.db)
+    return cast(
+        dict[str, Any], await _routes().update_matrix(w.matrix.id, request, user, w.db)
+    )
 
 
 @pytest.mark.asyncio
