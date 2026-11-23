@@ -23,7 +23,7 @@ except ImportError:
     PSUTIL_AVAILABLE = False
     logging.warning("psutil not available, using fallback system monitoring")
 
-from src.cache.analytics_cache import CacheTTL, get_analytics_cache
+from src.cache.analytics_cache import CacheTTL, analytics_key, get_analytics_cache
 from src.core.database import get_async_session
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,23 @@ class MetricTimeRange(Enum):
     LAST_7D = "7d"
     LAST_30D = "30d"
     LAST_90D = "90d"
+
+
+def _overview_cache_key(
+    organization_id: str, time_range: MetricTimeRange
+) -> Optional[str]:
+    """Analytics cache key for the overview, or None to skip the cache.
+
+    The route passes ``str(current_user.organization_id)``, which is
+    ``"None"`` for a user without an organization; such a caller is served
+    uncached rather than sharing one entry with every other org-less user.
+    """
+    try:
+        return analytics_key(
+            "perf_dashboard", "overview", organization_id, time_range.value
+        )
+    except ValueError:
+        return None
 
 
 class DashboardWidgetType(Enum):
@@ -161,15 +178,16 @@ class PerformanceDashboardService:
         """Get comprehensive dashboard overview"""
 
         cache = get_analytics_cache()
-        cache_key = f"perf_dashboard:overview:{organization_id}:{time_range.value}"
+        cache_key = _overview_cache_key(organization_id, time_range)
 
         # Try Redis/in-memory cache first
-        try:
-            cached = await cache.get(cache_key)
-            if cached is not None:
-                return cached
-        except Exception:
-            pass  # cache miss or error — proceed to compute
+        if cache_key is not None:
+            try:
+                cached = await cache.get(cache_key)
+                if cached is not None:
+                    return cached
+            except Exception:
+                pass  # cache miss or error — proceed to compute
 
         try:
             # Use a single shared DB session for the entire overview request
@@ -198,10 +216,13 @@ class PerformanceDashboardService:
                 }
 
                 # Cache in Redis (3 min TTL) with in-memory fallback
-                try:
-                    await cache.set(cache_key, overview, ttl=CacheTTL.DASHBOARD_DATA)
-                except Exception:
-                    pass  # non-fatal — cache write failure shouldn't break the endpoint
+                if cache_key is not None:
+                    try:
+                        await cache.set(
+                            cache_key, overview, ttl=CacheTTL.DASHBOARD_DATA
+                        )
+                    except Exception:
+                        pass  # non-fatal: a cache write failure must not break the endpoint
 
                 return overview
 
