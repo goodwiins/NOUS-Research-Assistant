@@ -184,8 +184,8 @@ _CLEAN_ENV_DROPS = ("CI", "REQUIRE_POSTGRES_TESTS", "TEST_PG_ADMIN_DSN")
 _CLEAN_ENV_DROP_SUFFIX = ("_TEST_DATABASE_URL", "_PG_ASYNC_URL")
 
 
-def _in_lane_scope(path: Path) -> bool:
-    rel = path.relative_to(_TESTS).as_posix()
+def _in_lane_scope(path: Path, tests_root: Path = _TESTS) -> bool:
+    rel = path.relative_to(tests_root).as_posix()
     return not any(rel == p or rel.startswith(p + "/") for p in _NOT_LANE_SCOPE)
 
 
@@ -194,7 +194,7 @@ def _reaches_pg(path: Path) -> bool:
     return bool(_NAMES_PG_URL.search(text) or _IMPORTS_PG_FIXTURES.search(text))
 
 
-def _postgres_candidates() -> tuple[set[Path], set[Path]]:
+def _postgres_candidates(tests_root: Path = _TESTS) -> tuple[set[Path], set[Path]]:
     """Return (files that may hold a PostgreSQL test, the direct subset).
 
     Direct files are *_postgres.py files and test files that name a database
@@ -203,17 +203,17 @@ def _postgres_candidates() -> tuple[set[Path], set[Path]]:
     tests.db.conftest, for one). Collection then tells which tests in them
     really use one: backend/tests/conftest.py marks those requires_postgres.
     """
-    fixture_dirs = {_TESTS / "db"} | {
+    fixture_dirs = {tests_root / "db"} | {
         conftest.parent
-        for conftest in _TESTS.rglob("conftest.py")
-        if conftest.parent != _TESTS
-        and _in_lane_scope(conftest)
+        for conftest in tests_root.rglob("conftest.py")
+        if conftest.parent != tests_root
+        and _in_lane_scope(conftest, tests_root)
         and _reaches_pg(conftest)
     }
     direct: set[Path] = set()
     reached: set[Path] = set()
-    for path in _TESTS.rglob("test_*.py"):
-        if not _in_lane_scope(path):
+    for path in tests_root.rglob("test_*.py"):
+        if not _in_lane_scope(path, tests_root):
             continue
         if path.name.endswith("_postgres.py") or _reaches_pg(path):
             direct.add(path)
@@ -268,12 +268,18 @@ def _collect_postgres_tests(paths: set[Path]) -> set[str]:
     return {line.strip() for line in result.stdout.splitlines() if "::" in line}
 
 
-def _postgres_lane_step() -> dict:
-    return next(
-        step
-        for step in _integration_job()["steps"]
-        if step.get("name") == _POSTGRES_LANE
+def _step(job: dict, name: str, job_id: str) -> dict:
+    """The step called ``name``; a renamed step fails with its name."""
+    found = [step for step in job["steps"] if step.get("name") == name]
+    assert found, (
+        f"no step named {name!r} in the {job_id} job of {WORKFLOW_PATH.name}; "
+        "if it was renamed, update this test"
     )
+    return cast(dict, found[0])
+
+
+def _postgres_lane_step() -> dict:
+    return _step(_integration_job(), _POSTGRES_LANE, "integration-tests")
 
 
 def _postgres_lane_files(step: dict) -> set[str]:
@@ -334,24 +340,75 @@ def test_postgres_lane_runs_every_postgres_test() -> None:
     )
 
 
+_MARK_EXPR = re.compile(r"""\s-m\s+(?:"([^"]+)"|'([^']+)'|(\S+))""")
+
+
+def _marker_expression(run: str) -> str:
+    """The one ``-m`` expression a step's pytest command selects with."""
+    found = [next(g for g in m.groups() if g) for m in _MARK_EXPR.finditer(run)]
+    assert len(found) == 1, f"expected one -m expression, found {found}: {run}"
+    return found[0]
+
+
+def _unit_tests_step() -> dict:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    return _step(workflow["jobs"]["unit-tests"], "Run unit tests", "unit-tests")
+
+
 def test_postgres_lane_selects_by_the_postgres_mark() -> None:
-    """The lane's -m must be the mark collection uses above, or a test the
-    coverage check counts could still be deselected in CI."""
+    """The lane's -m must select the mark collection uses above, or a test the
+    coverage check counts could still be deselected in CI. It also selects
+    integration (GOO-769): the Unit Tests job deselects those, so an
+    integration test in the lane's files that is not a PostgreSQL test would
+    otherwise run in no job."""
     step = _postgres_lane_step()
     assert step["env"]["REQUIRE_POSTGRES_TESTS"] == "1"
-    assert re.search(r"-m\s+requires_postgres\s", step["run"]), step["run"]
-    assert "-m " not in step["run"].replace("-m requires_postgres", "")
+    assert _marker_expression(step["run"]) == "requires_postgres or integration"
 
 
-def test_no_unmarked_postgres_test_hides_in_a_postgres_file(tmp_path: Path) -> None:
-    """GOO-703: the lane drops the tests of its files that are not marked
-    requires_postgres. Run exactly those without a database: a PostgreSQL
-    test among them would skip, and is reported here instead of vanishing.
-    (The account suites' sqlite halves and pure-logic tests pass.)"""
-    _, direct = _postgres_candidates()
-    report = tmp_path / "unmarked.xml"
+def _collect(paths: list[str], marker: str) -> set[str]:
+    result = _pytest(*paths, "--collect-only", "-qq", "-m", marker, env=_clean_env())
+    assert result.returncode in (0, 5), result.stdout[-4000:] + result.stderr
+    return {line.strip() for line in result.stdout.splitlines() if "::" in line}
+
+
+def test_every_test_in_the_lane_runs_in_a_job() -> None:
+    """GOO-769: an integration-marked test in the lane's files that the lane
+    did not select ran nowhere, because Unit Tests deselects integration.
+    test_stream_fast_path.py and the messages order/since route tests (18
+    tests) were such. Both selections come from the workflow, so narrowing
+    either one fails here. The check covers every test in the lane's files,
+    not only integration ones: an e2e- or slow-only test there is selected
+    by neither the lane nor Unit Tests, and no other job collects these
+    directories."""
+    lane_step = _postgres_lane_step()
+    lane = sorted(_postgres_lane_files(lane_step))
+    lane_expr = _marker_expression(lane_step["run"])
+    unit_expr = _marker_expression(_unit_tests_step()["run"])
+    orphans = _collect(lane, f"not ({lane_expr}) and not ({unit_expr})")
+    assert not orphans, (
+        "Tests in the PostgreSQL lane's files that neither the lane "
+        f"nor Unit Tests selects, so no CI job runs them: {sorted(orphans)[:20]}"
+    )
+    # The scan really sees the tests it guards (not an empty collection).
+    integration = _collect(lane, "integration")
+    assert any(
+        n.startswith("tests/api/agent/test_stream_fast_path.py::") for n in integration
+    ), "the scan no longer collects the lane's integration tests; it is stale"
+
+
+def _skip_guard_files(tests_root: Path = _TESTS) -> set[Path]:
+    """The files the skip guard runs: every PostgreSQL candidate, including
+    the tests a directory conftest.py reaches the database for (GOO-769)."""
+    candidates, _ = _postgres_candidates(tests_root)
+    return candidates
+
+
+def _unmarked_tests_that_skip(paths: set[Path], report: Path) -> list[str]:
+    """Run the tests of ``paths`` not marked requires_postgres without a
+    database and return the ones that skip."""
     result = _pytest(
-        *sorted(p.relative_to(REPO_ROOT).as_posix() for p in direct),
+        *sorted(str(p) for p in paths),
         "-m",
         "not requires_postgres",
         "-q",
@@ -360,9 +417,9 @@ def test_no_unmarked_postgres_test_hides_in_a_postgres_file(tmp_path: Path) -> N
     )
     out = result.stdout[-4000:] + result.stderr[-2000:]
     if result.returncode == 5:  # every test in these files is marked
-        return
+        return []
     assert result.returncode == 0, out
-    skipped = [
+    return [
         f"{case.get('classname')}::{case.get('name')}"
         for case in ElementTree.parse(report).iter("testcase")
         if any(
@@ -370,10 +427,66 @@ def test_no_unmarked_postgres_test_hides_in_a_postgres_file(tmp_path: Path) -> N
             for child in case
         )
     ]
+
+
+def test_no_unmarked_postgres_test_hides_in_a_postgres_file(tmp_path: Path) -> None:
+    """GOO-703: the lane drops the tests of its files that are not marked
+    requires_postgres (or integration). Run the unmarked ones without a
+    database: a PostgreSQL test among them would skip, and is reported here
+    instead of vanishing. (The account suites' sqlite halves and pure-logic
+    tests pass.) GOO-769: this covers every test under a directory whose
+    conftest.py reads a database URL or imports PostgreSQL fixtures, not just
+    the files that do so themselves, so a skip fixture defined in a directory
+    conftest is caught too."""
+    skipped = _unmarked_tests_that_skip(_skip_guard_files(), tmp_path / "unmarked.xml")
     assert not skipped, (
         "Unmarked tests skip without a database; mark them requires_postgres "
         f"so the PostgreSQL lane runs them: {skipped}"
     )
+
+
+_PLANTED_CONFTEST = """
+import os
+
+import pytest
+
+
+@pytest.fixture
+def planted_db_url():
+    url = os.getenv("PLANTED_TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("PLANTED_TEST_DATABASE_URL not set")
+    return url
+"""
+
+_PLANTED_TEST = """
+def test_uses_the_directory_conftest_fixture(planted_db_url):
+    assert planted_db_url
+"""
+
+
+def test_skip_guard_catches_a_skip_fixture_in_a_directory_conftest(
+    tmp_path: Path,
+) -> None:
+    """GOO-769: the URL read and the skip live in a directory conftest.py; the
+    test file itself names no URL and imports nothing PostgreSQL. The guard
+    must still run it and report the skip."""
+    tests_root = tmp_path / "tests"
+    planted = tests_root / "api" / "planted"
+    planted.mkdir(parents=True)
+    (planted / "conftest.py").write_text(_PLANTED_CONFTEST, encoding="utf-8")
+    test_file = planted / "test_planted.py"
+    test_file.write_text(_PLANTED_TEST, encoding="utf-8")
+
+    _, direct = _postgres_candidates(tests_root)
+    assert test_file not in direct  # only the conftest reaches the database
+
+    guarded = _skip_guard_files(tests_root)
+    assert test_file in guarded
+    skipped = _unmarked_tests_that_skip(guarded, tmp_path / "planted.xml")
+    assert [s.rsplit("::", 1)[-1] for s in skipped] == [
+        "test_uses_the_directory_conftest_fixture"
+    ], skipped
 
 
 _SKIP_CALLS = {"skip", "fail", "xfail", "exit", "importorskip"}
