@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml  # type: ignore[import-untyped]  # CI lint gate installs no types-PyYAML
+import yaml  # type: ignore[import-untyped]  # CI lint installs types-PyYAML; local venvs may not
 
 pytestmark = pytest.mark.unit
 
@@ -64,6 +64,17 @@ RUNNER_ONLY_ENV = frozenset(
 CI_REPORTING_FLAGS = frozenset(
     {"--cov", "--cov-report", "--cov-fail-under", "--junitxml", "-n", "-v"}
 )
+# Local-only flags the unit-suite call may add, each with its reason. Any
+# other local-only flag (an --ignore, --deselect or -k CI does not pass)
+# narrows the local run, so it is drift (GOO-764).
+LOCAL_ONLY_FLAGS = {
+    ("-q", ""): "quiet local output; CI's -v is reporting only",
+    ("-p", "no:cacheprovider"): "no .pytest_cache in the checkout",
+    ("--no-cov", ""): "CI's --cov flags are reporting only",
+    ("--ignore", "backend/tests/unit/architecture"): (
+        "the architecture tests already ran in their own unconditional step"
+    ),
+}
 # Flags whose value is the next token.
 VALUE_FLAGS = frozenset({"-c", "-m", "-n", "-p", "-k", "-o", "--ignore", "--deselect"})
 
@@ -173,7 +184,114 @@ def pytest_drift(workflow: dict[str, Any], script: str) -> list[str]:
             continue
         if (name, value) not in local_flags:
             drift.append(f"CI passes {name} {value!r}; the local run does not")
+    for name, value in sorted(local_flags - ci_flags):
+        if (name, value) not in LOCAL_ONLY_FLAGS:
+            drift.append(f"the local run passes {name} {value!r}; CI does not")
     return drift
+
+
+def _closes_if(line: str) -> bool:
+    return line == "fi" or (line.endswith("; fi") and not line.startswith("if "))
+
+
+def _opens_if(line: str) -> bool:
+    return line.startswith("if ") and not line.endswith("; fi")
+
+
+def enclosing_conditions(script: str, index: int) -> list[str]:
+    """The ``if``/``elif``/``else`` lines around line ``index``, innermost first.
+
+    A one-line ``if ...; fi`` neither opens nor encloses anything."""
+    lines = [ln.strip() for ln in script.splitlines()]
+    depth = 0
+    found: list[str] = []
+    for line in reversed(lines[:index]):
+        if _closes_if(line):
+            depth += 1
+        elif _opens_if(line):
+            if depth:
+                depth -= 1
+            else:
+                found.append(line)
+        elif depth == 0 and (line.startswith("elif ") or line == "else"):
+            found.append(line)
+    return found
+
+
+def _command_line(script: str, command: str) -> tuple[int | None, list[str]]:
+    """Index of the line that is exactly ``command``, and its problems."""
+    lines = [ln.strip() for ln in script.splitlines()]
+    exact = [i for i, ln in enumerate(lines) if ln == command]
+    if len(exact) != 1:
+        near = [ln for ln in lines if command in ln and ln != command]
+        return None, [
+            f"expected one line that is exactly {command!r}, found {len(exact)}"
+            + (f"; it is wrapped as {near}" if near else "")
+        ]
+    return exact[0], []
+
+
+def _gated_step_problems(
+    script: str,
+    command: str,
+    check: str,
+    *,
+    under_skip_tests: bool,
+) -> list[str]:
+    """``command`` must be a bare line followed by ``check``, with its status
+    unmasked, and gated by --skip-tests exactly when ``under_skip_tests``."""
+    index, problems = _command_line(script, command)
+    if index is None:
+        return problems
+    lines = [ln.strip() for ln in script.splitlines()]
+    following = next((ln for ln in lines[index + 1 :] if ln), "")
+    if following != check:
+        problems.append(f"{command!r} must be followed by {check!r}, not {following!r}")
+    gated = any("SKIP_TESTS" in c for c in enclosing_conditions(script, index))
+    if gated != under_skip_tests:
+        problems.append(
+            f"{command!r} is {'inside' if gated else 'outside'} the --skip-tests "
+            f"gate; it must be {'inside' if under_skip_tests else 'outside'}"
+        )
+    return problems
+
+
+ARCHITECTURE_COMMAND = "backend_pytest backend/tests/unit/architecture"
+
+
+def architecture_problems(script: str) -> list[str]:
+    problems = _gated_step_problems(
+        script,
+        ARCHITECTURE_COMMAND,
+        'check $? "backend architecture tests"',
+        under_skip_tests=False,
+    )
+    index, _ = _command_line(script, ARCHITECTURE_COMMAND)
+    if index is not None and enclosing_conditions(script, index):
+        problems.append(f"{ARCHITECTURE_COMMAND!r} must run unconditionally")
+    return problems
+
+
+def trigger_problems(workflow: dict[str, Any], script: str) -> list[str]:
+    steps = {s.get("name"): s for s in workflow["jobs"]["frontend-tests"]["steps"]}
+    tsc = steps["Type-check Trigger.dev tasks (tsc)"]["run"].strip()
+    node = steps["Check Trigger.dev tasks (node:test)"]["run"].strip()
+    return _gated_step_problems(
+        script,
+        f"( cd frontend && {tsc} )",
+        'check $? "Trigger.dev tsc"',
+        under_skip_tests=False,
+    ) + _gated_step_problems(
+        script, node, 'check $? "Trigger.dev node tests"', under_skip_tests=True
+    )
+
+
+def script_problems(workflow: dict[str, Any], script: str) -> list[str]:
+    return (
+        pytest_drift(workflow, script)
+        + architecture_problems(script)
+        + trigger_problems(workflow, script)
+    )
 
 
 def test_backend_tests_get_the_ci_unit_env() -> None:
@@ -184,6 +302,15 @@ def test_backend_tests_get_the_ci_unit_env() -> None:
 def test_backend_pytest_args_match_the_workflow() -> None:
     """Every non-reporting pytest flag and the test path, derived from the workflow."""
     assert pytest_drift(_workflow(), _script()) == []
+
+
+def test_architecture_and_trigger_steps_are_bare_and_gated_right() -> None:
+    """The architecture tests and the Trigger tsc run even with --skip-tests;
+    the Trigger node tests run only without it. Each is a bare command line
+    whose status the next line checks (GOO-764)."""
+    workflow, script = _workflow(), _script()
+    assert architecture_problems(script) == []
+    assert trigger_problems(workflow, script) == []
 
 
 def test_trigger_steps_mirror_the_frontend_tests_job() -> None:
@@ -218,6 +345,20 @@ def test_architecture_tests_run_even_with_skip_tests() -> None:
 def test_skip_tests_is_reported_as_skipped_not_passed() -> None:
     skip_block = _block(_script(), SKIP_TESTS_OPEN)
     assert 'skipped "NOUS workflow contract tests + backend unit tests"' in skip_block
+
+
+def test_trigger_gates_report_skipped_when_they_do_not_fire() -> None:
+    script = _script()
+    line = (
+        'skipped "Trigger.dev type-check + node tests" '
+        '"no --frontend and no Trigger.dev path changed"'
+    )
+    index, problems = _command_line(script, line)
+    assert index is not None, problems
+    assert enclosing_conditions(script, index) == [
+        "else",
+        'if [ "$DO_FRONTEND" -eq 1 ] || [ -n "$TRIGGER_CHANGES" ]; then',
+    ]
 
 
 def test_frontend_gate_runs_vitest_coverage_and_the_coverage_ratchet() -> None:
@@ -275,6 +416,51 @@ def test_a_planted_workflow_divergence_is_reported(name: str) -> None:
     workflow = copy.deepcopy(_workflow())
     WORKFLOW_PLANTS[name](workflow)
     assert env_drift(workflow, _script()) + pytest_drift(workflow, _script())
+
+
+_TSC = "( cd frontend && pnpm exec tsc --noEmit -p ../tsconfig.json )"
+_UNIT_CALL = "backend_pytest backend/tests/ --ignore=backend/tests/unit/architecture"
+
+SCRIPT_PLANTS: dict[str, tuple[str, str]] = {
+    "one-line gated architecture step": (
+        f"\n{ARCHITECTURE_COMMAND}\n",
+        f'\n[ "$SKIP_TESTS" -eq 0 ] && {ARCHITECTURE_COMMAND}\n',
+    ),
+    "architecture step inside an if": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f'\nif [ "$DO_FRONTEND" -eq 1 ]; then\n  {ARCHITECTURE_COMMAND}\n'
+        '  check $? "backend architecture tests"\nfi\n',
+    ),
+    "local-only --ignore": (
+        _UNIT_CALL,
+        f"{_UNIT_CALL} --ignore=backend/tests/unit/api",
+    ),
+    "local-only --deselect": (_UNIT_CALL, f"{_UNIT_CALL} --deselect=backend/tests/x"),
+    "local-only -k": (_UNIT_CALL, f"{_UNIT_CALL} -k 'not slow'"),
+    "|| true after the Trigger tsc": (_TSC, f"{_TSC} || true"),
+    "Trigger tsc inside the --skip-tests gate": (
+        f"    {_TSC}\n",
+        f'    if [ "$SKIP_TESTS" -eq 0 ]; then\n    {_TSC}\n',
+    ),
+    "Trigger node tests outside the --skip-tests gate": (
+        '    if [ "$SKIP_TESTS" -eq 0 ]; then\n      step "Trigger.dev node tests',
+        '    if [ "$DO_FRONTEND" -eq 1 ]; then\n      step "Trigger.dev node tests',
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SCRIPT_PLANTS))
+def test_a_planted_script_divergence_is_reported(name: str) -> None:
+    """Mutation guard for the script-side checks (GOO-764 review plants)."""
+    old, new = SCRIPT_PLANTS[name]
+    script = _script()
+    assert script.count(old) == 1, f"plant anchor for {name!r} is stale"
+    planted = script.replace(old, new, 1)
+    if name == "Trigger tsc inside the --skip-tests gate":
+        # Close the new if right after the tsc's status check.
+        check = '    check $? "Trigger.dev tsc"\n'
+        planted = planted.replace(check, check + "    fi\n", 1)
+    assert script_problems(_workflow(), planted), name
 
 
 def test_a_dropped_local_variable_is_reported() -> None:

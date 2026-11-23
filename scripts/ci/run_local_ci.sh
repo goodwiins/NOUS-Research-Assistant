@@ -474,6 +474,8 @@ if [ "$DO_FRONTEND" -eq 1 ] || [ -n "$TRIGGER_CHANGES" ]; then
       skipped "Trigger.dev node tests" "--skip-tests"
     fi
   fi
+else
+  skipped "Trigger.dev type-check + node tests" "no --frontend and no Trigger.dev path changed"
 fi
 
 if [ "$DO_FRONTEND" -eq 1 ]; then
