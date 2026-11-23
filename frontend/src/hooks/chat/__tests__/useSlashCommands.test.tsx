@@ -11,6 +11,11 @@ import {
 const mockRouterPush = vi.fn();
 const mockRouterReplace = vi.fn();
 
+const toastErrorMock = vi.hoisted(() => vi.fn());
+vi.mock('react-hot-toast', () => ({
+  default: { error: (...args: unknown[]) => toastErrorMock(...args) },
+}));
+
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
 }));
@@ -78,8 +83,7 @@ function setup(overrides: Record<string, unknown> = {}): {
     setInput,
     handleSubmit,
     retryLast,
-    isLoading: false,
-    storeIsStreaming: false,
+    isBusy: false,
     conversations: [makeConversation()],
     activeThreadId: 'thread-1',
     setCurrentThread,
@@ -319,31 +323,28 @@ describe('synthesis commands', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(setInput).toHaveBeenCalledWith(
-      expect.stringContaining('Summarize the key findings')
-    );
+    // The draft is not replaced first; handleSubmit puts the template back
+    // itself if it rejects the send (GOO-751).
+    expect(setInput).not.toHaveBeenCalled();
     expect(handleSubmit).toHaveBeenCalledWith(
       expect.stringContaining('Summarize the key findings')
     );
   });
 
-  it.each([
-    ['isLoading', { isLoading: true }],
-    ['storeIsStreaming', { storeIsStreaming: true }],
-  ])(
-    'keeps the draft and sends nothing while %s',
-    async (_label, overrides) => {
-      const { result, setInput, handleSubmit } = setup(overrides);
-      act(() => {
-        result.current.handleSlashCommand('gaps');
-      });
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      expect(setInput).not.toHaveBeenCalled();
-      expect(handleSubmit).not.toHaveBeenCalled();
-    }
-  );
+  it('keeps the draft, sends nothing and says why while busy', async () => {
+    const { result, setInput, handleSubmit } = setup({ isBusy: true });
+    act(() => {
+      result.current.handleSlashCommand('gaps');
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(setInput).not.toHaveBeenCalled();
+    expect(handleSubmit).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      'Wait for the current reply to finish before running a command.'
+    );
+  });
 
   it('drops the deferred send when the account resets inside the window', async () => {
     const { result, handleSubmit } = setup();

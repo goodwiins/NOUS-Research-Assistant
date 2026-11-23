@@ -25,17 +25,13 @@ const WORKSPACE = { id: 'ws-1' } as unknown as Workspace;
 
 function setup(overrides: Record<string, unknown> = {}): {
   result: { current: UseChatComposerActionsReturn };
-  setInput: ReturnType<typeof vi.fn>;
   handleSubmit: ReturnType<typeof vi.fn>;
 } {
-  const setInput = vi.fn();
   const handleSubmit = vi.fn();
   const params = {
     workspace: WORKSPACE,
-    setInput,
     handleSubmit,
-    isLoading: false,
-    storeIsStreaming: false,
+    isBusy: false,
     displayedMessages: [
       makeChatPageMessage({
         id: 'u1',
@@ -53,7 +49,7 @@ function setup(overrides: Record<string, unknown> = {}): {
     ...overrides,
   };
   const { result } = renderHook(() => useChatComposerActions(params));
-  return { result, setInput, handleSubmit };
+  return { result, handleSubmit };
 }
 
 describe('useChatComposerActions', () => {
@@ -160,7 +156,7 @@ describe('useChatComposerActions', () => {
           },
         },
       });
-      const { result, handleSubmit, setInput } = setup();
+      const { result, handleSubmit } = setup();
       act(() => {
         if (kind === 'edit') result.current.handleEditUserMessage(0, 'Edited');
         else result.current.handleRegenerate(1);
@@ -172,22 +168,27 @@ describe('useChatComposerActions', () => {
       expect(toastErrorMock).toHaveBeenCalledWith(
         expect.stringContaining('branch')
       );
-      expect(setInput).not.toHaveBeenCalled();
     }
   );
 
-  it('handleRegenerate is a no-op while a turn is streaming', () => {
-    const { result, handleSubmit } = setup({ storeIsStreaming: true });
+  it('handleRegenerate refuses with a toast while a turn is busy', async () => {
+    const { result, handleSubmit } = setup({ isBusy: true });
 
     act(() => {
       result.current.handleRegenerate(1);
     });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     expect(handleSubmit).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      'Wait for the current reply to finish before retrying.'
+    );
   });
 
   it('handleRegenerate re-sends the prior user turn', async () => {
-    const { result, handleSubmit, setInput } = setup();
+    const { result, handleSubmit } = setup();
 
     act(() => {
       result.current.handleRegenerate(1);
@@ -197,7 +198,6 @@ describe('useChatComposerActions', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(setInput).toHaveBeenCalledWith('first turn');
     expect(handleSubmit).toHaveBeenCalledWith(
       'first turn',
       [],
@@ -294,9 +294,9 @@ describe('useChatComposerActions', () => {
       });
     }
 
-    it('is a no-op while a turn is streaming', () => {
+    it('refuses with a toast while a turn is busy', async () => {
       const { result, handleSubmit } = setup({
-        storeIsStreaming: true,
+        isBusy: true,
         displayedMessages: [
           makeChatPageMessage({
             id: 'u1',
@@ -327,7 +327,13 @@ describe('useChatComposerActions', () => {
       act(() => {
         result.current.handleEditUserMessage(2, 'edited');
       });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
       expect(handleSubmit).not.toHaveBeenCalled();
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        'Wait for the current reply to finish before editing.'
+      );
     });
 
     it('is a no-op when the new content is blank', () => {
@@ -339,7 +345,7 @@ describe('useChatComposerActions', () => {
     });
 
     it('re-sends the edited text with history truncated before the edited message', async () => {
-      const { result, handleSubmit, setInput } = setupFour();
+      const { result, handleSubmit } = setupFour();
 
       act(() => {
         result.current.handleEditUserMessage(2, 'edited second turn');
@@ -348,7 +354,6 @@ describe('useChatComposerActions', () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 
-      expect(setInput).toHaveBeenCalledWith('edited second turn');
       // History passed to handleSubmit is everything BEFORE index 2 (u1, a1).
       expect(handleSubmit).toHaveBeenCalledTimes(1);
       const [, historyOverride] = handleSubmit.mock.calls[0];

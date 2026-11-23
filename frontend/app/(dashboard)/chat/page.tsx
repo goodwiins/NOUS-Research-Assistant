@@ -63,10 +63,8 @@ function ChatPageContent() {
 
   const composerActions = useChatComposerActions({
     workspace: session.workspace,
-    setInput: streaming.setInput,
     handleSubmit: streaming.handleSubmit,
-    isLoading: streaming.isLoading,
-    storeIsStreaming: streaming.storeIsStreaming,
+    isBusy: streaming.isBusy,
     displayedMessages: session.displayedMessages,
   });
 
@@ -78,8 +76,7 @@ function ChatPageContent() {
     setInput: streaming.setInput,
     handleSubmit: streaming.handleSubmit,
     retryLast: composerActions.retryLast,
-    isLoading: streaming.isLoading,
-    storeIsStreaming: streaming.storeIsStreaming,
+    isBusy: streaming.isBusy,
     conversations: session.conversations,
     activeThreadId: session.activeThreadId,
     setCurrentThread: session.setCurrentThread,
