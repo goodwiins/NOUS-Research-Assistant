@@ -282,11 +282,14 @@ export interface CspReportSink {
 }
 
 /**
- * No sampling: every first-seen key is forwarded, so a rare missed origin is
- * never lost. Volume is bounded by the per-key dedupe and a per-window cap.
- * A key is remembered only once its event was forwarded, so a capped or
- * failed report is tried again later. Per-instance memory: on serverless
- * each instance limits on its own.
+ * No sampling: every first-seen key is forwarded while the window has room.
+ * Volume is bounded by the per-key dedupe and a per-window cap.
+ * There is no retry and no queue: a report past the cap, or one whose
+ * forwarder throws, is dropped, and the route answers 204 either way, so the
+ * browser does not resend it. The dedupe key is stored only after a forward
+ * that did not throw, so a later repeat of a dropped report can still be
+ * forwarded. Per-instance memory: on serverless each instance limits on its
+ * own.
  */
 export function createCspReportSink(
   options: CspReportSinkOptions
