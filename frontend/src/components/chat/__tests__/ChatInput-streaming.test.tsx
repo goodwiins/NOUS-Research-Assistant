@@ -26,6 +26,7 @@ vi.mock('framer-motion', () => ({
 
 // Mock @assistant-ui/react primitives at the DOM boundary so ChatInput
 // can render under test without a real runtime provider.
+const auiMocks = vi.hoisted(() => ({ setText: vi.fn() }));
 vi.mock('@assistant-ui/react', async () => {
   const React = await import('react');
   return {
@@ -68,7 +69,7 @@ vi.mock('@assistant-ui/react', async () => {
     useAui: () => ({
       composer: {
         getState: () => ({ text: '' }),
-        setText: vi.fn(),
+        setText: auiMocks.setText,
         setRunConfig: vi.fn(),
       },
     }),
@@ -388,5 +389,94 @@ describe('ChatInput streaming behavior', () => {
       expect(onChange).toHaveBeenCalledWith('');
       expect(onCommand).toHaveBeenCalledWith('clear');
     });
+  });
+});
+
+// GOO-751: a refused send or command must never cost the user their draft.
+describe('ChatInput keeps the draft when a send or command is refused', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("keeps the draft when the host returns 'rejected'", () => {
+    const onChange = vi.fn();
+    const onSubmit = vi.fn(() => 'rejected' as const);
+    renderWithChatRuntime(
+      <ChatInput
+        {...defaultProps}
+        value="Draft to keep"
+        onChange={onChange}
+        onSubmit={onSubmit}
+      />
+    );
+    fireEvent.click(screen.getByText('Send'));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    // Neither the controlled draft nor the runtime composer is cleared.
+    expect(onChange).not.toHaveBeenCalled();
+    expect(auiMocks.setText).not.toHaveBeenCalledWith('');
+  });
+
+  it('still clears the runtime composer when the host handled it locally (false)', () => {
+    renderWithChatRuntime(
+      <ChatInput {...defaultProps} value="/remember x" onSubmit={() => false} />
+    );
+    fireEvent.click(screen.getByText('Send'));
+
+    expect(auiMocks.setText).toHaveBeenCalledWith('');
+  });
+
+  it('disables the Commands button while busy and says why', () => {
+    renderWithChatRuntime(<ChatInput {...defaultProps} isLoading />);
+    const button = screen.getByRole('button', { name: 'Open commands' });
+
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute(
+      'title',
+      'Commands are unavailable until the current reply finishes'
+    );
+  });
+
+  it('enables the Commands button when idle', () => {
+    renderWithChatRuntime(<ChatInput {...defaultProps} />);
+    expect(
+      screen.getByRole('button', { name: 'Open commands' })
+    ).not.toBeDisabled();
+  });
+
+  it('keeps a typed sending command while busy and lets the host refuse it', () => {
+    const onChange = vi.fn();
+    const onCommand = vi.fn();
+    renderWithChatRuntime(
+      <ChatInput
+        {...defaultProps}
+        isLoading
+        value="/summarize"
+        onChange={onChange}
+        onCommand={onCommand}
+      />
+    );
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+
+    expect(onCommand).toHaveBeenCalledWith('summarize');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('still clears a typed command that does not send while busy', () => {
+    const onChange = vi.fn();
+    const onCommand = vi.fn();
+    renderWithChatRuntime(
+      <ChatInput
+        {...defaultProps}
+        isLoading
+        value="/help"
+        onChange={onChange}
+        onCommand={onCommand}
+      />
+    );
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+
+    expect(onCommand).toHaveBeenCalledWith('help');
+    expect(onChange).toHaveBeenCalledWith('');
   });
 });
