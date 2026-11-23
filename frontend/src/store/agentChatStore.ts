@@ -85,6 +85,9 @@ class SkipStreamConfirm extends Error {}
 /** A durable card was clicked before its run published a wait token. */
 class DurableTokenPending extends Error {}
 
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value !== '';
+
 /**
  * The run parked a different confirmation than the card shows (GOO-748 F1):
  * an earlier click went through, its response was lost, and the run moved
@@ -1376,11 +1379,18 @@ export const useAgentChatStore = create<AgentChatStore>()(
             ) {
               // The token is only this card's if the run is still asking the
               // question the card shows; otherwise it belongs to a newer
-              // confirmation the user has never seen.
+              // confirmation the user has never seen. Two missing or empty
+              // ids identify nothing, so they never match (GOO-758): the
+              // card's id must be a non-empty string, and strict equality
+              // then requires the same of the run's.
               const parkedApprovalId = (
                 meta.confirmation as Record<string, unknown> | undefined
               )?.approval_id;
-              if (parkedApprovalId === pendingConfirmation.approvalId) {
+              const cardApprovalId = pendingConfirmation.approvalId;
+              if (
+                isNonEmptyString(cardApprovalId) &&
+                parkedApprovalId === cardApprovalId
+              ) {
                 resumeToken = meta.waitTokenId;
               } else {
                 staleCard = true;
