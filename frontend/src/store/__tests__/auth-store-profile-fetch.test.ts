@@ -208,6 +208,59 @@ describe('useAuthStore first-load profile failures (FL2E-2)', () => {
     return api.clearAuth as unknown as ReturnType<typeof vi.fn>;
   }
 
+  // GOO-772 (from the #2317 review): 403 is a token rejection like 401. It
+  // signs the user out; the dashboard guard then sends them to /login.
+  it('signs out an established session when /auth/me answers 403', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    const clearAuth = await clearAuthMock();
+
+    useAuthStore.setState({
+      user: { id: 'user-1' } as never,
+      organization: { id: 'org-1' } as never,
+      isAuthenticated: true,
+      isLoading: false,
+      error: null,
+    });
+
+    apiGet.mockRejectedValueOnce(
+      new APIErrorClass({
+        message: 'Forbidden',
+        status_code: 403,
+        type: 'auth_error',
+      })
+    );
+    await useAuthStore.getState().fetchProfile();
+
+    const state = useAuthStore.getState();
+    expect(state.isAuthenticated).toBe(false);
+    expect(state.user).toBeNull();
+    expect(state.profileUnavailable).toBe(false);
+    expect(clearAuth).toHaveBeenCalled();
+    expect(apiGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('signs out on a first-load 403 instead of retrying', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    const clearAuth = await clearAuthMock();
+
+    apiGet.mockRejectedValueOnce(
+      new APIErrorClass({
+        message: 'Forbidden',
+        status_code: 403,
+        type: 'auth_error',
+      })
+    );
+    await useAuthStore.getState().fetchProfile();
+
+    const state = useAuthStore.getState();
+    expect(state.isAuthenticated).toBe(false);
+    expect(state.isLoading).toBe(false);
+    expect(state.profileUnavailable).toBe(false);
+    expect(clearAuth).toHaveBeenCalled();
+    expect(apiGet).toHaveBeenCalledTimes(1);
+  });
+
+
   it('keeps the verified identity and retries a transient /auth/me failure', async () => {
     const { useAuthStore, apiGet } = await loadStore();
     await stampOwner('user-1');

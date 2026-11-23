@@ -68,7 +68,10 @@ vi.mock('@/hooks/chat/useHarnessConnection', () => ({
   useHarnessConnection: () => mocks.harness,
 }));
 
-vi.mock('@/services/agentChatService', () => ({
+vi.mock('@/services/agentChatService', async (importOriginal) => ({
+  AgentStreamRequestFailed: (
+    await importOriginal<typeof import('@/services/agentChatService')>()
+  ).AgentStreamRequestFailed,
   agentChatService: {
     streamMessage: (...args: unknown[]) => mocks.streamMessage(...args),
     streamConfirm: vi.fn(),
@@ -408,3 +411,295 @@ describe('a regenerate or edit never touches the draft', () => {
     expect(result.current.input).toBe('');
   });
 });
+
+/** What the real streamMessage does for an HTTP-level failure: onError with
+ * the client-derived category, the local auth failure and the status, then
+ * resolve (agentChatService.sendRejected.test.ts pins this). */
+function serverRejects(status: number) {
+  return (
+    _req: unknown,
+    cb: {
+      onError?: (
+        e: string,
+        c?: string,
+        l?: string,
+        rejectedStatus?: number
+      ) => void;
+    }
+  ): Promise<void> => {
+    const category =
+      status === 429
+        ? 'rate_limited'
+        : status >= 400 && status < 500 && status !== 401 && status !== 403
+          ? 'invalid_request'
+          : undefined;
+    const local =
+      status === 401
+        ? 'authentication_required'
+        : status === 403
+          ? 'permission_denied'
+          : undefined;
+    cb.onError?.(`Stream failed (${status}): nope`, category, local, status);
+    return Promise.resolve();
+  };
+}
+
+type Written = ChatPageMessage & {
+  sendFailed?: { message: string };
+};
+
+/** Replay every setMessages call (arrays and updater functions) the way
+ * React would, and return the resulting local transcript. */
+function lastWrittenMessages(
+  setMessages: ReturnType<typeof vi.fn>
+): Written[] {
+  return setMessages.mock.calls.reduce<Written[]>(
+    (state, [next]) =>
+      typeof next === 'function'
+        ? (next as (prev: Written[]) => Written[])(state)
+        : (next as Written[]),
+    []
+  );
+}
+
+async function renderWithParams(): Promise<{
+  result: { current: UseChatStreamingReturn };
+  params: UseChatStreamingParams;
+}> {
+  const { useChatStreaming } = await import('@/hooks/chat/useChatStreaming');
+  const params = makeParams();
+  const { result } = renderHook(() => useChatStreaming(params), { wrapper });
+  return { result, params };
+}
+
+const NOT_SENT_SERVER = 'The server rejected your message, so it wasn’t sent. Edit it or retry.';
+const NOT_SENT_DOWN = 'The server couldn’t take your message, so it wasn’t sent. Retry in a moment.';
+const NOT_SENT_NETWORK = 'Couldn’t reach the server, so your message wasn’t sent. Check your connection and retry.';
+const NOT_SENT_BUSY = 'This chat is busy, so your message wasn’t sent. Retry when the current reply finishes.';
+
+describe('a send the server rejects keeps its text (GOO-772)', () => {
+  it.each([
+    ['400', () => serverRejects(400), NOT_SENT_SERVER],
+    ['403', () => serverRejects(403), NOT_SENT_SERVER],
+    ['422', () => serverRejects(422), NOT_SENT_SERVER],
+    ['409 (busy)', () => serverRejects(409), NOT_SENT_BUSY],
+    ['500', () => serverRejects(500), NOT_SENT_DOWN],
+    ['503', () => serverRejects(503), NOT_SENT_DOWN],
+    [
+      'a network error',
+      () => async (): Promise<void> => {
+        const { AgentStreamRequestFailed } = await import(
+          '@/services/agentChatService'
+        );
+        throw new AgentStreamRequestFailed(new TypeError('Failed to fetch'));
+      },
+      NOT_SENT_NETWORK,
+    ],
+  ])(
+    'on %s: marks the bubble failed, restores the text and says why',
+    async (_label, reject, toastText) => {
+      mocks.streamMessage.mockImplementation(reject());
+      const { result, params } = await renderWithParams();
+      composerSent(result, 'my question');
+
+      await act(async () => {
+        await result.current.handleSubmit('my question');
+      });
+
+      expect(mocks.toastError).toHaveBeenCalledWith(toastText);
+      expect(result.current.input).toBe('my question');
+      const written = lastWrittenMessages(
+        params.setMessages as ReturnType<typeof vi.fn>
+      );
+      // The failed bubble stays, marked, with no "response failed" bubble
+      // after it: there was no response.
+      expect(written).toHaveLength(1);
+      expect(written[0]).toMatchObject({
+        role: 'user',
+        content: 'my question',
+        source: 'local-only',
+        sendFailed: { message: toastText },
+      });
+      // The server never stored the turn, so nothing may supersede it.
+      expect(written[0].clientMessageId).toBeUndefined();
+      expect(result.current.isLoading).toBe(false);
+    }
+  );
+
+  it('keeps the failed bubble but not the composer when the user has typed since', async () => {
+    let reject: () => void = () => {};
+    mocks.streamMessage.mockImplementation(
+      (
+        _req: unknown,
+        cb: {
+          onError?: (e: string, c?: string, l?: string, s?: number) => void;
+        }
+      ) =>
+        new Promise<void>((resolve) => {
+          reject = () => {
+            cb.onError?.('Stream failed (500): down', undefined, undefined, 500);
+            resolve();
+          };
+        })
+    );
+    const { result, params } = await renderWithParams();
+    composerSent(result, 'first question');
+
+    let sent: Promise<void> = Promise.resolve();
+    await act(async () => {
+      sent = result.current.handleSubmit('first question');
+      await Promise.resolve();
+    });
+    act(() => result.current.setInput('typed since'));
+    await act(async () => {
+      reject();
+      await sent;
+    });
+
+    expect(result.current.input).toBe('typed since');
+    expect(mocks.toastError).toHaveBeenCalledWith(NOT_SENT_DOWN);
+    const written = lastWrittenMessages(
+      params.setMessages as ReturnType<typeof vi.fn>
+    );
+    expect(written.at(-1)).toMatchObject({
+      content: 'first question',
+      sendFailed: { message: NOT_SENT_DOWN },
+    });
+  });
+
+  it('does not put a rejected regenerate into the composer', async () => {
+    mocks.streamMessage.mockImplementation(serverRejects(500));
+    const { result, params } = await renderWithParams();
+
+    await act(async () => {
+      await result.current.handleSubmit('old question', []);
+    });
+
+    expect(result.current.input).toBe('');
+    expect(
+      lastWrittenMessages(params.setMessages as ReturnType<typeof vi.fn>).at(-1)
+    ).toMatchObject({ content: 'old question', sendFailed: {} });
+  });
+
+  it('releases the submit lock and loading state, so the next send goes out', async () => {
+    mocks.streamMessage.mockImplementationOnce(serverRejects(500));
+    const { result } = await renderWithParams();
+
+    await act(async () => {
+      await result.current.handleSubmit('first');
+    });
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.isBusy).toBe(false);
+
+    await act(async () => {
+      await result.current.handleSubmit('second');
+    });
+
+    expect(mocks.streamMessage).toHaveBeenCalledTimes(2);
+    expect(mocks.toastError).not.toHaveBeenCalledWith(BUSY);
+  });
+
+  it('leaves a 401 to sign-in recovery instead of marking the send failed', async () => {
+    mocks.streamMessage.mockImplementation(serverRejects(401));
+    const { result, params } = await renderWithParams();
+    composerSent(result, 'my question');
+
+    await act(async () => {
+      await result.current.handleSubmit('my question');
+    });
+
+    expect(mocks.toastError).not.toHaveBeenCalledWith(
+      expect.stringContaining('wasn’t sent')
+    );
+    expect(
+      lastWrittenMessages(params.setMessages as ReturnType<typeof vi.fn>).some(
+        (message) => message.sendFailed
+      )
+    ).toBe(false);
+  });
+
+  it('treats a failure after the server accepted the turn as a failed reply, not a failed send', async () => {
+    mocks.streamMessage.mockImplementation(
+      (
+        _req: unknown,
+        cb: {
+          onRunId?: (id: string) => void;
+          onError?: (e: string, c?: string) => void;
+        }
+      ) => {
+        cb.onRunId?.('run-1');
+        cb.onError?.('model failed', 'internal');
+        return Promise.resolve();
+      }
+    );
+    const { result, params } = await renderWithParams();
+    composerSent(result, 'my question');
+
+    await act(async () => {
+      await result.current.handleSubmit('my question');
+    });
+
+    expect(result.current.input).toBe('');
+    const written = lastWrittenMessages(
+      params.setMessages as ReturnType<typeof vi.fn>
+    );
+    expect(written.some((message) => message.sendFailed)).toBe(false);
+    expect(written.at(-1)).toMatchObject({ role: 'assistant' });
+  });
+
+  it('treats a stream that breaks after it opened as a failed reply, not a failed send', async () => {
+    mocks.streamMessage.mockImplementation(
+      (_req: unknown, cb: { onStatus?: (p: string) => void }) => {
+        cb.onStatus?.('thinking');
+        return Promise.reject(new TypeError('network error'));
+      }
+    );
+    const { result, params } = await renderWithParams();
+    composerSent(result, 'my question');
+
+    await act(async () => {
+      await result.current.handleSubmit('my question');
+    });
+
+    expect(result.current.input).toBe('');
+    const written = lastWrittenMessages(
+      params.setMessages as ReturnType<typeof vi.fn>
+    );
+    expect(written.some((message) => message.sendFailed)).toBe(false);
+    expect(written.at(-1)).toMatchObject({ role: 'assistant' });
+  });
+
+  it('keeps an earlier unsent bubble when the next message goes out', async () => {
+    const { useChatStreaming } = await import('@/hooks/chat/useChatStreaming');
+    const unsent: Written = {
+      ...makeChatPageMessage({
+        role: 'user',
+        content: 'unsent question',
+        timestamp: 3,
+      }),
+      source: 'local-only',
+      sendFailed: { message: NOT_SENT_DOWN },
+    };
+    const params = { ...makeParams(), messages: [unsent] };
+    const { result } = renderHook(() => useChatStreaming(params), { wrapper });
+
+    await act(async () => {
+      await result.current.handleSubmit('next question');
+    });
+
+    const firstWrite = (params.setMessages as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Written[];
+    expect(firstWrite.map((message) => message.content)).toEqual([
+      'unsent question',
+      'next question',
+    ]);
+    // It is never sent as history.
+    const request = mocks.streamMessage.mock.calls[0][0] as {
+      messages: Array<{ content: string }>;
+    };
+    expect(request.messages.map((message) => message.content)).not.toContain(
+      'unsent question'
+    );
+  });
+});
+

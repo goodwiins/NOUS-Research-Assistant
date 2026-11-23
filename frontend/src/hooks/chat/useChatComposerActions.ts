@@ -228,7 +228,9 @@ export function useChatComposerActions({
       // client_message_id — a legacy row or one that never reached the server;
       // the FE-only truncation is then the same behaviour as before.
       const supersedes = edited.clientMessageId;
-      const branch = branchIntentFor(edited);
+      // A turn the server never accepted (GOO-772) has no row to branch from:
+      // it was a new turn, so it goes out again as one, on the current head.
+      const branch = edited.sendFailed ? undefined : branchIntentFor(edited);
       if (branch === null) {
         toast.error('Wait for this branch to load before editing.');
         return;
