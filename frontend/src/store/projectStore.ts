@@ -174,6 +174,25 @@ function settleMutationLoading(
   if (!listRequest[kind]) set({ [key]: false });
 }
 
+// GOO-770: which workspace the projects list on screen belongs to. A
+// projects fetch for another workspace (a workspace switch) installs a new
+// scope object; a refetch of the same workspace with other filters keeps it.
+// A project create/update/delete captures the scope when it starts and
+// applies its list change, error and spinner only if that scope is still
+// current; otherwise it drops them (the server change has happened, and the
+// next fetch of that workspace shows it). Module scope, unique objects, the
+// same pattern as projectFetchToken.
+interface ProjectsScope {
+  readonly workspaceId: string | null;
+}
+let projectsScope: ProjectsScope = { workspaceId: null };
+
+function enterProjectsScope(workspaceId: string | null): boolean {
+  if (workspaceId === projectsScope.workspaceId) return false;
+  projectsScope = { workspaceId };
+  return true;
+}
+
 function resetListOwnership(): void {
   for (const kind of ['documents', 'notes', 'bibliography'] as const) {
     listRequest[kind] = null;
@@ -283,7 +302,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   fetchProjects: async (params, options) => {
     const isCurrentAccount = captureAccountSession();
-    set({ loading: true, error: null });
+    // A switch to another workspace drops the previous workspace's pending
+    // mutation spinner with it (GOO-770).
+    const switched = enterProjectsScope(params?.workspace_id ?? null);
+    set({ loading: true, error: null, ...(switched && { mutating: false }) });
     try {
       const response = await projectService.listProjects(params, options);
       if (!isCurrentAccount()) return;
@@ -360,73 +382,96 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   createProject: async (data) => {
     const isCurrentAccount = captureAccountSession();
+    const scope = projectsScope;
     set({ mutating: true, error: null });
     try {
       const project = await projectService.createProject(data);
       if (!isCurrentAccount())
         throw new DOMException('Account changed', 'AbortError');
-      set((state) => ({
-        projects: [project, ...state.projects],
-        total: state.total + 1,
-        mutating: false,
-      }));
+      if (projectsScope === scope) {
+        set((state) => ({
+          projects: [project, ...state.projects],
+          total: state.total + 1,
+          mutating: false,
+        }));
+      }
       return project;
     } catch (error: unknown) {
       if (!isCurrentAccount()) throw error;
       console.error('[ProjectStore] Failed to create project:', error);
-      set({
-        error: getErrorMessage(error, 'Failed to create project'),
-        mutating: false,
-      });
+      if (projectsScope === scope) {
+        set({
+          error: getErrorMessage(error, 'Failed to create project'),
+          mutating: false,
+        });
+      }
       throw error;
     }
   },
 
   updateProject: async (projectId, data) => {
     const isCurrentAccount = captureAccountSession();
+    const scope = projectsScope;
     set({ mutating: true, error: null });
     try {
       const updated = await projectService.updateProject(projectId, data);
       if (!isCurrentAccount()) return;
+      const inScope = projectsScope === scope;
       set((state) => ({
-        projects: state.projects.map((p) => (p.id === projectId ? updated : p)),
+        // The open project is matched by id, so it takes the update in any
+        // workspace; the list and spinner only in the one it started in.
         currentProject:
           state.currentProject?.id === projectId
             ? updated
             : state.currentProject,
-        mutating: false,
+        ...(inScope && {
+          projects: state.projects.map((p) =>
+            p.id === projectId ? updated : p
+          ),
+          mutating: false,
+        }),
       }));
     } catch (error: unknown) {
       if (!isCurrentAccount()) return;
       console.error('[ProjectStore] Failed to update project:', error);
-      set({
-        error: getErrorMessage(error, 'Failed to update project'),
-        mutating: false,
-      });
+      if (projectsScope === scope) {
+        set({
+          error: getErrorMessage(error, 'Failed to update project'),
+          mutating: false,
+        });
+      }
       throw error;
     }
   },
 
   deleteProject: async (projectId) => {
     const isCurrentAccount = captureAccountSession();
+    const scope = projectsScope;
     set({ mutating: true, error: null });
     try {
       await projectService.deleteProject(projectId);
       if (!isCurrentAccount()) return;
+      const inScope = projectsScope === scope;
       set((state) => ({
-        projects: state.projects.filter((p) => p.id !== projectId),
+        // A deleted open project closes in any workspace; the list, total
+        // and spinner change only in the one the delete started in.
         currentProject:
           state.currentProject?.id === projectId ? null : state.currentProject,
-        total: state.total - 1,
-        mutating: false,
+        ...(inScope && {
+          projects: state.projects.filter((p) => p.id !== projectId),
+          total: state.total - 1,
+          mutating: false,
+        }),
       }));
     } catch (error: unknown) {
       if (!isCurrentAccount()) return;
       console.error('[ProjectStore] Failed to delete project:', error);
-      set({
-        error: getErrorMessage(error, 'Failed to delete project'),
-        mutating: false,
-      });
+      if (projectsScope === scope) {
+        set({
+          error: getErrorMessage(error, 'Failed to delete project'),
+          mutating: false,
+        });
+      }
       throw error;
     }
   },
@@ -718,6 +763,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   reset: () => {
     projectFetchToken = null;
+    projectsScope = { workspaceId: null };
     inflightProjectFetch = null;
     resetListOwnership();
     set({
