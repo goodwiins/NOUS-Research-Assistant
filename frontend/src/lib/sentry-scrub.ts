@@ -100,18 +100,19 @@ const SENSITIVE_KEYS = new Set([
 // Identifiers of sessions are bearer-like, unlike thread or span ids.
 const SENSITIVE_SUFFIX =
   /(token|secret|password|cookie|authorization|email|apikey|jwt|credentials|sessionids?)$/;
-// Key ids (keyId, key_id, api_key_id, apiKeyId), but not a word that ends in
-// "key" (monkeyId, hockeyIds): "key" starts the key, follows a separator, or
-// is a capitalised camel-case word. Case-sensitive on purpose.
-const KEY_ID_KEY =
-  /(?:^|[_.\-\s])[Kk]ey[_.\-\s]?(?:id|ids|Id|Ids|ID|IDs)$|[a-z0-9]Key(?:Id|Ids|ID|IDs|_id|_ids)$/;
+// Key ids in any case and separator style (keyId, KEY_ID, apiKey.id,
+// X-API-KEY-ID, AWS_ACCESS_KEY_ID, passkeyId): fail closed, as before this
+// change. The only exceptions are ordinary words that end in "key"
+// (monkeyId, hockeyIds), listed explicitly.
+const KEY_ID_KEY = /key[_.\-\s]?ids?$/i;
+const NOT_A_KEY_ID = /(?:^|[^a-z])(?:mon|hoc|tur|don|joc|whis|lac)key[_.\-\s]?ids?$/i;
 
 export function isSensitiveKey(key: string): boolean {
   const normalized = normalizeKey(key);
   return (
     SENSITIVE_KEYS.has(normalized) ||
     SENSITIVE_SUFFIX.test(normalized) ||
-    KEY_ID_KEY.test(key)
+    (KEY_ID_KEY.test(key) && !NOT_A_KEY_ID.test(key))
   );
 }
 
@@ -130,6 +131,8 @@ const SAFE_KEYS = new Set([
   'framework', 'runtime', 'browser', 'os', 'device', 'sampled', 'mechanism',
   // CSP reports (app/api/csp-report, GOO-729): already reduced to a
   // directive name, a disposition, origins and a listed route.
+  // Reserved names: they are kept as is only because that route reduces
+  // them first. Don't reuse them for free text anywhere else.
   'cspdirective', 'cspdisposition', 'cspblocked', 'documentorigin',
   'documentroute',
 ]);
@@ -170,15 +173,24 @@ type Replacement = string | ((match: string, ...groups: string[]) => string);
 // follows is exactly one word from these short prose lists. Nothing the
 // scrubber caught before this change may pass.
 const AUTH_PROSE = new Set(['required', 'missing', 'failed', 'invalid', 'expired', 'header']);
-// After "Token" / "Basic" (8+ characters, as before).
+// After "Token" / "Basic". The rule only fires on 8+ characters (as
+// before), so every word here is at least that long.
 const SCHEME_PROSE = new Set([
   'undefined', 'validation', 'authentication', 'authorization', 'required',
-  'verification', 'expiration', 'exchange', 'refresh', 'rejected',
+  'verification', 'expiration', 'exchange', 'rejected',
 ]);
 const COOKIE_PROSE = /^(?:not set|missing|none|empty|required|disabled|blocked|invalid|expired)[ \t.!]*$/i;
 
+// Trailing "." / "!" stripped with a loop: the regex /[.!]+$/ retries from
+// every dot and is quadratic on a long run of them.
+function stripTrailingPunctuation(text: string): string {
+  let end = text.length;
+  while (end > 0 && (text[end - 1] === '.' || text[end - 1] === '!')) end -= 1;
+  return text.slice(0, end);
+}
+
 const isProseWord = (words: ReadonlySet<string>, value: string): boolean =>
-  words.has(value.trim().replace(/[.!]+$/, '').toLowerCase());
+  words.has(stripTrailingPunctuation(value.trim()).toLowerCase());
 
 const REDACTIONS: Array<[RegExp, Replacement]> = [
   // SSE frames: the payload after `data:` is user/tool content. Matches a

@@ -517,9 +517,45 @@ describe('tuning: ordinary error messages stay readable', () => {
     expect(scrubString(`authorization: ${tokenValue}`)).toBe('Authorization: [Filtered]');
     expect(scrubString('cookie: sid=abc123; theme=dark')).toBe('Cookie: [Filtered]');
   });
+
+  it('filters Bearer even before a word Token/Basic would keep (#2278 delta review)', () => {
+    // The scheme rule needs 8+ characters (as at base), so these are the
+    // SCHEME_PROSE words; after Bearer none of them is kept.
+    for (const word of ['required', 'undefined', 'validation', 'authentication', 'exchange', 'rejected']) {
+      expect(scrubString(`Bearer ${word}`), word).toBe('Bearer [Filtered]');
+      expect(scrubString(`Token ${word}`), word).toBe(`Token ${word}`);
+      expect(scrubString(`Token ${word}.`), word).toBe(`Token ${word}.`);
+      expect(scrubString(`Bearer ${word}.`), word).toBe('Bearer [Filtered]');
+    }
+  });
+
+  it('stays linear on a long run of dots after a scheme (#2278 delta review)', () => {
+    // A run of dots that does not end the value is the slow shape for
+    // /[.!]+$/: every start position scans to the end and fails.
+    for (const value of [
+      `Token ${'.'.repeat(4080)}x`,
+      `Authorization: ${'.'.repeat(4000)}x`,
+    ]) {
+      scrubString(value); // warm up
+      const start = performance.now();
+      for (let i = 0; i < 100; i += 1) scrubString(value);
+      // The quadratic regex took 8-21 ms per call here (0.8 s+ for 100).
+      expect(performance.now() - start, value.slice(0, 14)).toBeLessThan(250);
+    }
+  });
 });
 
 describe('tuning: secrets that used to pass', () => {
+  it('filters key ids in any case and separator style (#2278 delta review)', () => {
+    for (const key of [
+      'keyId', 'key_id', 'apiKeyId', 'KEY_ID', 'API_KEY_ID', 'AWS_ACCESS_KEY_ID',
+      'X-API-KEY-ID', 'apiKey_ID', 'apiKey.id', 'APIKeyId', 'passkeyId', 'KeyIds',
+    ]) {
+      expect(isSensitiveKey(key), key).toBe(true);
+      expect(scrubData({ [key]: 'AKIAABCDEFGH1234' }), key).toEqual({ [key]: FILTERED });
+    }
+  });
+
   it('does not treat a word ending in "key" as a key id', () => {
     for (const key of ['monkeyId', 'hockeyIds', 'turkeyID']) {
       expect(isSensitiveKey(key), key).toBe(false);
