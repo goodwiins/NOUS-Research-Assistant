@@ -5,17 +5,22 @@ every test file exactly once, or a test silently stops running in CI.
 """
 
 import ast
+import functools
 import importlib.util
+import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from xml.etree import ElementTree
 
 import pytest
 import yaml  # type: ignore[import-untyped]  # CI lint gate installs no types-PyYAML
+from _pytest.mark.expression import Expression
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "ci" / "shard_tests.py"
@@ -231,10 +236,15 @@ def _clean_env(**extra: str) -> dict[str, str]:
     return {**env, "ENVIRONMENT": "testing", **extra}
 
 
-def _pytest(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _pytest(
+    *args: str, env: dict[str, str], safe_path: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """``safe_path`` adds ``-P``: bare ``pytest`` (CI) does not put the cwd on
+    sys.path, and the repo root's scripts/ package would shadow backend's."""
     return subprocess.run(
         [
             sys.executable,
+            *(["-P"] if safe_path else []),
             "-m",
             "pytest",
             *args,
@@ -395,6 +405,275 @@ def test_every_test_in_the_lane_runs_in_a_job() -> None:
     assert any(
         n.startswith("tests/api/agent/test_stream_fast_path.py::") for n in integration
     ), "the scan no longer collects the lane's integration tests; it is stale"
+
+
+# ---- every backend test runs in some CI job (GOO-780) ----
+#
+# GOO-769 closed the gap inside the PostgreSQL lane's files. Outside them,
+# ~106 tests marked integration (the 97 search-security tests among them)
+# were selected by no job: Unit Tests deselects integration, and the
+# integration shards only collect backend/tests/integration. This check
+# derives every job's paths and -m expression from the workflows, collects the
+# whole tree once with each test's final markers, and reports any test no job
+# selects. A test may stay out only through OPT_IN, with its reason.
+
+_AGENT_EVAL_PATH = REPO_ROOT / ".github" / "workflows" / "agent-eval.yml"
+
+OPT_IN: dict[str, str] = {
+    "tests/perf/test_agent_langsmith_tracing.py": (
+        "LangSmith-traced latency harness: needs a live Azure LLM, a LangSmith "
+        "key and RUN_PERF_HARNESS=1 (see its docstring); run on demand"
+    ),
+    "tests/services/agent/test_memory_semantic_recall.py": (
+        "semantic recall against live Cohere embeddings and a real Postgres "
+        "store; no workflow holds a Cohere key, so it runs only by hand"
+    ),
+}
+
+_DUMP_PLUGIN = """
+import json, os
+
+
+def pytest_collection_finish(session):
+    with open(os.environ["GOO780_MARKS_DUMP"], "w", encoding="utf-8") as out:
+        json.dump(
+            {i.nodeid: sorted({m.name for m in i.iter_markers()}) for i in session.items},
+            out,
+        )
+"""
+
+
+@dataclass(frozen=True)
+class CiSelection:
+    job: str
+    paths: tuple[str, ...]  # relative to backend/, as node ids are
+    expr: str
+
+
+def _backend_relative(path: str) -> str:
+    assert path.startswith("backend/"), path
+    return path[len("backend/") :].rstrip("/")
+
+
+_RUNS_PYTEST = re.compile(r"^\s*(?:\S*/)?pytest\s", re.M)
+
+
+def _pytest_step(steps: list[dict], where: str) -> dict:
+    """The one step whose script runs pytest (not one that installs it)."""
+    found = [s for s in steps if _RUNS_PYTEST.search(str(s.get("run", "")))]
+    assert len(found) == 1, f"expected one pytest step in {where}, found {len(found)}"
+    return found[0]
+
+
+def ci_selections() -> list[CiSelection]:
+    """Every CI pytest run over backend tests, derived from the workflows.
+
+    performance-tests is left out on purpose: it runs only on a push to
+    main, and the repository has no main branch (develop is the trunk), so
+    it never runs. The assertion below fails if that condition changes."""
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+    assert jobs["performance-tests"]["if"] == (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    ), "performance-tests now runs; count its selection in ci_selections()"
+
+    unit = _unit_tests_step()["run"]
+    assert "pytest backend/tests/ " in unit.replace("\\\n", " ")
+    integration = _step(
+        _integration_job(), "Run integration tests", "integration-tests"
+    )
+    assert "shard_tests.py backend/tests/integration" in integration["run"]
+    lane = _postgres_lane_step()
+    resilience = _step(jobs["resilience-tests"], "Run resilience tests", "resilience")
+    assert "pytest backend/tests/ " in resilience["run"].replace("\\\n", " ")
+    golden = _pytest_step(jobs["golden-replay"]["steps"], "golden-replay")
+    golden_paths = re.findall(r"backend/tests/\S+\.py", golden["run"])
+    assert golden_paths, golden["run"]
+
+    agent_eval = yaml.safe_load(_AGENT_EVAL_PATH.read_text(encoding="utf-8"))
+    (eval_job,) = agent_eval["jobs"].values()
+    assert eval_job["defaults"]["run"]["working-directory"] == "backend"
+    eval_step = _pytest_step(eval_job["steps"], _AGENT_EVAL_PATH.name)
+    eval_paths = re.findall(r"\btests/\S+\.py", eval_step["run"])
+    assert eval_paths, eval_step["run"]
+
+    return [
+        CiSelection("unit-tests", ("tests",), _marker_expression(unit)),
+        CiSelection(
+            "integration-tests",
+            ("tests/integration",),
+            _marker_expression(integration["run"]),
+        ),
+        CiSelection(
+            "postgres-lane",
+            tuple(sorted(_backend_relative(p) for p in _postgres_lane_files(lane))),
+            _marker_expression(lane["run"]),
+        ),
+        CiSelection(
+            "resilience-tests", ("tests",), _marker_expression(resilience["run"])
+        ),
+        CiSelection(
+            "golden-replay",
+            tuple(_backend_relative(p) for p in golden_paths),
+            _marker_expression(golden["run"]),
+        ),
+        CiSelection(
+            "agent-eval (weekly)",
+            tuple(eval_paths),
+            _marker_expression(eval_step["run"]),
+        ),
+    ]
+
+
+@functools.lru_cache(maxsize=1)
+def collected_markers() -> dict[str, frozenset[str]]:
+    """Every backend test with its final markers (conftest hooks included)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "goo780_dump_marks.py").write_text(_DUMP_PLUGIN, encoding="utf-8")
+        dump = Path(tmp) / "marks.json"
+        pythonpath = os.pathsep.join(
+            p for p in (tmp, os.environ.get("PYTHONPATH", "")) if p
+        )
+        result = _pytest(
+            "backend/tests",
+            "--collect-only",
+            "-qq",
+            "-p",
+            "goo780_dump_marks",
+            env=_clean_env(GOO780_MARKS_DUMP=str(dump), PYTHONPATH=pythonpath),
+            safe_path=True,
+        )
+        assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
+        raw: dict[str, list[str]] = json.loads(dump.read_text(encoding="utf-8"))
+    return {node: frozenset(marks) for node, marks in raw.items()}
+
+
+def _selects(expr: str, marks: frozenset[str]) -> bool:
+    def matcher(name: str, /, **kwargs: object) -> bool:
+        return name in marks
+
+    return bool(Expression.compile(expr).evaluate(matcher))
+
+
+def _under(node: str, paths: tuple[str, ...]) -> bool:
+    node_file = node.split("::", 1)[0]
+    return any(node_file == p or node_file.startswith(p + "/") for p in paths)
+
+
+def orphaned_tests(
+    markers: dict[str, frozenset[str]], selections: list[CiSelection]
+) -> list[str]:
+    """Tests no selection runs, ignoring the OPT_IN files."""
+    return sorted(
+        node
+        for node, marks in markers.items()
+        if node.split("::", 1)[0] not in OPT_IN
+        and not any(
+            _under(node, s.paths) and _selects(s.expr, marks) for s in selections
+        )
+    )
+
+
+def test_every_backend_test_runs_in_a_ci_job() -> None:
+    markers = collected_markers()
+    # The scan really sees the suites it guards.
+    assert len(markers) > 10_000, len(markers)
+    assert any(n.startswith("tests/security/search_security/") for n in markers)
+    orphans = orphaned_tests(markers, ci_selections())
+    files = sorted({n.split("::", 1)[0] for n in orphans})
+    assert not orphans, (
+        f"{len(orphans)} backend tests run in no CI job (files: {files}); select "
+        "them in a job, or add the file to OPT_IN with the reason it cannot run "
+        f"in CI. First: {orphans[:10]}"
+    )
+
+
+def test_opt_in_entries_are_real_and_still_needed() -> None:
+    """A stale OPT_IN entry would hide a future orphan in that file."""
+    markers = collected_markers()
+    selections = ci_selections()
+    for path, reason in OPT_IN.items():
+        assert reason.strip(), path
+        nodes = [n for n in markers if n.split("::", 1)[0] == path]
+        assert nodes, f"OPT_IN names {path}, which has no collected tests"
+        selected = [
+            n
+            for n in nodes
+            if any(
+                _under(n, s.paths) and _selects(s.expr, markers[n]) for s in selections
+            )
+        ]
+        assert not selected, f"{path} now runs in CI; drop it from OPT_IN: {selected}"
+
+
+_LANE_PLANT = "tests/api/agent/test_goo780_planted.py::test_planted"
+_OUTSIDE_PLANTS = {
+    "integration outside every lane": (
+        "tests/services/test_goo780_planted.py::test_planted",
+        frozenset({"integration"}),
+    ),
+    "slow outside every lane (performance-tests never runs)": (
+        "tests/services/test_goo780_planted_slow.py::test_planted",
+        frozenset({"slow"}),
+    ),
+    "e2e outside every lane": (
+        "tests/services/test_goo780_planted_e2e.py::test_planted",
+        frozenset({"e2e"}),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_OUTSIDE_PLANTS))
+def test_a_planted_orphan_outside_the_lanes_is_reported(name: str) -> None:
+    node, marks = _OUTSIDE_PLANTS[name]
+    markers = {**collected_markers(), node: marks}
+    assert node in orphaned_tests(markers, ci_selections()), name
+
+
+def test_a_planted_integration_test_in_a_lane_dir_runs_until_the_lane_narrows() -> None:
+    """GOO-769 follow-up: a lane-directory integration test is selected by the
+    lane's ``-m`` today; narrowing it to requires_postgres orphans it."""
+    markers = {**collected_markers(), _LANE_PLANT: frozenset({"integration"})}
+    selections = ci_selections()
+    assert _LANE_PLANT not in orphaned_tests(markers, selections)
+
+    narrowed = [
+        (
+            CiSelection(s.job, s.paths, "requires_postgres")
+            if s.job == "postgres-lane"
+            else s
+        )
+        for s in selections
+    ]
+    orphans = orphaned_tests(markers, narrowed)
+    assert _LANE_PLANT in orphans
+    # The real fast-path tests GOO-769 rescued go with it.
+    assert any(
+        n.startswith("tests/api/agent/test_stream_fast_path.py::") for n in orphans
+    )
+
+
+@pytest.mark.parametrize(
+    "job, narrowed, expected_file",
+    [
+        ("unit-tests", "unit", "tests/security/search_security/test_xss_protection.py"),
+        ("integration-tests", "integration and slow", "tests/integration/"),
+        (
+            "agent-eval (weekly)",
+            "langsmith and golden",
+            "tests/eval/test_agent_regression.py::test_agent_regression_against_dataset",
+        ),
+    ],
+)
+def test_narrowing_a_job_expression_orphans_its_tests(
+    job: str, narrowed: str, expected_file: str
+) -> None:
+    selections = [
+        CiSelection(s.job, s.paths, narrowed) if s.job == job else s
+        for s in ci_selections()
+    ]
+    orphans = orphaned_tests(collected_markers(), selections)
+    assert any(n.startswith(expected_file) for n in orphans), (job, orphans[:5])
 
 
 def _skip_guard_files(tests_root: Path = _TESTS) -> set[Path]:

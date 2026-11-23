@@ -161,12 +161,12 @@ def pytest_collection_modifyitems(config, items):
         # Add markers based on test file names
         test_path = str(item.fspath)
 
-        # Search security suites exercise full endpoint behavior and externalized
-        # security controls; treat them as integration tests so unit jobs stay stable.
-        if "/tests/security/search_security/" in test_path or test_path.endswith(
-            "/tests/security/test_search_security.py"
-        ):
-            item.add_marker(pytest.mark.integration)
+        # The search-security suites are NOT marked integration (GOO-780): that
+        # mark kept them out of Unit Tests, and no other job collected them, so
+        # 97 tenant-isolation/authz tests ran nowhere. They need no service
+        # (TestClient + a mocked session); their "instability" was the global
+        # API rate limiter's budget leaking across tests, which
+        # tests/security/search_security/conftest.py now resets per test.
 
         # Skip template, standalone, performance, and scaffolding tests if they somehow got collected
         if "/templates/" in test_path:
