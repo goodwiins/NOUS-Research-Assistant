@@ -1066,7 +1066,10 @@ jobs:
         # ORCHESTRATION_TEST_DATABASE_URL. A PostgreSQL test is one marked
         # requires_postgres; backend/tests/conftest.py adds the mark to every
         # test in a *_postgres.py file and every test using a PostgreSQL
-        # fixture, so -m requires_postgres selects exactly those.
+        # fixture, so -m requires_postgres selects exactly those. The lane also
+        # selects integration (GOO-769): Unit Tests deselects that mark, so an
+        # integration test in these files that needs no database (the stream
+        # fast-path and message route tests) would otherwise run in no job.
         # tests/unit/ci/test_shard_tests.py fails if a PostgreSQL test sits in
         # a file or directory this list misses. REQUIRE_POSTGRES_TESTS=1 makes
         # a skipped PostgreSQL test fail, and the check below rejects any skip
@@ -1086,7 +1089,7 @@ jobs:
             backend/tests/api/threads
           )
           pytest "${postgres_tests[@]}" \
-            -c backend/pytest.ini -m requires_postgres \
+            -c backend/pytest.ini -m "requires_postgres or integration" \
             --junitxml=test-results/ingestion-recovery.xml -q -ra
           python - <<'PY'
           import xml.etree.ElementTree as ET
