@@ -20,7 +20,7 @@ vi.mock('@/hooks/useEntityPermissions', () => ({
 // Stable like the real useCallback, or the fetch callbacks change every render.
 const { handleAuthError } = vi.hoisted(() => ({ handleAuthError: vi.fn() }));
 vi.mock('@/hooks/useAuth', () => ({
-  useAuth: () => ({ handleAuthError }),
+  useAuth: () => ({ handleAuthError, isAuthenticated: true, isLoading: false }),
 }));
 
 vi.mock('react-hot-toast', () => ({

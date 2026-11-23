@@ -12,7 +12,7 @@ import type { ReactNode } from 'react';
 import { act, render, waitFor } from '@/test/test-utils';
 import toast from 'react-hot-toast';
 import { entityService } from '@/services/entityService';
-import { APIErrorClass } from '@/types/api';
+import { API_CONFIG, APIErrorClass } from '@/types/api';
 import type { TypeList } from '@/components/entities/typeList';
 
 let search = '';
@@ -49,7 +49,7 @@ const { handleAuthError, last, recorder } = vi.hoisted(() => {
   };
 });
 vi.mock('@/hooks/useAuth', () => ({
-  useAuth: () => ({ handleAuthError }),
+  useAuth: () => ({ handleAuthError, isAuthenticated: true, isLoading: false }),
 }));
 
 vi.mock('react-hot-toast', () => ({
@@ -200,7 +200,15 @@ describe('one failed list does not drop the others (GOO-760)', () => {
 });
 
 describe('every entity call routes its error through handleAuthError (GOO-760)', () => {
-  const expired = (): APIErrorClass => apiError(401, 'Session expired');
+  // A 401 from our own backend: the only error that ends the session.
+  const expired = (): APIErrorClass => {
+    const error = apiError(401, 'Session expired');
+    error.requestUrl = new URL(
+      `${API_CONFIG.BASE_URL}/knowledge-graph/x`,
+      window.location.origin
+    ).toString();
+    return error;
+  };
 
   it.each([
     ['getEntityTypes', 'getEntityTypes'],

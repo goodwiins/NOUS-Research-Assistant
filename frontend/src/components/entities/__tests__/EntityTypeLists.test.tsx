@@ -85,6 +85,18 @@ describe('EntityFilters type filter', () => {
     await user.click(within(menu).getByRole('menuitemcheckbox', { name: 'Select all' }));
     expect(onTypesChange).toHaveBeenCalledWith(['GENE', 'PROTEIN']);
   });
+
+  it('never shows Select all as checked when the graph has no types', async () => {
+    const user = userEvent.setup();
+    renderFilters(loaded());
+
+    await user.click(typeTrigger(/all types/i));
+    const menu = await screen.findByRole('menu');
+    const selectAll = within(menu).getByRole('menuitemcheckbox', { name: 'Select all' });
+
+    expect(selectAll).toHaveAttribute('aria-checked', 'false');
+    expect(selectAll).toHaveAttribute('aria-disabled', 'true');
+  });
 });
 
 const renderForm = (types: TypeList): ReturnType<typeof render> =>

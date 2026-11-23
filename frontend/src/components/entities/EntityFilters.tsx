@@ -214,7 +214,12 @@ export const EntityFilters: React.FC<EntityFiltersProps> = ({
 
             <DropdownMenuSeparator className="bg-border" />
             <DropdownMenuCheckboxItem
-              checked={selectedTypes.length === entityTypes.length}
+              // With no types there is nothing to select: never shown as checked.
+              checked={
+                entityTypes.length > 0 &&
+                selectedTypes.length === entityTypes.length
+              }
+              disabled={entityTypes.length === 0}
               onCheckedChange={handleSelectAllTypes}
               className="text-sm focus:bg-muted focus:text-primary"
             >

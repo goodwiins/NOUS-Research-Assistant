@@ -80,6 +80,7 @@ import {
   PaginatedEntitiesResponse,
 } from '@/services/entityService';
 import { APIErrorClass } from '@/types/api';
+import { isBackendSessionFailure } from '@/lib/backendAuthFailure';
 import { cn } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
@@ -115,9 +116,31 @@ function EntityManagementContent() {
   const searchParams = useSearchParams();
   const { canCreate, canEdit, canDelete } = useEntityPermissions();
   // There is no global 401 handler: an expired session on this page signs
-  // the user out through handleAuthError (GOO-760). It ignores anything
-  // that is not a 401 from our own backend.
-  const { handleAuthError } = useAuth();
+  // the user out through handleAuthError (GOO-760).
+  const { handleAuthError, isAuthenticated, isLoading: authLoading } = useAuth();
+  // Fetch only for a signed-in user, as useDocuments does. Sign-out remounts
+  // this page (AuthProvider is keyed on the account), and without this gate
+  // the remounted page refetched, got a 401 and signed out again, forever.
+  const canFetch = isAuthenticated && !authLoading;
+  // handleAuthError's identity changes on every auth-store change. Reading it
+  // through a ref keeps the fetch callbacks stable, so the type lists load
+  // once per mount instead of twice.
+  const handleAuthErrorRef = useRef(handleAuthError);
+  useEffect(() => {
+    handleAuthErrorRef.current = handleAuthError;
+  }, [handleAuthError]);
+  // Several requests can fail on the same expired session at once. Sign out
+  // for the first; report true for every session failure so callers skip
+  // their error toast while the user is being signed out.
+  const sessionEndedRef = useRef(false);
+  const reportSessionFailure = useCallback((error: unknown): boolean => {
+    if (!isBackendSessionFailure(error)) return false;
+    if (!sessionEndedRef.current) {
+      sessionEndedRef.current = true;
+      handleAuthErrorRef.current(error);
+    }
+    return true;
+  }, []);
 
   // Core state
   const [entities, setEntities] = useState<Entity[]>([]);
@@ -223,8 +246,11 @@ function EntityManagementContent() {
       if (failed.length === 0) return;
       for (const { label, error } of failed) {
         logEntityPageError(`Error fetching ${label}`, error);
-        handleAuthError(error);
       }
+      const sessionEnded = failed
+        .map(({ error }) => reportSessionFailure(error))
+        .some(Boolean);
+      if (sessionEnded) return;
       if (failed.some(({ error }) => isServiceUnavailableError(error))) {
         setServiceUnavailable(true);
       } else {
@@ -233,8 +259,9 @@ function EntityManagementContent() {
         );
       }
     };
+    if (!canFetch) return;
     fetchTypesAndAnalytics();
-  }, [handleAuthError]);
+  }, [canFetch, reportSessionFailure]);
 
   // Fetch entities with pagination
   const fetchEntities = useCallback(async () => {
@@ -313,7 +340,7 @@ function EntityManagementContent() {
     } catch (error) {
       if (requestToken !== entitiesRequestToken.current) return;
       logEntityPageError('Error fetching entities', error);
-      handleAuthError(error);
+      if (reportSessionFailure(error)) return;
       if (isServiceUnavailableError(error)) {
         setServiceUnavailable(true);
       } else {
@@ -327,8 +354,8 @@ function EntityManagementContent() {
   }, [
     confidenceRange,
     currentPage,
-    handleAuthError,
     pageSize,
+    reportSessionFailure,
     searchQuery,
     selectedTypes,
     sortField,
@@ -367,7 +394,7 @@ function EntityManagementContent() {
     } catch (error) {
       if (requestToken !== relationshipsRequestToken.current) return;
       logEntityPageError('Error fetching relationships', error);
-      handleAuthError(error);
+      if (reportSessionFailure(error)) return;
       if (isServiceUnavailableError(error)) {
         setServiceUnavailable(true);
       }
@@ -380,22 +407,23 @@ function EntityManagementContent() {
         setRelationshipsLoading(false);
       }
     }
-  }, [handleAuthError]);
+  }, [reportSessionFailure]);
 
   // Initial load
   useEffect(() => {
+    if (!canFetch) return;
     const timeoutId = setTimeout(fetchEntities, 250);
     return () => clearTimeout(timeoutId);
-  }, [fetchEntities]);
+  }, [canFetch, fetchEntities]);
 
   // Fetch relationships and connected entities when switching to graph tab
   useEffect(() => {
-    if (activeTab === 'graph' && graphEntities.length === 0) {
+    if (canFetch && activeTab === 'graph' && graphEntities.length === 0) {
       // The async callback owns the request state updates.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       fetchRelationships();
     }
-  }, [activeTab, graphEntities.length, fetchRelationships]);
+  }, [activeTab, canFetch, graphEntities.length, fetchRelationships]);
 
   // Client-side filtering and sorting
   const filteredEntities = useMemo(() => {
@@ -550,7 +578,7 @@ function EntityManagementContent() {
       toast.success('Entity updated successfully');
     } catch (error) {
       logEntityPageError('Error updating entity', error);
-      handleAuthError(error);
+      if (reportSessionFailure(error)) return;
       toast.error('Failed to update entity');
     }
   };
@@ -570,7 +598,7 @@ function EntityManagementContent() {
       toast.success('Entity deleted successfully');
     } catch (error) {
       logEntityPageError('Error deleting entity', error);
-      handleAuthError(error);
+      if (reportSessionFailure(error)) return;
       toast.error('Failed to delete entity');
     }
   };
@@ -612,7 +640,7 @@ function EntityManagementContent() {
       }
     } catch (error) {
       logEntityPageError('Error creating relationship', error);
-      handleAuthError(error);
+      if (reportSessionFailure(error)) return;
       toast.error('Failed to create relationship');
     }
   };
@@ -1179,7 +1207,7 @@ function EntityManagementContent() {
                       fetchEntities();
                     } catch (error) {
                       logEntityPageError('Error creating entity', error);
-                      handleAuthError(error);
+                      if (reportSessionFailure(error)) return;
                       toast.error('Failed to create entity');
                     }
                   }
