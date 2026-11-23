@@ -26,6 +26,7 @@ import {
   sentryScrubOptions,
   SENTRY_CONSOLE_LOG_LEVELS,
 } from '@/lib/sentry-scrub';
+import { REPLAY_PRIVACY_OPTIONS } from '@/lib/replay-privacy';
 
 // Secret-shaped fixtures are assembled at runtime so no literal credential
 // is committed (secret scanners match on the source text).
@@ -472,9 +473,17 @@ describe('Sentry config wiring', () => {
 
   it('instrumentation-client scrubs replay frames and the replay URL list', () => {
     const source = readFileSync(resolve(__dirname, '../../..', 'instrumentation-client.ts'), 'utf8');
-    expect(source).toContain('beforeAddRecordingEvent: scrubReplayRecordingEvent');
+    expect(source).toContain('Sentry.replayIntegration(REPLAY_PRIVACY_OPTIONS)');
     expect(source).toContain('scrubReplayEventsIntegration()');
-    expect(source).toContain('maskAllText: true');
-    expect(source).toContain('blockAllMedia: true');
+    // The page-load snapshot is checked right after init (GOO-734).
+    expect(source).toMatch(/syncReplayWithUrl\(\s*window\.location\.href,\s*Sentry\.getReplay\(\)/);
+    expect(REPLAY_PRIVACY_OPTIONS).toMatchObject({
+      maskAllText: true,
+      blockAllMedia: true,
+      beforeAddRecordingEvent: scrubReplayRecordingEvent,
+    });
+    expect(REPLAY_PRIVACY_OPTIONS.block).toEqual(
+      expect.arrayContaining(['a[href*="?"]'])
+    );
   });
 });

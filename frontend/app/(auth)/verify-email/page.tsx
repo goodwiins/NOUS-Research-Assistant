@@ -6,13 +6,22 @@ import { motion } from 'framer-motion';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import React, { Suspense, useEffect, useRef, useState } from 'react';
+import React, {
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
+import { stripUrlParams } from '@/lib/replay-privacy';
 
 const VERIFIED_REDIRECT_PATH = '/dashboard';
 const VERIFIED_REDIRECT_DELAY_MS = 2500;
 const PENDING_AUTH_TIMEOUT_MS = 6000;
 
 type ViewState = 'pending' | 'verified' | 'error';
+
+const subscribeNothing = (): (() => void) => () => undefined;
 
 function describeError(code: string | null): string {
   // SECURITY (audit #23): never reflect the raw OAuth error_description from
@@ -43,18 +52,41 @@ function VerifyEmailContent(): React.JSX.Element | null {
   const { isAuthenticated, isLoading } = useAuth();
 
   const errorCode = searchParams.get('error');
-  const tokenHash = searchParams.get('token_hash');
-  const tokenType = searchParams.get('type');
+  // Read the one-time token once: it is stripped from the URL below, and
+  // useSearchParams follows that replaceState.
+  const [{ tokenHash, tokenType }] = useState(() => ({
+    tokenHash: searchParams.get('token_hash'),
+    tokenType: searchParams.get('type'),
+  }));
 
-  const [mounted, setMounted] = useState(false);
-  const [view, setView] = useState<ViewState>(errorCode ? 'error' : 'pending');
+  // Keep the token out of the address bar, history and session replay
+  // (GOO-734). Refresh cannot need it: verifyOtp consumes it.
+  useEffect(() => {
+    stripUrlParams(['token_hash', 'type']);
+  }, []);
+
+  // False during SSR and hydration, true on the client afterwards.
+  const mounted = useSyncExternalStore(
+    subscribeNothing,
+    () => true,
+    () => false
+  );
+  const [verificationView, setView] = useState<ViewState>(
+    errorCode ? 'error' : 'pending'
+  );
+  const isTokenHashFlow = Boolean(tokenHash && tokenType);
+  // A callback error in the URL always wins. On the PKCE path
+  // /auth/callback already exchanged the code, so a session means verified.
+  const view: ViewState = errorCode
+    ? 'error'
+    : !isTokenHashFlow && !isLoading && isAuthenticated
+      ? 'verified'
+      : verificationView;
   const [otpErrorMessage, setOtpErrorMessage] = useState<string | null>(null);
   const isAuthenticatedRef = useRef(isAuthenticated);
-  isAuthenticatedRef.current = isAuthenticated;
-
   useEffect(() => {
-    setMounted(true);
-  }, []);
+    isAuthenticatedRef.current = isAuthenticated;
+  }, [isAuthenticated]);
 
   // Magic-link / token_hash flow: run verifyOtp client-side. Supabase only
   // sends these params when the email template is configured for the OTP
@@ -95,20 +127,16 @@ function VerifyEmailContent(): React.JSX.Element | null {
   // PKCE flow: /auth/callback already exchanged the code, so we just need
   // to wait for the auth state to propagate.
   useEffect(() => {
-    if (errorCode) {
-      setView('error');
-      return;
-    }
+    // The error view is derived from errorCode above.
+    if (errorCode) return;
 
     // Token-hash flow drives its own state above.
     if (tokenHash && tokenType) return;
 
     if (isLoading) return;
 
-    if (isAuthenticated) {
-      setView('verified');
-      return;
-    }
+    // Signed in: the verified view is derived above.
+    if (isAuthenticated) return;
 
     // Auth finished loading but no session — give the SIGNED_IN listener
     // a brief window in case it is still propagating, then show an error.

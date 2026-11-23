@@ -5,6 +5,7 @@ import '@/utils/artifactNavigation';
 // Note: AnalyticsProvider is temporarily disabled for TypeScript strict mode
 // import { AnalyticsProvider } from '@/components/analytics/AnalyticsProvider';
 import { AuthProvider } from '@/hooks';
+import { ReplayUrlGuard } from '@/components/observability/ReplayUrlGuard';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { setAppQueryClient } from '@/lib/query-client';
 import { ThemeProvider } from 'next-themes';
@@ -48,6 +49,7 @@ export function Providers({ children }: ProvidersProps) {
         <AuthProvider>
           <StatsigClientProvider>
             {children}
+            <ReplayUrlGuard />
             <Toaster
               position="top-right"
               toastOptions={{
