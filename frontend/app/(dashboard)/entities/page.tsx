@@ -54,6 +54,10 @@ import {
   SortOrder,
 } from '@/components/entities/EntityFilters';
 import { Pagination } from '@/components/entities/Pagination';
+import {
+  needsClientEntityTypeFilter,
+  serverEntityTypeFilter,
+} from '@/components/entities/entityType';
 import { RelationshipForm } from '@/components/entities/RelationshipForm';
 import { PathFinder } from '@/components/entities/PathFinder';
 import { NeighborhoodExplorer } from '@/components/entities/NeighborhoodExplorer';
@@ -211,6 +215,7 @@ function EntityManagementContent() {
   const fetchEntities = useCallback(async () => {
     const requestToken = ++entitiesRequestToken.current;
     const hasClientFilters =
+      needsClientEntityTypeFilter(selectedTypes) ||
       searchQuery.trim().length > 0 ||
       confidenceRange[0] > 0 ||
       confidenceRange[1] < 100 ||
@@ -232,7 +237,7 @@ function EntityManagementContent() {
           const response = await entityService.getEntities(
             1000,
             offset,
-            selectedTypes.length > 0 ? selectedTypes : undefined
+            serverEntityTypeFilter(selectedTypes)
           );
           if (requestToken !== entitiesRequestToken.current) return;
 
@@ -253,7 +258,7 @@ function EntityManagementContent() {
         paginatedResponse = await entityService.getEntities(
           pageSize,
           offset,
-          selectedTypes.length > 0 ? selectedTypes : undefined
+          serverEntityTypeFilter(selectedTypes)
         );
       }
 
@@ -579,6 +584,7 @@ function EntityManagementContent() {
   };
 
   const hasClientFilters =
+    needsClientEntityTypeFilter(selectedTypes) ||
     searchQuery.trim().length > 0 ||
     confidenceRange[0] > 0 ||
     confidenceRange[1] < 100 ||
