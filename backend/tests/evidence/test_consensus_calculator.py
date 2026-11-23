@@ -496,7 +496,6 @@ class TestConsensusCalculator:
         )
 
 
-
 def test_failed_classifications_are_counted_as_partial(
     consensus_calculator, sample_claim, sample_classifications_strong_agreement
 ):

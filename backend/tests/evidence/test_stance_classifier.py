@@ -547,7 +547,6 @@ class TestStanceClassifier:
                 )
 
 
-
 @pytest.mark.parametrize(
     ("stance", "accepted"),
     [("not_addressed", True), ("supporting", False), ("neutral", False)],

@@ -84,11 +84,18 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATUS_RANK = {"verified": 0, "ambiguous": 1, "unverified": 2}
 
 
-def document_source_hash(document: Any) -> str:
-    """The document's content version: its checksum, else sha256 of its text."""
-    checksum = document.checksum_sha256
+def _valid_checksum(checksum: object) -> str | None:
+    """The stored checksum, lowercased, if it is a SHA-256 hex digest."""
     if isinstance(checksum, str) and _SHA256_RE.fullmatch(checksum.lower()):
         return checksum.lower()
+    return None
+
+
+def document_source_hash(document: Any) -> str:
+    """The document's content version: its checksum, else sha256 of its text."""
+    checksum = _valid_checksum(document.checksum_sha256)
+    if checksum is not None:
+        return checksum
     text = document.content_text or ""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -102,9 +109,7 @@ def document_pins(document: Any) -> tuple[str, str]:
 
 def _pins_from_hashes(checksum: object, text_hash: str) -> tuple[str, str]:
     """``document_pins`` from a stored checksum and a precomputed text hash."""
-    if isinstance(checksum, str) and _SHA256_RE.fullmatch(checksum.lower()):
-        return checksum.lower(), text_hash
-    return text_hash, text_hash
+    return _valid_checksum(checksum) or text_hash, text_hash
 
 
 async def load_document_pins(
@@ -138,8 +143,7 @@ async def load_document_pins(
             )
         )
         return {
-            row[0]: _pins_from_hashes(row[1], cast(str, row[2]))
-            for row in rows.all()
+            row[0]: _pins_from_hashes(row[1], cast(str, row[2])) for row in rows.all()
         }
     rows = await db.execute(
         select(Document.id, Document.checksum_sha256, Document.content_text).where(
@@ -147,9 +151,7 @@ async def load_document_pins(
         )
     )
     return {
-        row[0]: _pins_from_hashes(
-            row[1], cast(str, anchors.text_sha256(row[2] or ""))
-        )
+        row[0]: _pins_from_hashes(row[1], cast(str, anchors.text_sha256(row[2] or "")))
         for row in rows.all()
     }
 
