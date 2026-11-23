@@ -126,11 +126,11 @@ describe('console payload scanner', () => {
       'console.log(a /* oops);\nconsole.log(payload);',
     ],
     [
-      'an unbalanced call longer than the scan limit',
+      'a long unbalanced call',
       `console.log(f(${'x'.repeat(5_000)});\nconsole.log(payload);`,
     ],
     [
-      'a balanced call longer than the scan limit',
+      'a long balanced call',
       `console.log(${'x'.repeat(5_000)});\nconsole.log(payload);`,
     ],
   ])('finds a later call after %s', (_shape, source) => {
@@ -144,6 +144,7 @@ describe('console payload scanner', () => {
 
   it.each([
     ["console.log('a', /* don't */ payload);", ['payload']],
+    ["console.log(a /* don't */, payload);", ['payload']],
     ["console.log(x, // don't\n  payload);", ['payload']],
     ["console.log(/'/.test(s), payload);", ['payload']],
     ['console.log(s.split(/"/), payload);', ['payload']],
@@ -163,6 +164,10 @@ describe('console payload scanner', () => {
 
   it.each([
     "console.log('x', /* the args */ id);",
+    // After an identifier a `/` is a division, so only comment handling
+    // keeps these words out.
+    'console.log(id /* not the payload */);',
+    'console.log(id // not the payload\n);',
     "console.log('x', id); // log the payload",
     'console.log(/title|query/.test(s));',
   ])('ignores comments and regex text: %s', (call) => {
