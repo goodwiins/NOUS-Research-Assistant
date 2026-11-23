@@ -17,7 +17,7 @@
     "src/utils/analytics/**/*"
   ],
   "eslint": {
-    "errors": 85,
+    "errors": 80,
     "warnings": 1774,
     "byFile": {
       "app/(auth)/layout.tsx": {
@@ -1013,7 +1013,7 @@
         "warnings": 1
       },
       "src/components/preview/MultimodalViewer.tsx": {
-        "errors": 5,
+        "errors": 0,
         "warnings": 14
       },
       "src/components/research-engine/BlueprintEditor.tsx": {

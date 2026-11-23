@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { buildCsp } from '../../src/lib/csp';
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -11,22 +12,8 @@ const shareId = '33333333-3333-4333-8333-333333333333';
 const versionId = '22222222-2222-4222-8222-222222222222';
 const actor = '11111111-1111-4111-8111-111111111111';
 const recipient = '44444444-4444-4444-8444-444444444444';
-// The production parent policy from proxy.ts, also used by pdf-preview.spec.ts.
-const csp = [
-  "default-src 'self'",
-  "base-uri 'self'",
-  "object-src 'none'",
-  "frame-src 'self' blob:",
-  "frame-ancestors 'none'",
-  "form-action 'self'",
-  `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https:",
-  "font-src 'self' data:",
-  "connect-src 'self' https: wss:",
-  "worker-src 'self' blob:",
-  'upgrade-insecure-requests',
-].join('; ');
+// The exact production policy (src/lib/csp.ts); previews add no exemptions.
+const csp = buildCsp(nonce, { NODE_ENV: 'production' });
 let bundle: string;
 let worker: Buffer;
 
