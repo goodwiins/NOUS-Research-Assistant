@@ -1065,6 +1065,24 @@ async def _offload(fn, **kw):
 async def planted(db=None):
     await _offload(work, session=db)
 """,
+    "wrapper_star_args_at_the_call": """
+import asyncio
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+async def planted(db=None):
+    await _offload(work, *[db])
+""",
+    "wrapper_star_kwargs_at_the_call": """
+import asyncio
+
+async def _offload(fn, **kw):
+    return await asyncio.to_thread(fn, **kw)
+
+async def planted(db=None):
+    await _offload(work, **{"session": db})
+""",
     "wrapper_of_a_wrapper": """
 import asyncio
 
