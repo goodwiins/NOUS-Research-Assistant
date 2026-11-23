@@ -669,6 +669,40 @@ describe('a send the server rejects keeps its text (GOO-772)', () => {
     expect(written.at(-1)).toMatchObject({ role: 'assistant' });
   });
 
+  it('retrying an earlier unsent bubble keeps the later ones, in order', async () => {
+    const { useChatStreaming } = await import('@/hooks/chat/useChatStreaming');
+    const unsentTurn = (content: string, timestamp: number): Written => ({
+      ...makeChatPageMessage({ role: 'user', content, timestamp }),
+      source: 'local-only',
+      sendFailed: { message: NOT_SENT_DOWN },
+    });
+    const one = unsentTurn('unsent one', 3);
+    const two = unsentTurn('unsent two', 4);
+    const three = unsentTurn('unsent three', 5);
+    const params = { ...makeParams(), messages: [one, two, three] };
+    const { result } = renderHook(() => useChatStreaming(params), { wrapper });
+
+    // What useChatComposerActions passes for a retry of an unsent turn:
+    // every other row on screen.
+    await act(async () => {
+      await result.current.handleSubmit('unsent one', [two, three]);
+    });
+
+    const firstWrite = (params.setMessages as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Written[];
+    expect(firstWrite.map((message) => message.content)).toEqual([
+      'unsent two',
+      'unsent three',
+      'unsent one',
+    ]);
+    const request = mocks.streamMessage.mock.calls[0][0] as {
+      messages: Array<{ content: string }>;
+    };
+    expect(request.messages.map((message) => message.content)).toEqual([
+      'unsent one',
+    ]);
+  });
+
   it('keeps an earlier unsent bubble when the next message goes out', async () => {
     const { useChatStreaming } = await import('@/hooks/chat/useChatStreaming');
     const unsent: Written = {
