@@ -71,6 +71,9 @@ class CacheTTL:
     EXPORTS = 7200  # 2 hours
 
 
+_RECONNECT_INTERVAL_SECONDS = 30.0
+
+
 class AnalyticsCache:
     """Redis-based analytics cache with fallback to in-memory cache"""
 
@@ -80,11 +83,48 @@ class AnalyticsCache:
         self.fallback_cache = {}  # Simple in-memory fallback
         self.fallback_cache_expiry = {}
         self._connected = False
+        # Connecting needs an event loop, which __init__ (module import) does
+        # not have. The old code called the async _init_redis() without
+        # awaiting it, so Redis never connected and every pod silently used
+        # its own in-memory cache. Connect lazily on first use instead.
+        self._redis_enabled = bool(
+            REDIS_AVAILABLE and self.config.redis_analytics_url
+        )
+        self._next_connect_attempt = 0.0
+        self._connect_lock: Optional[asyncio.Lock] = None
+        self._connect_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 
-        if REDIS_AVAILABLE and self.config.redis_analytics_url:
-            self._init_redis()
-        else:
+        if not self._redis_enabled:
             logger.warning("Redis not available, using in-memory fallback cache")
+
+    async def connect(self) -> bool:
+        """Connect to Redis if enabled and not yet connected.
+
+        Safe to call repeatedly; a failed attempt is retried at most every
+        ``_RECONNECT_INTERVAL_SECONDS`` so a Redis outage does not add a
+        connect timeout to every cache call.
+        """
+        if self._connected or not self._redis_enabled:
+            return self._connected
+        loop = asyncio.get_running_loop()
+        if loop.time() < self._next_connect_attempt:
+            return False
+        # A Lock binds to the loop it is first used on; the module singleton
+        # can outlive a loop (tests, worker restarts), so keep one per loop.
+        if self._connect_lock is None or self._connect_lock_loop is not loop:
+            self._connect_lock = asyncio.Lock()
+            self._connect_lock_loop = loop
+        async with self._connect_lock:
+            if self._connected:
+                return True
+            if loop.time() < self._next_connect_attempt:
+                return False
+            await self._init_redis()
+            if not self._connected:
+                self._next_connect_attempt = (
+                    loop.time() + _RECONNECT_INTERVAL_SECONDS
+                )
+        return self._connected
 
     async def _init_redis(self):
         """Initialize Redis connection"""
@@ -136,6 +176,7 @@ class AnalyticsCache:
         """Get value from cache"""
         try:
             # Try Redis first
+            await self.connect()
             if self.redis_client and self._connected:
                 try:
                     value = await self.redis_client.get(key)
@@ -169,6 +210,7 @@ class AnalyticsCache:
         """Set value in cache"""
         try:
             # Try Redis first
+            await self.connect()
             if self.redis_client and self._connected:
                 try:
                     # Serialize value using JSON (secure, prevents arbitrary code execution)
@@ -220,6 +262,7 @@ class AnalyticsCache:
             success = True
 
             # Delete from Redis
+            await self.connect()
             if self.redis_client and self._connected:
                 try:
                     await self.redis_client.delete(key)
@@ -244,6 +287,7 @@ class AnalyticsCache:
             deleted_count = 0
 
             # Delete from Redis
+            await self.connect()
             if self.redis_client and self._connected:
                 try:
                     keys = await self.redis_client.keys(pattern)
@@ -352,6 +396,7 @@ class AnalyticsCache:
 
     async def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics"""
+        await self.connect()
         stats = {
             "redis_connected": self._connected,
             "fallback_cache_size": len(self.fallback_cache),
@@ -384,6 +429,7 @@ class AnalyticsCache:
 
     async def health_check(self) -> Dict[str, Any]:
         """Perform cache health check"""
+        await self.connect()
         health = {
             "status": "healthy",
             "redis_connected": self._connected,
