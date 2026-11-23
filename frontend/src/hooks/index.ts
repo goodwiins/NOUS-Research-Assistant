@@ -11,8 +11,11 @@ export type { UIMessage, UIConversation } from './useChatPersistence';
 export { useProjectChat } from './useProjectChat';
 
 // useCitationsForThread is deliberately not re-exported: it pulls in the
-// Markdown parser (unified/remark/micromark), and the root layout imports
-// this barrel. Import it from '@/hooks/useCitationsForThread'.
+// Markdown parser (unified/remark/micromark), which every importer of this
+// barrel would then load. The root layout once reached the parser that way;
+// it now imports '@/hooks/useAuth' directly, and
+// src/__tests__/rootLayoutImports.test.ts keeps the parser off its import
+// graph. Import it from '@/hooks/useCitationsForThread'.
 
 export {
   useEvidenceMeter,

@@ -34,7 +34,6 @@
     "@radix-ui/react-use-controllable-state": "^1.2.2",
     "@sentry/nextjs": "^10.78.0",
     "@statsig/react-bindings": "^3.33.0",
-    "@statsig/session-replay": "^3.33.0",
     "@statsig/web-analytics": "^3.33.0",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.104.0",

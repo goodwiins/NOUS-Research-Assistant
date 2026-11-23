@@ -112,6 +112,18 @@ describe('math, links and source count', () => {
       'a',
     ]);
   });
+
+  it('re-reads cached content when the source count grows', () => {
+    // The parse cache is keyed by content AND count: with two sources the
+    // bare group [1, 3] is out of range and selects nothing; once a third
+    // source arrives the same committed text selects the first and third.
+    const content = 'Count-keyed cache check [1, 3].';
+
+    expect(getReferencedItemsByCitationIndex(content, ['a', 'b'])).toEqual([]);
+    expect(
+      getReferencedItemsByCitationIndex(content, ['a', 'b', 'c'])
+    ).toEqual(['a', 'c']);
+  });
 });
 
 describe('performance', () => {

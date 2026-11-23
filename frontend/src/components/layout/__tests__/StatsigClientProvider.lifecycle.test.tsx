@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import { renderToString } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 
@@ -19,12 +20,8 @@ vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({ user: null }),
 }));
 
-vi.mock('@statsig/session-replay', () => ({
-  StatsigSessionReplayPlugin: vi.fn(),
-}));
-
 vi.mock('@statsig/web-analytics', () => ({
-  StatsigAutoCapturePlugin: vi.fn(),
+  StatsigAutoCapturePlugin: class StatsigAutoCapturePlugin {},
 }));
 
 vi.mock('@statsig/react-bindings', () => ({
@@ -104,5 +101,45 @@ describe('StatsigClientProvider lifecycle', () => {
         expect.any(Object)
       );
     });
+  });
+
+  it('registers AutoCapture and no session-replay plugin (GOO-774)', async () => {
+    const { StatsigAutoCapturePlugin } = await import('@statsig/web-analytics');
+    const { StatsigClientProvider } =
+      await import('../../../../app/statsig-provider');
+
+    render(
+      <StatsigClientProvider>
+        <span>Application shell</span>
+      </StatsigClientProvider>
+    );
+
+    await vi.waitFor(() => {
+      expect(mockUseClientAsyncInit).toHaveBeenCalled();
+    });
+    const options = mockUseClientAsyncInit.mock.calls[0][2] as {
+      plugins: unknown[];
+    };
+    // Gates and events stay; the only plugin is AutoCapture. A recorder here
+    // would bypass Sentry's replay privacy options.
+    expect(options.plugins).toHaveLength(1);
+    expect(options.plugins[0]).toBeInstanceOf(StatsigAutoCapturePlugin);
+  });
+
+  it('does not initialize Statsig during server rendering', async () => {
+    const { StatsigClientProvider } =
+      await import('../../../../app/statsig-provider');
+
+    const html = renderToString(
+      <StatsigClientProvider>
+        <span>Application shell</span>
+      </StatsigClientProvider>
+    );
+
+    // The server snapshot reports "not mounted", so the SDK (which needs
+    // `window`) never starts on the server or during hydration.
+    expect(html).toContain('Application shell');
+    expect(html).not.toContain('statsig-provider');
+    expect(mockUseClientAsyncInit).not.toHaveBeenCalled();
   });
 });
