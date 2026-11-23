@@ -143,6 +143,39 @@ describe('useChatComposerActions', () => {
     );
   });
 
+  it.each(['edit', 'retry'])(
+    'keeps the composer draft when a %s waits for an unloaded branch',
+    async (kind) => {
+      useChatStore.setState({
+        currentThreadId: 'branch-thread',
+        messageFreshness: { 'branch-thread': 'fresh' },
+        messagePagination: {
+          'branch-thread': {
+            hasMore: false,
+            loadingOlder: false,
+            loadedCount: 2,
+            message_branching: true,
+            branch_document_id: 'pdf',
+            selected_message_id: 'answer',
+          },
+        },
+      });
+      const { result, handleSubmit, setInput } = setup();
+      act(() => {
+        if (kind === 'edit') result.current.handleEditUserMessage(0, 'Edited');
+        else result.current.handleRegenerate(1);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(handleSubmit).not.toHaveBeenCalled();
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        expect.stringContaining('branch')
+      );
+      expect(setInput).not.toHaveBeenCalled();
+    }
+  );
+
   it('handleRegenerate is a no-op while a turn is streaming', () => {
     const { result, handleSubmit } = setup({ storeIsStreaming: true });
 
