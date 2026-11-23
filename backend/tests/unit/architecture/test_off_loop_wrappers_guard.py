@@ -559,12 +559,18 @@ def _touched_by(
 # of a wrapper) through a fixpoint over the module's functions, as GOO-777
 # closes its call graph. A call resolves to a forwarder through a bare name in
 # the same module, ``self.<method>``/``cls.<method>`` of the enclosing class,
-# or a ``src.*`` import (``from src.x import f`` or ``import src.x as m``).
+# or a ``src.*`` import (``from src.x import f`` or ``import src.x as m``). A
+# module-level alias of a forwarder (``run_in_subprocess = _run_in_subprocess``
+# in arxiv_fulltext) is a forwarder under its new name too.
 #
-# Known limits (``test_known_limits_of_forwarder_resolution`` pins them): a
-# forwarder reached through another object (``svc._offload(db.commit)``), a
-# variable or ``getattr``, or one that stores the callable and offloads it
-# later. None exists in src today; a new one needs its call sites listed in
+# Known limits (``test_known_limits_of_forwarder_resolution`` pins them):
+# - a forwarder reached through another object (``svc._offload(db.commit)``);
+# - one reached through a variable bound inside a function (``run = _offload``
+#   in the caller's body) or through ``getattr``;
+# - a forwarder defined inside a function (only module-level functions and
+#   class methods are scanned), so a nested ``async def _offload`` is unseen;
+# - one that stores the callable (``self._job = fn``) and offloads it later.
+# None of these exists in src today; a new one needs its call sites listed in
 # SITES above or the resolution extended.
 
 _SELF_NAMES = frozenset({"self", "cls"})
@@ -673,9 +679,8 @@ def _forwarding(
             inner = _resolve_forwarder(call, cls_name, local, aliases)
             if inner is None:
                 continue
+            # _bind returns no guard for an inner forwarder without one.
             work, guard_node = _bind(call, inner[1])
-            if inner[1].guard is None:
-                guard_node = None
         hit = {
             n.id
             for w in work
@@ -705,19 +710,42 @@ def _forwarding(
 def _module_forwarders(
     tree: ast.Module, aliases: Dict[str, str]
 ) -> Dict[str, _Forwarder]:
-    """Every forwarder in ``tree``, wrappers of wrappers included (fixpoint)."""
+    """Every forwarder in ``tree``, wrappers of wrappers and module-level
+    aliases (``name = forwarder``) included (fixpoint)."""
     functions = _module_functions(tree)
+    assigned = _module_assignments(tree)
     found: Dict[str, _Forwarder] = {}
-    for _ in range(len(functions) + 1):
+    for _ in range(len(functions) + len(assigned) + 1):
         changed = False
         for key, (fn, cls_name) in functions.items():
             fwd = _forwarding(fn, cls_name, found, aliases)
             if fwd is not None and found.get(key) != fwd:
                 found[key] = fwd
                 changed = True
+        for name, value in assigned.items():
+            fwd = found.get(value) if isinstance(value, str) else None
+            if fwd is not None and found.get(name) != fwd:
+                found[name] = fwd
+                changed = True
         if not changed:
             break
     return found
+
+
+def _module_assignments(tree: ast.Module) -> Dict[str, Optional[str]]:
+    """``name = other`` at module level: name -> other, or None when the
+    value is not a bare name. The last binding wins, as at import time."""
+    out: Dict[str, Optional[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if isinstance(target, ast.Name):
+            out[target.id] = value.id if isinstance(value, ast.Name) else None
+    return out
 
 
 _IMPORTED_FORWARDERS: Dict[str, Dict[str, _Forwarder]] = {}
@@ -1083,6 +1111,50 @@ async def _offload(fn, **kw):
 async def planted(db=None):
     await _offload(work, **{"session": db})
 """,
+    "module_level_alias": """
+import asyncio
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+offload = _offload
+offload_again = offload
+
+async def planted(db=None):
+    await offload(db.commit)
+    await offload_again(db.commit)
+
+async def ok_no_session():
+    await offload(render, 1)
+""",
+    "imported_src_alias": """
+from src.services.integrations.arxiv_fulltext import run_in_subprocess
+
+async def planted(db=None):
+    await run_in_subprocess(db.commit)
+""",
+    "wrapper_defined_before_its_wrapped": """
+import asyncio
+
+async def _outer(job):
+    return await _inner(job)
+
+async def _inner(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+async def planted(db=None):
+    await _outer(db.commit)
+""",
+    "wrapper_with_two_different_guards": """
+from src.core.thread_offload import to_thread_finish_on_cancel
+
+async def _two(fn, first, second):
+    await to_thread_finish_on_cancel(fn, guard_session=first)
+    await to_thread_finish_on_cancel(fn, guard_session=second)
+
+async def planted(db=None, other=None):
+    await _two(lambda: db.commit(), db, other)
+""",
     "wrapper_of_a_wrapper": """
 import asyncio
 
@@ -1157,6 +1229,9 @@ def test_the_real_forwarders_are_found() -> None:
     fulltext = _imported_forwarders("src.services.integrations.arxiv_fulltext")
     assert "_run_in_subprocess" in fulltext, sorted(fulltext)
     assert fulltext["_run_in_subprocess"].forwarded == {"fn", "args"}
+    # The public alias arxiv_service imports (``run_in_subprocess =
+    # _run_in_subprocess``) resolves to the same forwarder.
+    assert fulltext.get("run_in_subprocess") == fulltext["_run_in_subprocess"]
     kg = _imported_forwarders("src.services.arxiv.arxiv_kg_integration")
     offload = [key for key in kg if key.endswith("._offload")]
     assert offload, sorted(kg)
@@ -1175,6 +1250,22 @@ async def through_another_object(svc, db=None):
 async def through_a_variable(db=None):
     run = _offload
     await run(db.commit)
+
+async def through_a_nested_def(db=None):
+    async def _nested(fn):
+        return await asyncio.to_thread(fn)
+
+    await _nested(db.commit)
+
+class Stored:
+    def __init__(self, fn):
+        self._job = fn
+
+    async def run(self):
+        return await asyncio.to_thread(self._job)
+
+async def through_a_stored_callable(db=None):
+    await Stored(db.commit).run()
 """
 
 
