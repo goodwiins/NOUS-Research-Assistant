@@ -4,15 +4,17 @@ Multimodal Processing Service with async pipeline for OCR, transcription, and AI
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from sqlalchemy.orm import Session
 
@@ -73,6 +75,7 @@ from src.services.documents.storage_utils import local_file_for_document
 from src.services.embedding.embedding_service import EmbeddingService
 from src.services.processing import pdf_lock
 from src.services.processing.entity_extraction_service import EntityExtractionService
+from src.shared.enums import SatelliteSyncStatus
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,35 @@ def _extracted_text(results: Dict[str, Any]) -> Optional[str]:
         if isinstance(text, str) and _usable_text(text):
             return text
     return None
+
+
+class KnowledgeGraphStorageFailed(Exception):
+    """The KG step failed (GOO-743). Raised with ``_KG_STORAGE_ERROR`` only:
+    the pipeline turns it into the step's warning, and the cause is logged
+    where it happened."""
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    # The type name, never repr/str: those can carry document text or paths.
+    return f"<{type(value).__name__}>"
+
+
+def _json_safe(results: Dict[str, Any]) -> Dict[str, Any]:
+    """``results`` as plain JSON. They are stored in ``document_metadata`` and
+    ``job.result``; an object the JSON column rejects fails the commit and
+    would strand the document in PROCESSING (GOO-743)."""
+    return cast(Dict[str, Any], json.loads(json.dumps(results, default=_json_default)))
+
+
+def _failed_run(errors: List[str], warnings: List[str]) -> Dict[str, Any]:
+    """What a crashed run stores in place of the previous run's results."""
+    return {"success": False, "errors": list(errors), "warnings": list(warnings)}
 
 
 def _record_warnings(document: Document, warnings: List[str], partial: bool) -> None:
@@ -296,16 +328,27 @@ class MultimodalProcessingService:
                             document.processing_status = ProcessingStatus.FAILED
                             document.processing_error = error_msg
                         # This path skips update_document_with_results: replace
-                        # a previous run's flags so they don't outlive it.
+                        # a previous run's flags, results and indexed state so
+                        # they don't outlive it (GOO-743).
                         _record_warnings(
                             document, processing_results["warnings"], partial=False
                         )
+                        document.add_metadata(
+                            "processing_results",
+                            _failed_run(
+                                processing_results["errors"],
+                                processing_results["warnings"],
+                            ),
+                        )
+                        document.is_indexed = False
                         self.db.commit()
                         return processing_results
 
             # Finalize processing
             processing_results["processing_time"] = time.time() - start_time
             processing_results["success"] = len(processing_results["errors"]) == 0
+            # Stored on the document and the job: plain JSON only (GOO-743).
+            processing_results = _json_safe(processing_results)
 
             # Update document with processing results
             await self.update_document_with_results(document, processing_results)
@@ -323,17 +366,41 @@ class MultimodalProcessingService:
                 "Document processing failed for document %s",
                 getattr(document, "id", "?"),
             )
+            processing_results["errors"].append(error_msg)
+            # The failure may be the session itself (a rejected commit); start
+            # clean so the FAILED state below can be written (GOO-743).
+            try:
+                self.db.rollback()
+            except Exception:
+                logger.warning("rollback after a failed run failed", exc_info=True)
 
             job.fail_job(error_msg)
+            # End terminal: a document left in PROCESSING is never retried.
+            document.processing_status = ProcessingStatus.FAILED
+            document.processing_error = error_msg
+            document.is_indexed = False
             try:
                 _record_warnings(
                     document, processing_results["warnings"], partial=False
                 )
+                document.add_metadata(
+                    "processing_results",
+                    _failed_run(
+                        processing_results["errors"], processing_results["warnings"]
+                    ),
+                )
             except Exception:
                 logger.warning("could not reset processing flags", exc_info=True)
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception:
+                logger.error(
+                    "could not record the failure of document %s",
+                    getattr(document, "id", "?"),
+                    exc_info=True,
+                )
+                self.db.rollback()
 
-            processing_results["errors"].append(error_msg)
             return processing_results
 
     def get_processing_pipeline(
@@ -1034,6 +1101,29 @@ class MultimodalProcessingService:
     ) -> Dict[str, Any]:
         """Store extracted entities and relationships in the knowledge graph.
 
+        Records the outcome on ``document.neo4j_index_status`` like
+        ``processing_tasks._index_entities_to_graph``: ``completed`` when every
+        entity and relationship landed, ``failed`` otherwise, and then raises
+        ``KnowledgeGraphStorageFailed`` so the pipeline records the step's
+        warning. The reconciler re-drives COMPLETED documents whose graph
+        status is ``failed`` (GOO-743); a swallowed error was never retried.
+        """
+        results = await self._store_in_knowledge_graph(document, job)
+        if results.get("errors"):
+            # Each failure was logged with its stack where it happened.
+            document.neo4j_index_status = SatelliteSyncStatus.FAILED.value
+            raise KnowledgeGraphStorageFailed(_KG_STORAGE_ERROR)
+        if results.get("reason") != "No text content":
+            document.neo4j_index_status = SatelliteSyncStatus.COMPLETED.value
+            document.neo4j_indexed_at = datetime.now(timezone.utc)
+        return results
+
+    async def _store_in_knowledge_graph(
+        self, document: Document, job: ProcessingJob
+    ) -> Dict[str, Any]:
+        """The writes behind ``store_entities_in_knowledge_graph``, which turns
+        any collected error into the step's failure.
+
         Reclaim-safe: writes land in Neo4j via
         ``knowledge_graph_service.create_entity`` / ``create_relationship``,
         both of which MERGE on a canonical identity key (not CREATE), so a
@@ -1517,9 +1607,9 @@ class MultimodalProcessingService:
             document.add_metadata("processing_results", results)
             document.add_metadata("processed_at", datetime.utcnow().isoformat())
 
-            # Mark as indexed if successful
-            if results["success"]:
-                document.is_indexed = True
+            # Indexed only by a successful run; a failed rerun (the no-text
+            # guard above included) clears an earlier run's flag (GOO-743).
+            document.is_indexed = bool(results["success"])
 
             self.db.commit()
 
