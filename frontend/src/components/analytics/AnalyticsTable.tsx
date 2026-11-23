@@ -45,6 +45,17 @@ import {
   FileText,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { CombinedSearchQueryRow } from '@/services/documentAnalyticsApi';
+
+/** One row of the document analytics table. */
+export interface DocumentTableRow {
+  id: string;
+  filename: string;
+  type: string;
+  size: number;
+  uploadedAt: string;
+  status: string;
+}
 
 interface Column<T> {
   key: keyof T;
@@ -477,7 +488,7 @@ export function AnalyticsTable<T extends Record<string, any>>({
 
 // Preset table configurations
 export const createDocumentAnalyticsTable = () => {
-  const columns = [
+  const columns: Column<DocumentTableRow>[] = [
     {
       key: 'filename',
       title: 'Document',
@@ -541,12 +552,12 @@ export const createDocumentAnalyticsTable = () => {
   return { columns };
 };
 
-// Shown for per-query fields the backend does not report, instead of an
-// invented value (FL2C-2).
+// Shown when a source does not report a per-query value, instead of an
+// invented one (FL2C-2).
 const NOT_REPORTED = '—';
 
 export const createSearchAnalyticsTable = () => {
-  const columns = [
+  const columns: Column<CombinedSearchQueryRow>[] = [
     {
       key: 'query',
       title: 'Query',
@@ -558,31 +569,17 @@ export const createSearchAnalyticsTable = () => {
       ),
     },
     {
-      key: 'type',
-      title: 'Type',
+      key: 'count',
+      title: 'Searches',
       sortable: true,
-      render: (value: string | null) =>
-        value ? <Badge variant="outline">{value}</Badge> : NOT_REPORTED,
+      render: (value: number) => value.toLocaleString(),
     },
     {
-      key: 'results',
-      title: 'Results',
-      sortable: true,
-      render: (value: number | null) => (value == null ? NOT_REPORTED : value),
-    },
-    {
-      key: 'clickRate',
-      title: 'Click rate',
+      key: 'avgResponseTimeMs',
+      title: 'Avg time',
       sortable: true,
       render: (value: number | null) =>
-        value == null ? NOT_REPORTED : `${(value * 100).toFixed(1)}%`,
-    },
-    {
-      key: 'lastSearched',
-      title: 'Last searched',
-      sortable: true,
-      render: (value: string | null) =>
-        value ? formatDate(value) : NOT_REPORTED,
+        value == null ? NOT_REPORTED : `${Math.round(value)} ms`,
     },
   ];
 
