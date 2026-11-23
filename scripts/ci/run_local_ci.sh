@@ -15,7 +15,8 @@
 # PostgreSQL is unavailable), the backend architecture tests (even with
 # --skip-tests), and the unit suite run from the repo root as CI runs it.
 # --frontend adds type-check, the lint ratchets, and vitest with the coverage
-# ratchet. The truly-empty Alembic replay remains a visible advisory
+# ratchet. The Trigger.dev tsc gate and node tests run with --frontend or when
+# src/trigger, tests/trigger or the files they read changed. The truly-empty Alembic replay remains a visible advisory
 # measurement of legacy-chain health. Untracked (not yet `git add`-ed) files
 # count as changed, so a new file is ratcheted before it is committed.
 #
@@ -424,6 +425,8 @@ backend_pytest() {
     AZURE_OPENAI_CHAT_API_VERSION="2024-02-01" \
     AZURE_OPENAI_ENDPOINT="https://example.invalid" \
     AZURE_OPENAI_API_KEY="test-key-not-real" \
+    NEXT_PUBLIC_SUPABASE_URL="http://localhost:8999" \
+    SUPABASE_JWT_SECRET="ci-test-supabase-jwt-secret-not-for-prod-use" \
     "$PY" -P -m pytest "$@" -c backend/pytest.ini -m "$BACKEND_UNIT_MARKERS" \
     -q -p no:cacheprovider --no-cov
 }
@@ -447,6 +450,30 @@ if [ "$SKIP_TESTS" -eq 0 ]; then
   check $? "pytest"
 else
   skipped "NOUS workflow contract tests + backend unit tests" "--skip-tests"
+fi
+
+# Mirrors the frontend-tests job's two Trigger.dev steps (GOO-764). CI runs
+# them on every full-profile run; here they run with --frontend or whenever a
+# path they read changed (the task code, its tests, the OpenAPI snapshot the
+# path contract checks, or the root TypeScript/dependency config).
+TRIGGER_CHANGES="$(changed_paths src/trigger tests/trigger backend/openapi.json \
+  tsconfig.json trigger.config.ts package.json pnpm-lock.yaml)"
+if [ "$DO_FRONTEND" -eq 1 ] || [ -n "$TRIGGER_CHANGES" ]; then
+  if [ ! -x frontend/node_modules/.bin/tsc ] && [ ! -x node_modules/.bin/tsc ]; then
+    warn "  node_modules are missing; run pnpm install --frozen-lockfile"
+    check 1 "Trigger.dev gates (no node_modules)"
+  else
+    step "Trigger.dev type-check (blocking, runs even with --skip-tests)"
+    ( cd frontend && pnpm exec tsc --noEmit -p ../tsconfig.json )
+    check $? "Trigger.dev tsc"
+    if [ "$SKIP_TESTS" -eq 0 ]; then
+      step "Trigger.dev node tests (blocking)"
+      node --experimental-transform-types --experimental-test-module-mocks --no-warnings --test tests/trigger/*.test.mjs
+      check $? "Trigger.dev node tests"
+    else
+      skipped "Trigger.dev node tests" "--skip-tests"
+    fi
+  fi
 fi
 
 if [ "$DO_FRONTEND" -eq 1 ]; then
