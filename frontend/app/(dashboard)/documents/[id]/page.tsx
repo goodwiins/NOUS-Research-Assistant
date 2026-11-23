@@ -33,6 +33,8 @@ import {
 } from 'lucide-react';
 import { ProcessingStatus } from '@/components/documents/ProcessingStatus';
 import { IntegrityBadge } from '@/components/documents/IntegrityBadge';
+import { ProcessedWithWarnings } from '@/components/documents/ProcessedWithWarnings';
+import { getProcessingWarnings } from '@/utils/documentProcessingWarnings';
 import { IntegrityDetail } from '@/components/documents/IntegrityDetail';
 import { citationService } from '@/services/citationService';
 import { getIntegrityScore, extractTables } from '@/services/scispaceService';
@@ -120,6 +122,10 @@ export default function DocumentDetailPage() {
 
   useEffect(() => {
     if (isAuthenticated) {
+      // Fetch on mount: the state it sets tracks the request (loading, then
+      // the document or an error). Pre-existing; disabled with a reason
+      // because the changed-file ratchet requires touched files to be clean.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       fetchDocument();
     }
   }, [isAuthenticated, fetchDocument]);
@@ -144,8 +150,12 @@ export default function DocumentDetailPage() {
     if (!document) return;
 
     try {
-      await api.post(`/documents/${document.id}/reprocess`);
-      fetchDocument();
+      // An indexed document is a no-op without force_reprocess: the route
+      // answers 200 "already processed" and changes nothing (GOO-744).
+      const force =
+        document.processing_status === 'indexed' ? '?force_reprocess=true' : '';
+      await api.post(`/documents/${document.id}/reprocess${force}`);
+      void fetchDocument();
     } catch (err) {
       console.error('Failed to retry processing:', err);
     }
@@ -305,6 +315,8 @@ export default function DocumentDetailPage() {
   }
 
   const isIndexed = document.processing_status === 'indexed';
+  // A completed run that skipped optional steps must not read as clean.
+  const processing = getProcessingWarnings(document.metadata);
   const isPdf =
     document.document_type === 'pdf' || document.file_type === 'pdf';
 
@@ -371,7 +383,17 @@ export default function DocumentDetailPage() {
           <div className="lg:col-span-2 space-y-6">
             {/* Processing status: a slim confirmation once indexed (info the
                 user already has), the full card only while it still matters. */}
-            {isIndexed ? (
+            {isIndexed && processing.partial ? (
+              <ProcessedWithWarnings
+                warnings={processing.warnings}
+                completedAt={
+                  document.processing_completed_at
+                    ? formatDate(document.processing_completed_at)
+                    : null
+                }
+                onReprocess={handleRetry}
+              />
+            ) : isIndexed ? (
               <section className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-5 py-3 shadow-xs">
                 <div className="flex min-w-0 items-center gap-2.5">
                   <CheckCircle2
