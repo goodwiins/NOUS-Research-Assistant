@@ -25,7 +25,9 @@ vi.mock('@/hooks/useAuth', () => ({
 }));
 
 import {
+  DEFAULT_DOCUMENT_PAGE_SIZE,
   MAX_DOCUMENT_PAGE_SIZE,
+  UnmappedDocumentTypeError,
   buildDocumentListQuery,
   documentListQueryString,
 } from '../documentListParams';
@@ -35,7 +37,7 @@ import { useDocuments } from '@/hooks/useDocuments';
 interface OpenApiParam {
   name: string;
   in: string;
-  schema: { maximum?: number; anyOf?: Array<{ $ref?: string }> };
+  schema: { maximum?: number; default?: number; anyOf?: Array<{ $ref?: string }> };
 }
 const openapi = JSON.parse(
   readFileSync(resolve(__dirname, '../../../../backend/openapi.json'), 'utf8')
@@ -61,8 +63,8 @@ afterEach(() => {
 describe('buildDocumentListQuery', () => {
   it('only sends query names the backend route declares', () => {
     const built = buildDocumentListQuery(2, 10, {
-      file_types: ['pdf'],
-      status: ['indexed'],
+      file_type: 'pdf',
+      status: 'indexed',
       search_term: 'graphs',
       date_range: { start: '2026-01-01T00:00:00Z', end: '2026-02-01T00:00:00Z' },
     });
@@ -85,20 +87,25 @@ describe('buildDocumentListQuery', () => {
       'pdf', 'txt', 'jpg', 'png', 'mp3', 'mp4', 'text', 'image', 'audio',
       'video', 'spreadsheet', 'presentation', 'multimodal',
     ] as const) {
-      const built = buildDocumentListQuery(1, 20, { file_types: [fileType] });
+      const built = buildDocumentListQuery(1, 20, { file_type: fileType });
       expect(documentTypes, fileType).toContain(built.document_type);
     }
-    expect(buildDocumentListQuery(1, 20, { file_types: ['jpg', 'png'] }).document_type).toBe('image');
   });
 
-  it('sends no filter it cannot express as one value', () => {
-    // The backend takes one document_type and one processing_status; a
-    // comma-joined list is a 422 / 400.
-    const built = buildDocumentListQuery(1, 20, {
-      file_types: ['pdf', 'mp3'],
-      status: ['indexed', 'failed'],
-    });
-    expect(built).toEqual({ page: 1, size: 20 });
+  it('throws a named error for an unmapped file type outside production', () => {
+    const cast = { file_type: 'docx' } as unknown as Parameters<typeof buildDocumentListQuery>[2];
+    expect(() => buildDocumentListQuery(1, 20, cast)).toThrow(UnmappedDocumentTypeError);
+    expect(() => buildDocumentListQuery(1, 20, cast)).toThrow(/"docx"/);
+  });
+
+  it('in production sends no type filter for an unmapped file type', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      const cast = { file_type: 'docx' } as unknown as Parameters<typeof buildDocumentListQuery>[2];
+      expect(buildDocumentListQuery(1, 20, cast)).toEqual({ page: 1, size: 20 });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('clamps the page size to the backend bound', () => {
@@ -107,8 +114,18 @@ describe('buildDocumentListQuery', () => {
     expect(buildDocumentListQuery(0, 0)).toEqual({ page: 1, size: 1 });
   });
 
+  it('falls back to the defaults for NaN and infinite page numbers', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(buildDocumentListQuery(bad, bad)).toEqual({
+        page: 1,
+        size: DEFAULT_DOCUMENT_PAGE_SIZE,
+      });
+    }
+    expect(backendParams.get('size')?.schema).toMatchObject({ default: DEFAULT_DOCUMENT_PAGE_SIZE });
+  });
+
   it('serialises without page_size, file_types or status', () => {
-    const q = query(`?${documentListQueryString(1, 10, { status: ['queued'] })}`);
+    const q = query(`?${documentListQueryString(1, 10, { status: 'queued' })}`);
     expect(q.get('size')).toBe('10');
     expect(q.get('processing_status')).toBe('queued');
     for (const stale of ['page_size', 'file_types', 'status']) {
@@ -120,7 +137,7 @@ describe('buildDocumentListQuery', () => {
 describe('callers', () => {
   it('documentService.getDocuments sends the backend names', async () => {
     mockGet.mockResolvedValue(realResponse);
-    await documentService.getDocuments(1, 10, { file_types: ['mp4'], status: ['failed'] });
+    await documentService.getDocuments(1, 10, { file_type: 'mp4', status: 'failed' });
     const q = query(mockGet.mock.calls[0][0] as string);
     expect(Object.fromEntries(q)).toEqual({
       page: '1',
@@ -147,7 +164,7 @@ describe('callers', () => {
     expect(result.current.pagination.total).toBe(realResponse.pagination.total);
 
     await act(async () => {
-      result.current.updateFilters({ status: ['indexed'] });
+      result.current.updateFilters({ status: 'indexed' });
     });
     const last = query(mockGet.mock.calls.at(-1)?.[0] as string);
     expect(last.get('processing_status')).toBe('indexed');

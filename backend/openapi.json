@@ -32204,6 +32204,38 @@
         "title": "WeightExperimentResult",
         "type": "object"
       },
+      "WorkerHealthResponse": {
+        "description": "Overall health of the Celery worker infrastructure",
+        "properties": {
+          "healthy": {
+            "title": "Healthy",
+            "type": "boolean"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "workers_online": {
+            "title": "Workers Online",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "healthy",
+          "workers_online",
+          "issues",
+          "timestamp"
+        ],
+        "title": "WorkerHealthResponse",
+        "type": "object"
+      },
       "WorkerStatsResponse": {
         "description": "Celery worker statistics",
         "properties": {
@@ -64084,7 +64116,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerHealthResponse"
+                }
               }
             },
             "description": "Successful Response"
