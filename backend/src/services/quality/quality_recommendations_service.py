@@ -13,7 +13,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, asc, desc, func, or_, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
@@ -83,6 +84,22 @@ class QualityRecommendation:
     updated_at: datetime = None
 
 
+# The only database failures an analyser may treat as "metrics unavailable":
+# the database could not be reached or a connection broke. ProgrammingError
+# (a wrong column, the original PL-2 bug class), DataError, IntegrityError
+# and every non-database exception are bugs and propagate.
+_TRANSIENT_DB_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    DisconnectionError,
+    PoolTimeoutError,
+)
+
+
+class _MetricsUnavailable(Exception):
+    """An analyser could not read its metrics; the result is incomplete."""
+
+
 class RecommendationTrackingUnavailable(RuntimeError):
     """Raised when a write the service cannot persist is requested."""
 
@@ -137,135 +154,122 @@ class QualityRecommendationsService:
             if (datetime.utcnow() - cached_data["timestamp"]).seconds < self.cache_ttl:
                 return cached_data["recommendations"]
 
-        try:
-            recommendations = []
+        recommendations = []
 
-            # Get quality insights
-            insights = await self.analyze_quality_insights(organization_id, days_back)
+        # Get quality insights
+        insights, complete = await self._collect_insights(organization_id, days_back)
 
-            # Generate recommendations based on insights
-            if not focus_areas or RecommendationCategory.CONTENT in focus_areas:
-                recommendations.extend(
-                    await self._generate_content_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if (
-                not focus_areas
-                or RecommendationCategory.SEARCH_ALGORITHM in focus_areas
-            ):
-                recommendations.extend(
-                    await self._generate_search_algorithm_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if not focus_areas or RecommendationCategory.INDEXING in focus_areas:
-                recommendations.extend(
-                    await self._generate_indexing_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if not focus_areas or RecommendationCategory.USER_EXPERIENCE in focus_areas:
-                recommendations.extend(
-                    await self._generate_user_experience_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if include_host_metrics and (
-                not focus_areas or RecommendationCategory.INFRASTRUCTURE in focus_areas
-            ):
-                recommendations.extend(
-                    await self._generate_infrastructure_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if not focus_areas or RecommendationCategory.MONITORING in focus_areas:
-                recommendations.extend(
-                    await self._generate_monitoring_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            # Filter by priority if specified
-            if priority_filter:
-                recommendations = [
-                    r for r in recommendations if r.priority == priority_filter
-                ]
-
-            # Sort by priority and estimated impact
-            priority_order = {
-                RecommendationPriority.CRITICAL: 0,
-                RecommendationPriority.HIGH: 1,
-                RecommendationPriority.MEDIUM: 2,
-                RecommendationPriority.LOW: 3,
-            }
-
-            recommendations.sort(
-                key=lambda r: (priority_order[r.priority], -r.estimated_improvement)
+        # Generate recommendations based on insights
+        if not focus_areas or RecommendationCategory.CONTENT in focus_areas:
+            recommendations.extend(
+                await self._generate_content_recommendations(insights, organization_id)
             )
 
-            # Cache the results
+        if not focus_areas or RecommendationCategory.SEARCH_ALGORITHM in focus_areas:
+            recommendations.extend(
+                await self._generate_search_algorithm_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        if not focus_areas or RecommendationCategory.INDEXING in focus_areas:
+            recommendations.extend(
+                await self._generate_indexing_recommendations(insights, organization_id)
+            )
+
+        if not focus_areas or RecommendationCategory.USER_EXPERIENCE in focus_areas:
+            recommendations.extend(
+                await self._generate_user_experience_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        if include_host_metrics and (
+            not focus_areas or RecommendationCategory.INFRASTRUCTURE in focus_areas
+        ):
+            recommendations.extend(
+                await self._generate_infrastructure_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        if not focus_areas or RecommendationCategory.MONITORING in focus_areas:
+            recommendations.extend(
+                await self._generate_monitoring_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        # Filter by priority if specified
+        if priority_filter:
+            recommendations = [
+                r for r in recommendations if r.priority == priority_filter
+            ]
+
+        # Sort by priority and estimated impact
+        priority_order = {
+            RecommendationPriority.CRITICAL: 0,
+            RecommendationPriority.HIGH: 1,
+            RecommendationPriority.MEDIUM: 2,
+            RecommendationPriority.LOW: 3,
+        }
+
+        recommendations.sort(
+            key=lambda r: (priority_order[r.priority], -r.estimated_improvement)
+        )
+
+        # Cache the results, unless they rest on incomplete insights
+        if complete:
             self.recommendation_cache[cache_key] = {
                 "recommendations": recommendations,
                 "timestamp": datetime.utcnow(),
             }
 
-            return recommendations
-
-        except Exception as e:
-            logger.error(f"Failed to generate recommendations: {e}")
-            raise
+        return recommendations
 
     async def analyze_quality_insights(
         self, organization_id: str, days_back: int = 30
     ) -> List[QualityInsight]:
         """Analyze quality metrics to generate insights"""
 
+        insights, _complete = await self._collect_insights(organization_id, days_back)
+        return insights
+
+    async def _collect_insights(
+        self, organization_id: str, days_back: int
+    ) -> Tuple[List[QualityInsight], bool]:
+        """Insights plus whether every analyser could read its metrics.
+
+        An incomplete result (a database outage) is returned but never
+        cached, so the outage does not pin empty insights for an hour.
+        """
         cache_key = f"insights_{organization_id}_{days_back}"
         if cache_key in self.insight_cache:
             cached_data = self.insight_cache[cache_key]
             if (datetime.utcnow() - cached_data["timestamp"]).seconds < self.cache_ttl:
-                return cached_data["insights"]
+                return cached_data["insights"], True
 
-        try:
-            insights = []
-            cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+        insights: List[QualityInsight] = []
+        complete = True
+        cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+        for analyse in (
+            self._analyze_relevance_insights,
+            self._analyze_precision_insights,
+            self._analyze_recall_insights,
+            self._analyze_response_time_insights,
+            self._analyze_user_satisfaction_insights,
+        ):
+            try:
+                insights.extend(await analyse(organization_id, cutoff_date))
+            except _MetricsUnavailable:
+                complete = False
 
-            # Analyze different quality metrics
-            insights.extend(
-                await self._analyze_relevance_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_precision_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_recall_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_response_time_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_user_satisfaction_insights(
-                    organization_id, cutoff_date
-                )
-            )
-
-            # Cache the results
+        if complete:
             self.insight_cache[cache_key] = {
                 "insights": insights,
                 "timestamp": datetime.utcnow(),
             }
-
-            return insights
-
-        except Exception as e:
-            logger.error(f"Failed to analyze quality insights: {e}")
-            raise
+        return insights, complete
 
     async def track_recommendation_progress(
         self,
@@ -688,13 +692,14 @@ class QualityRecommendationsService:
                     )
                 ]
 
-        except SQLAlchemyError:
-            # Expected absence: database or metric table unavailable. Anything
-            # else is a bug and must surface, not become "no insights".
+        except _TRANSIENT_DB_ERRORS as exc:
+            # Database unreachable: report incomplete (never cached). Any
+            # other error, including ProgrammingError, is a bug and surfaces.
             logger.warning(
                 "Failed to analyze relevance insights: database unavailable",
                 exc_info=True,
             )
+            raise _MetricsUnavailable() from exc
         finally:
             db.close()
 
@@ -789,13 +794,14 @@ class QualityRecommendationsService:
                     )
                 ]
 
-        except SQLAlchemyError:
-            # Expected absence: database or metric table unavailable. Anything
-            # else is a bug and must surface, not become "no insights".
+        except _TRANSIENT_DB_ERRORS as exc:
+            # Database unreachable: report incomplete (never cached). Any
+            # other error, including ProgrammingError, is a bug and surfaces.
             logger.warning(
                 "Failed to analyze response time insights: database unavailable",
                 exc_info=True,
             )
+            raise _MetricsUnavailable() from exc
         finally:
             db.close()
 

@@ -125,8 +125,8 @@ async def get_quality_recommendations(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get quality recommendations: {e}")
+    except Exception:
+        logger.exception("Failed to get quality recommendations")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -165,8 +165,8 @@ async def get_quality_insights(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get quality insights: {e}")
+    except Exception:
+        logger.exception("Failed to get quality insights")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -209,8 +209,8 @@ async def update_recommendation_progress(
         )
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Failed to update recommendation progress: {e}")
+    except Exception:
+        logger.exception("Failed to update recommendation progress")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -240,8 +240,8 @@ async def get_recommendation_effectiveness(
             "analyzed_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get recommendation effectiveness: {e}")
+    except Exception:
+        logger.exception("Failed to get recommendation effectiveness")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -327,8 +327,8 @@ async def get_recommendations_summary(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get recommendations summary: {e}")
+    except Exception:
+        logger.exception("Failed to get recommendations summary")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -401,8 +401,8 @@ async def get_recommendation_categories(current_user: User = Depends(get_current
 
         return {"categories": categories, "total_categories": len(categories)}
 
-    except Exception as e:
-        logger.error(f"Failed to get recommendation categories: {e}")
+    except Exception:
+        logger.exception("Failed to get recommendation categories")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -486,8 +486,8 @@ async def get_quality_metrics_for_recommendations(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get quality metrics for recommendations: {e}")
+    except Exception:
+        logger.exception("Failed to get quality metrics for recommendations")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -544,8 +544,8 @@ async def generate_custom_recommendations(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to generate custom recommendations: {e}")
+    except Exception:
+        logger.exception("Failed to generate custom recommendations")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

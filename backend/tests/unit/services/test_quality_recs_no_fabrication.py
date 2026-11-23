@@ -20,7 +20,7 @@ from typing import Any, Iterator, List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError, ProgrammingError
 
 from src.services.quality import quality_recommendations_service as svc_module
 from src.services.quality.quality_recommendations_service import (
@@ -180,19 +180,132 @@ async def test_a_bug_in_an_insight_analyser_is_not_turned_into_no_insights(
         )
 
 
+_ANALYSERS = ["_analyze_relevance_insights", "_analyze_response_time_insights"]
+
+
+def _down() -> OperationalError:
+    return OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "analyser", ["_analyze_relevance_insights", "_analyze_response_time_insights"]
-)
-async def test_an_unavailable_database_still_means_no_insights(
+@pytest.mark.parametrize("analyser", _ANALYSERS)
+async def test_an_unavailable_database_reports_metrics_unavailable(
     monkeypatch: pytest.MonkeyPatch, analyser: str
 ) -> None:
-    down = OperationalError("SELECT 1", {}, Exception("connection refused"))
-    monkeypatch.setattr(svc_module, "get_db_sync", _db_raising(down))
-    result = await getattr(QualityRecommendationsService(), analyser)(
-        "org-1", datetime.utcnow() - timedelta(days=30)
+    monkeypatch.setattr(svc_module, "get_db_sync", _db_raising(_down()))
+    with pytest.raises(svc_module._MetricsUnavailable):
+        await getattr(QualityRecommendationsService(), analyser)(
+            "org-1", datetime.utcnow() - timedelta(days=30)
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("analyser", _ANALYSERS)
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProgrammingError(
+            "SELECT sq.response_time", {}, Exception("column does not exist")
+        ),
+        DataError("SELECT", {}, Exception("invalid input")),
+        IntegrityError("INSERT", {}, Exception("duplicate")),
+    ],
+)
+async def test_a_sql_bug_is_not_read_as_database_unavailable(
+    monkeypatch: pytest.MonkeyPatch, analyser: str, error: Exception
+) -> None:
+    # PL-2's wrong column raised ProgrammingError, an SQLAlchemyError subclass.
+    monkeypatch.setattr(svc_module, "get_db_sync", _db_raising(error))
+    with pytest.raises(type(error)):
+        await getattr(QualityRecommendationsService(), analyser)(
+            "org-1", datetime.utcnow() - timedelta(days=30)
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("analyser", _ANALYSERS)
+async def test_a_failing_session_factory_surfaces_its_own_error(
+    monkeypatch: pytest.MonkeyPatch, analyser: str
+) -> None:
+    # With the session opened inside the try, `finally: db.close()` replaced
+    # this with UnboundLocalError.
+    def _no_session() -> Iterator[MagicMock]:
+        raise RuntimeError("no session")
+        yield MagicMock()  # pragma: no cover
+
+    monkeypatch.setattr(svc_module, "get_db_sync", _no_session)
+    with pytest.raises(RuntimeError, match="no session"):
+        await getattr(QualityRecommendationsService(), analyser)(
+            "org-1", datetime.utcnow() - timedelta(days=30)
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_outage_returns_no_insights_and_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(svc_module, "get_db_sync", _db_raising(_down()))
+    service = QualityRecommendationsService()
+
+    assert await service.analyze_quality_insights("org-1", 30) == []
+    assert service.insight_cache == {}  # the outage is not pinned for an hour
+
+    assert await service.generate_recommendations("org-1") == []
+    assert service.recommendation_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_complete_insights_are_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(svc_module, "get_db_sync", lambda: _fake_db([None, None]))
+    service = QualityRecommendationsService()
+
+    assert await service.analyze_quality_insights("org-1", 30) == []
+    assert list(service.insight_cache) == ["insights_org-1_30"]
+
+
+def _route_client(monkeypatch: pytest.MonkeyPatch) -> Any:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.api.quality import quality_recommendations as routes
+    from src.core.dependencies import get_current_user
+
+    monkeypatch.setattr(routes.quality_recommendations_service, "insight_cache", {})
+    monkeypatch.setattr(
+        routes.quality_recommendations_service, "recommendation_cache", {}
     )
-    assert result == []
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000001", organization_id="org-1"
+    )
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize("path", ["/insights", "/recommendations"])
+def test_an_analyser_bug_is_a_safe_500_logged_once_with_its_traceback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, path: str
+) -> None:
+    secret = "user typed this query"
+
+    async def buggy(*_a: Any, **_k: Any) -> List[Any]:
+        raise TypeError(secret)
+
+    service = svc_module.quality_recommendations_service
+    monkeypatch.setattr(service, "_analyze_relevance_insights", buggy)
+    client = _route_client(monkeypatch)
+
+    with caplog.at_level("DEBUG"):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error"}
+    assert secret not in response.text
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1  # once, at the route; services re-raise silently
+    (record,) = errors
+    assert record.exc_info is not None and record.exc_info[0] is TypeError
+    assert secret not in record.getMessage()
 
 
 @pytest.mark.asyncio
