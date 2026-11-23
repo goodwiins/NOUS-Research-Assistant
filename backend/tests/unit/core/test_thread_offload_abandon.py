@@ -26,6 +26,12 @@ Mutation checks (each test fails with its guard removed, passes with it):
   instead of ``_start(...)``.
 * ``test_the_handoff_decides_once``: drop ``if self._finished: return False``
   in ``_Handoff.abandon``.
+* ``test_commit_done_ends_the_in_flight_window`` (GOO-783): make
+  ``_Handoff.commit_done`` a no-op, or set ``admitted_before_abandon`` always.
+* ``test_a_landed_commit_is_marked_done_by_after_commit`` (GOO-783): drop the
+  ``handoff.commit_done()`` call in ``_commit_landed``.
+* ``test_a_failed_rollback_of_a_refused_commit_invalidates_the_connection``
+  (GOO-783): drop ``_connection.invalidate()`` in ``_gate_abandoned_commit``.
 
     pytest -q backend/tests/unit/core/test_thread_offload_abandon.py
 """
@@ -387,3 +393,96 @@ async def test_a_thread_that_just_finished_does_not_spin_the_loop() -> None:
         timeout=2,
     )
     assert (cancelled, abandoned) == (True, False)
+
+
+# ---- GOO-783: commit_done and the invalidate() fallback ----
+
+
+def test_commit_done_ends_the_in_flight_window() -> None:
+    """``abandoned_mid_commit`` is true only while a COMMIT is admitted and not
+    yet done; ``commit_done`` closes that window."""
+    in_flight = thread_offload._Handoff(None)
+    assert in_flight.admit_commit()
+    assert in_flight.abandon()
+    assert in_flight.abandoned_mid_commit is True
+
+    finished = thread_offload._Handoff(None)
+    assert finished.admit_commit()
+    finished.commit_done()
+    assert finished.abandon()
+    assert finished.abandoned_mid_commit is False
+    assert finished.admitted_before_abandon is True
+
+    never = thread_offload._Handoff(None)
+    assert never.abandon()
+    assert never.admitted_before_abandon is False
+    assert never.admit_commit() is False, "admitted a COMMIT after the abandon"
+    assert never.admitted_before_abandon is False
+
+
+@contextlib.contextmanager
+def _as_offloaded(handoff: Any) -> Iterator[None]:
+    """Run the body as the offloaded thread of a guarded call would."""
+    thread_offload._offloaded.handoff = handoff
+    try:
+        yield
+    finally:
+        thread_offload._offloaded.handoff = None
+
+
+def test_a_landed_commit_is_marked_done_by_after_commit(engine: Engine) -> None:
+    """The ``after_commit`` listener calls ``commit_done``: an abandon after a
+    commit landed is not reported as one in flight."""
+    db = sessionmaker(bind=engine)()
+    handoff = thread_offload._Handoff(db)  # type: ignore[arg-type]
+    try:
+        with _as_offloaded(handoff):
+            db.execute(text("INSERT INTO t VALUES (1)"))
+            db.commit()
+        assert handoff.abandon()
+        assert handoff.abandoned_mid_commit is False
+    finally:
+        db.close()
+
+
+def test_a_failed_rollback_of_a_refused_commit_invalidates_the_connection(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If the rollback before refusing fails, the connection still holds the
+    open transaction: it must be invalidated, never returned to the pool."""
+    invalidated: List[Any] = []
+    event.listen(engine, "invalidate", lambda *args: invalidated.append(args))
+    db = sessionmaker(bind=engine)()
+    handoff = thread_offload._Handoff(db)  # type: ignore[arg-type]
+
+    real_rollback = engine.dialect.do_rollback
+    calls: List[int] = []
+
+    def broken_rollback(dbapi_connection: Any) -> None:
+        """Only the gate's own rollback fails: a later one failing too would
+        make SQLAlchemy invalidate the connection itself and hide the gate's."""
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("rollback failed")
+        real_rollback(dbapi_connection)
+
+    try:
+        db.execute(text("INSERT INTO t VALUES (3)"))
+        assert handoff.abandon()
+        # before_commit refuses an abandoned Session first; let the commit
+        # reach the engine gate, as one abandoned mid-flush does.
+        db.info.pop(thread_offload._ABANDONED_KEY)
+        monkeypatch.setattr(engine.dialect, "do_rollback", broken_rollback)
+        with _as_offloaded(handoff):
+            with pytest.raises(thread_offload.AbandonedSessionError):
+                db.commit()
+    finally:
+        monkeypatch.undo()
+        db.close()
+
+    assert "rolling back a refused commit failed" in caplog.text
+    assert invalidated, "the connection went back to the pool mid-transaction"
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT v FROM t")).fetchall() == []

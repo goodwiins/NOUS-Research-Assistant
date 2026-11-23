@@ -18,6 +18,12 @@ bounded wait starts no COMMIT on it and is never closed under.
 GOO-766 adds a scan of every offload call under src/ (end of this file): any
 ``to_thread``, ``run_in_executor`` or ``run_in_threadpool`` that takes a sync
 Session fails unless it is listed in SESSION_OFFLOAD_EXEMPTIONS with a reason.
+
+GOO-783 resolves names before matching, so these forms are caught too (each
+has a planted test, ``_EVASIONS``): aliased imports of the offload helpers,
+``anyio.to_thread.run_sync`` however imported, ``<executor>.submit``, a
+``partial(...)`` (or any value) bound to a name and offloaded through it, and
+a Session parameter known only by ``Depends(get_db_sync)``.
 """
 
 import ast
@@ -281,7 +287,21 @@ def test_blocking_call_stays_off_the_loop(site: Site) -> None:
 # it closes over, or in a ``self`` method that uses ``self.db``) unless it is
 # ``to_thread_finish_on_cancel`` with that Session as ``guard_session=``.
 
-_RAW_OFFLOADS = frozenset({"to_thread", "run_in_executor", "run_in_threadpool"})
+_RAW_OFFLOADS = frozenset(
+    {
+        "to_thread",
+        "run_in_executor",
+        "run_in_threadpool",
+        # GOO-783: ``anyio.to_thread.run_sync`` (only under ``to_thread``:
+        # ``anyio.from_thread.run_sync`` runs on the loop) and
+        # ``<executor>.submit``.
+        "run_sync",
+        "submit",
+    }
+)
+# Sync-Session dependencies: a parameter defaulting to Depends(<one>) is a
+# Session whatever it is called or annotated (GOO-783).
+_SYNC_SESSION_DEPENDENCIES = frozenset({"get_db_sync"})
 _GUARDED_OFFLOAD = "to_thread_finish_on_cancel"
 # Conventional names of a sync Session in this codebase.
 _SESSION_NAMES = frozenset({"db", "db_session", "sync_db", "sync_session"})
@@ -295,6 +315,14 @@ SESSION_OFFLOAD_EXEMPTIONS: Dict[str, str] = {
     "core/thread_offload.py:_start:to_thread:_run": (
         "the guarded helper's own thread: _run is the work guard_session protects"
     ),
+    (
+        "services/agent/tools_impl.py:_tool_extract_entities:to_thread:"
+        "file_service.extract_text_content"
+    ): (
+        "seen through file_service = FileService(db) (GOO-783 follows names): "
+        "extract_text_content reads only the document's file and never uses "
+        "FileService.db, and this db is the agent tool's AsyncSession"
+    ),
 }
 
 
@@ -302,15 +330,80 @@ def _annotation(arg: ast.arg) -> str:
     return ast.unparse(arg.annotation) if arg.annotation is not None else ""
 
 
-def _sync_session_names(fn: ast.AST) -> Set[str]:
+def _aliases(tree: ast.AST) -> Dict[str, str]:
+    """Local name -> dotted origin, from this module's imports (GOO-783):
+    ``from asyncio import to_thread as off`` gives ``off -> asyncio.to_thread``,
+    ``import asyncio as aio`` gives ``aio -> asyncio``."""
+    out: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                out[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    out[alias.asname] = alias.name
+                else:
+                    head = alias.name.split(".")[0]
+                    out[head] = head
+    return out
+
+
+def _dotted(node: ast.AST, aliases: Dict[str, str]) -> Optional[str]:
+    """``aio.to_thread`` -> ``asyncio.to_thread``; None for a non-name."""
+    parts: List[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(aliases.get(node.id, node.id))
+    return ".".join(reversed(parts))
+
+
+def _offload_kind(call: ast.Call, aliases: Dict[str, str]) -> Optional[str]:
+    """The offload helper ``call`` resolves to, or None."""
+    dotted = _dotted(call.func, aliases) or (_tail(call.func) or "")
+    *parents, last = dotted.split(".")
+    if last == "run_sync":
+        return last if "to_thread" in parents else None
+    if last in _RAW_OFFLOADS or last == _GUARDED_OFFLOAD:
+        return last
+    return None
+
+
+def _depends_on_sync_session(
+    default: Optional[ast.expr], aliases: Dict[str, str]
+) -> bool:
+    """``Depends(get_db_sync)`` (or an alias of it) as a parameter default."""
+    if not (
+        isinstance(default, ast.Call)
+        and _tail(default.func) == "Depends"
+        and default.args
+    ):
+        return False
+    dependency = _dotted(default.args[0], aliases) or ""
+    return dependency.split(".")[-1] in _SYNC_SESSION_DEPENDENCIES
+
+
+def _sync_session_names(
+    fn: ast.AST, aliases: Optional[Dict[str, str]] = None
+) -> Set[str]:
     """Names that hold a sync Session inside ``fn``."""
     names = set(_SESSION_NAMES)
     if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        for arg in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs:
+        positional = fn.args.posonlyargs + fn.args.args
+        defaults: List[Optional[ast.expr]] = [None] * (
+            len(positional) - len(fn.args.defaults)
+        ) + list(fn.args.defaults)
+        pairs = list(zip(positional, defaults)) + list(
+            zip(fn.args.kwonlyargs, fn.args.kw_defaults)
+        )
+        for arg, default in pairs:
             ann = _annotation(arg)
             if "AsyncSession" in ann:
                 names.discard(arg.arg)
-            elif "Session" in ann:
+            elif "Session" in ann or _depends_on_sync_session(default, aliases or {}):
                 names.add(arg.arg)
     for node in ast.walk(fn):
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
@@ -367,15 +460,46 @@ def _offload_args(call: ast.Call) -> List[ast.expr]:
     return args[1:] if _tail(call.func) == "run_in_executor" else args
 
 
-def _touched_sessions(
-    call: ast.Call, fn: ast.AST, cls: Optional[ast.ClassDef]
+def _bound_values(fn: ast.AST) -> Dict[str, List[ast.expr]]:
+    """``name = <value>`` assignments inside ``fn``, by name."""
+    out: Dict[str, List[ast.expr]] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    out.setdefault(target.id, []).append(node.value)
+    return out
+
+
+def _refs_through_names(
+    nodes: List[ast.expr], names: Set[str], bound: Dict[str, List[ast.expr]]
 ) -> Set[str]:
-    names = _sync_session_names(fn)
+    """Session references in ``nodes``, following a name to the value bound
+    to it (``job = partial(work, db)`` then ``to_thread(job)``, GOO-783).
+    Awaited values were computed on the loop and are skipped, as in _refs."""
+    found: Set[str] = set()
+    seen: Set[str] = set()
+    todo = list(nodes)
+    while todo:
+        node = todo.pop()
+        found |= _refs(node, names)
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and sub.id in bound and sub.id not in seen:
+                seen.add(sub.id)
+                todo += [v for v in bound[sub.id] if not isinstance(v, ast.Await)]
+    return found
+
+
+def _touched_sessions(
+    call: ast.Call,
+    fn: ast.AST,
+    cls: Optional[ast.ClassDef],
+    aliases: Optional[Dict[str, str]] = None,
+) -> Set[str]:
+    names = _sync_session_names(fn, aliases)
     args = _offload_args(call)
     work = args + [kw.value for kw in call.keywords if kw.arg not in _HELPER_KWARGS]
-    touched: Set[str] = set()
-    for node in work:
-        touched |= _refs(node, names)
+    touched = _refs_through_names(work, names, _bound_values(fn))
     target = args[0] if args else None
     if isinstance(target, ast.Name):  # a nested def closing over the Session
         for node in ast.walk(fn):
@@ -404,15 +528,16 @@ def session_offload_violations(tree: ast.Module, path: str) -> Dict[str, str]:
     """``{exemption key: problem}`` for each offload that takes a Session
     without the guarded helper and a ``guard_session=`` naming that Session."""
     scopes = _scopes(tree)
+    aliases = _aliases(tree)
     found: Dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        name = _tail(node.func)
-        if name not in _RAW_OFFLOADS and name != _GUARDED_OFFLOAD:
+        name = _offload_kind(node, aliases)
+        if name is None:
             continue
         fn, cls = scopes.get(id(node), (tree, None))
-        touched = _touched_sessions(node, fn, cls)
+        touched = _touched_sessions(node, fn, cls, aliases)
         if not touched:
             continue
         args = _offload_args(node)
@@ -540,3 +665,115 @@ def test_a_new_unguarded_session_offload_fails_the_guard() -> None:
         "raw_local_session",
         "raw_self_method",
     ], found
+
+
+# ---- GOO-783: forms the name-only match missed ----
+#
+# Each planted module hands a sync Session to a thread in a form the GOO-766
+# scan did not see. ``planted`` must be the one violation; ``ok_*`` functions
+# in the same module must stay clean.
+
+_EVASIONS: Dict[str, str] = {
+    "aliased_to_thread": """
+from asyncio import to_thread as off_loop
+
+async def planted(db=None):
+    await off_loop(lambda: db.commit())
+""",
+    "aliased_module": """
+import asyncio as aio
+
+async def planted(db=None):
+    await aio.to_thread(db.commit)
+""",
+    "aliased_guarded_helper": """
+from src.core.thread_offload import to_thread_finish_on_cancel as guarded
+
+async def planted(db=None):
+    await guarded(lambda: db.commit())
+
+async def ok_guarded(db=None):
+    await guarded(lambda: db.commit(), guard_session=db)
+""",
+    "anyio_run_sync": """
+import anyio
+
+async def planted(db=None):
+    await anyio.to_thread.run_sync(lambda: db.commit())
+""",
+    "anyio_run_sync_from_import": """
+from anyio import to_thread
+
+async def planted(db=None):
+    await to_thread.run_sync(db.commit)
+""",
+    "anyio_run_sync_aliased": """
+from anyio.to_thread import run_sync as in_thread
+
+async def planted(db=None):
+    await in_thread(db.commit)
+
+def ok_from_thread(db=None):
+    # anyio.from_thread.run_sync runs on the loop, not in a worker thread.
+    from anyio import from_thread
+    from_thread.run_sync(lambda: db.commit())
+""",
+    "pool_submit": """
+from concurrent.futures import ThreadPoolExecutor
+
+pool = ThreadPoolExecutor(2)
+
+async def planted(db=None):
+    pool.submit(work, db)
+
+async def ok_submit_without_session():
+    pool.submit(render, 1)
+""",
+    "partial_bound_to_a_name": """
+import asyncio
+from functools import partial
+
+async def planted(db=None):
+    job = partial(work, db)
+    await asyncio.to_thread(job)
+""",
+    "partial_chained_through_names": """
+import asyncio
+from functools import partial as bind
+
+async def planted(db=None):
+    inner = bind(work, db)
+    outer = bind(inner, 1)
+    await asyncio.to_thread(outer)
+
+async def ok_awaited_result(db=None):
+    rows = await load(db)
+    await asyncio.to_thread(render, rows)
+""",
+    "unannotated_depends_get_db_sync": """
+import asyncio
+from fastapi import Depends
+from src.core.database import get_db_sync
+
+async def planted(conn=Depends(get_db_sync)):
+    await asyncio.to_thread(conn.commit)
+
+async def ok_async_dependency(conn=Depends(get_db)):
+    await asyncio.to_thread(render, await build(conn))
+""",
+    "unannotated_depends_aliased": """
+import asyncio
+from fastapi import Depends
+from src.core.database import get_db_sync as sync_db_dep
+
+async def planted(conn=Depends(sync_db_dep)):
+    await asyncio.to_thread(lambda: conn.commit())
+""",
+}
+
+
+@pytest.mark.parametrize("form", sorted(_EVASIONS))
+def test_an_evasive_session_offload_fails_the_guard(form: str) -> None:
+    found = session_offload_violations(ast.parse(_EVASIONS[form]), f"{form}.py")
+    functions = sorted({key.split(":")[1] for key in found})
+    assert functions == ["planted"], found
