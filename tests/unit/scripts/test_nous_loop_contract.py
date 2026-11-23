@@ -247,6 +247,7 @@ def test_local_ci_executes_configured_python_from_space_containing_root(
     command_dir = tmp_path / "commands"
     interpreter = fake_root / ".venv" / "bin" / "python"
     log_path = tmp_path / "python-invocations.log"
+    tool_log = tmp_path / "tool-invocations.log"
     (fake_root / "backend").mkdir(parents=True)
     (fake_root / "frontend").mkdir()
     interpreter.parent.mkdir(parents=True)
@@ -269,6 +270,11 @@ def test_local_ci_executes_configured_python_from_space_containing_root(
         fake_root / "node_modules" / ".bin" / "openapi-typescript",
         "#!/usr/bin/env bash\nexit 0\n",
     )
+    # The Trigger.dev gates need an installed tsc (GOO-764); pnpm runs it.
+    write_executable(
+        fake_root / "node_modules" / ".bin" / "tsc",
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
     write_executable(
         command_dir / "git",
         """#!/usr/bin/env bash
@@ -279,13 +285,18 @@ case "$1" in
 esac
 """,
     )
-    for command in ("ruff", "black", "isort", "mypy", "node"):
+    for command in ("ruff", "black", "isort", "mypy"):
         write_executable(command_dir / command, "#!/usr/bin/env bash\nexit 0\n")
+    write_executable(
+        command_dir / "node",
+        '#!/usr/bin/env bash\nprintf \'%s|node %s\\n\' "$PWD" "$*" >> "$CI_TOOL_LOG"\n',
+    )
     # `pnpm test:coverage` writes the summary the coverage ratchet reads.
     (fake_root / "frontend" / "coverage").mkdir()
     write_executable(
         command_dir / "pnpm",
         """#!/usr/bin/env bash
+printf '%s|pnpm %s\\n' "$PWD" "$*" >> "$CI_TOOL_LOG"
 if [ "$1" = "test:coverage" ]; then
   printf '{}\\n' > coverage/coverage-summary.json
 fi
@@ -315,6 +326,7 @@ exit 1
         env={
             **os.environ,
             "CI_PY_LOG": str(log_path),
+            "CI_TOOL_LOG": str(tool_log),
             "FAKE_ROOT": str(fake_root),
             "PATH": str(command_dir),
             "PYTHON": ".venv/bin/python",
@@ -341,3 +353,15 @@ exit 1
         "scripts/ci/check_tsconfig_exclusions.py --base origin/develop",
     ):
         assert any(argument in invocation for invocation in invocations), invocations
+    # The Trigger.dev gates ran, each the way the frontend-tests job runs it.
+    tools = tool_log.read_text(encoding="utf-8").splitlines()
+    assert f"{fake_root / 'frontend'}|pnpm exec tsc --noEmit -p ../tsconfig.json" in (
+        tools
+    ), tools
+    assert any(
+        line.startswith(f"{fake_root}|node ")
+        and "--test tests/trigger/*.test.mjs" in line
+        for line in tools
+    ), tools
+    assert "Trigger.dev type-check" in result.stdout
+    assert "Trigger.dev node tests" in result.stdout
