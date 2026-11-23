@@ -268,12 +268,18 @@ def _collect_postgres_tests(paths: set[Path]) -> set[str]:
     return {line.strip() for line in result.stdout.splitlines() if "::" in line}
 
 
-def _postgres_lane_step() -> dict:
-    return next(
-        step
-        for step in _integration_job()["steps"]
-        if step.get("name") == _POSTGRES_LANE
+def _step(job: dict, name: str, job_id: str) -> dict:
+    """The step called ``name``; a renamed step fails with its name."""
+    found = [step for step in job["steps"] if step.get("name") == name]
+    assert found, (
+        f"no step named {name!r} in the {job_id} job of {WORKFLOW_PATH.name}; "
+        "if it was renamed, update this test"
     )
+    return cast(dict, found[0])
+
+
+def _postgres_lane_step() -> dict:
+    return _step(_integration_job(), _POSTGRES_LANE, "integration-tests")
 
 
 def _postgres_lane_files(step: dict) -> set[str]:
@@ -346,8 +352,7 @@ def _marker_expression(run: str) -> str:
 
 def _unit_tests_step() -> dict:
     workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
-    job = workflow["jobs"]["unit-tests"]
-    return next(step for step in job["steps"] if step.get("name") == "Run unit tests")
+    return _step(workflow["jobs"]["unit-tests"], "Run unit tests", "unit-tests")
 
 
 def test_postgres_lane_selects_by_the_postgres_mark() -> None:
@@ -367,19 +372,22 @@ def _collect(paths: list[str], marker: str) -> set[str]:
     return {line.strip() for line in result.stdout.splitlines() if "::" in line}
 
 
-def test_every_integration_test_in_the_lane_runs_in_a_job() -> None:
+def test_every_test_in_the_lane_runs_in_a_job() -> None:
     """GOO-769: an integration-marked test in the lane's files that the lane
     did not select ran nowhere, because Unit Tests deselects integration.
     test_stream_fast_path.py and the messages order/since route tests (18
     tests) were such. Both selections come from the workflow, so narrowing
-    either one fails here."""
+    either one fails here. The check covers every test in the lane's files,
+    not only integration ones: an e2e- or slow-only test there is selected
+    by neither the lane nor Unit Tests, and no other job collects these
+    directories."""
     lane_step = _postgres_lane_step()
     lane = sorted(_postgres_lane_files(lane_step))
     lane_expr = _marker_expression(lane_step["run"])
     unit_expr = _marker_expression(_unit_tests_step()["run"])
-    orphans = _collect(lane, f"integration and not ({lane_expr}) and not ({unit_expr})")
+    orphans = _collect(lane, f"not ({lane_expr}) and not ({unit_expr})")
     assert not orphans, (
-        "Integration tests in the PostgreSQL lane's files that neither the lane "
+        "Tests in the PostgreSQL lane's files that neither the lane "
         f"nor Unit Tests selects, so no CI job runs them: {sorted(orphans)[:20]}"
     )
     # The scan really sees the tests it guards (not an empty collection).

@@ -121,10 +121,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "documents: Document processing tests")
 
     # External dependency markers (for testcontainers)
-    config.addinivalue_line(
-        "markers",
-        "requires_postgres: Tests requiring real PostgreSQL (via testcontainers)",
-    )
+    # requires_postgres is registered in pytest.ini (GOO-769).
     config.addinivalue_line(
         "markers", "requires_redis: Tests requiring real Redis (via testcontainers)"
     )
