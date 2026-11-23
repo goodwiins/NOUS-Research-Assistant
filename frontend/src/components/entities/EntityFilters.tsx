@@ -34,6 +34,7 @@ import { Slider } from '@/components/ui/slider';
 import { EntityType } from '@/types/entity';
 import { cn } from '@/lib/utils';
 import { formatEntityType, entityTypeBadgeClass } from './entityType';
+import type { TypeList } from './typeList';
 
 export type SortField = 'name' | 'confidence' | 'created_at' | 'type';
 export type SortOrder = 'asc' | 'desc';
@@ -51,23 +52,10 @@ interface EntityFiltersProps {
   onClearFilters: () => void;
   totalCount: number;
   filteredCount: number;
-  availableTypes?: string[];
+  /** The graph's entity types; never replaced by a built-in list (GOO-756). */
+  types: TypeList;
   typeCounts?: Record<string, number>; // Type counts from analytics
 }
-
-const DEFAULT_ENTITY_TYPES: EntityType[] = [
-  'PERSON',
-  'ORGANIZATION',
-  'LOCATION',
-  'CONCEPT',
-  'EVENT',
-  'PRODUCT',
-  'DATE',
-  'TECHNOLOGY',
-  'DOCUMENT',
-  'TOPIC',
-  'OTHER',
-];
 
 export const EntityFilters: React.FC<EntityFiltersProps> = ({
   searchQuery,
@@ -82,7 +70,7 @@ export const EntityFilters: React.FC<EntityFiltersProps> = ({
   onClearFilters,
   totalCount,
   filteredCount,
-  availableTypes,
+  types,
   typeCounts,
 }) => {
   const [confidenceOpen, setConfidenceOpen] = useState(false);
@@ -93,8 +81,10 @@ export const EntityFilters: React.FC<EntityFiltersProps> = ({
     { value: '__null__', label: 'Unknown type', isSpecial: true },
   ];
 
-  // Use available types from props or fall back to defaults
-  const entityTypes = (availableTypes || DEFAULT_ENTITY_TYPES) as EntityType[];
+  // Only the graph's own types; while they load or after they fail, the
+  // type filter is disabled and says why.
+  const typesReady = types.status === 'loaded';
+  const entityTypes = (typesReady ? types.types : []) as EntityType[];
 
   // Combine special filters with regular types
   const allFilterOptions = [...SPECIAL_FILTERS, ...entityTypes];
@@ -175,6 +165,7 @@ export const EntityFilters: React.FC<EntityFiltersProps> = ({
           <DropdownMenuTrigger asChild>
             <Button
               variant="outline"
+              disabled={!typesReady}
               className={cn(
                 'w-48 justify-between text-sm border-border bg-background h-10',
                 selectedTypes.length > 0 && 'border-primary/40'
@@ -186,9 +177,13 @@ export const EntityFilters: React.FC<EntityFiltersProps> = ({
                   className="h-3.5 w-3.5 text-muted-foreground"
                 />
                 <span>
-                  {selectedTypes.length === 0
-                    ? 'All types'
-                    : `${selectedTypes.length} types`}
+                  {types.status === 'loading'
+                    ? 'Loading types…'
+                    : types.status === 'failed'
+                      ? 'Types unavailable'
+                      : selectedTypes.length === 0
+                        ? 'All types'
+                        : `${selectedTypes.length} types`}
                 </span>
               </div>
               <ChevronDown

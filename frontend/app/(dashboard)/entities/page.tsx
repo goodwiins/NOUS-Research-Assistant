@@ -48,6 +48,7 @@ import { EntityList } from '@/components/entities/EntityList';
 import { EntityForm } from '@/components/entities/EntityForm';
 import { EntityDetail } from '@/components/entities/EntityDetail';
 import { EntityGraphPanel } from '@/components/entities/EntityGraphPanel';
+import { type TypeList, typeListFrom } from '@/components/entities/typeList';
 import {
   EntityFilters,
   SortField,
@@ -72,6 +73,7 @@ import { EntityErrorBoundary } from '@/components/entities/EntityErrorBoundary';
 import { KeyboardShortcutsDialog } from '@/components/entities/KeyboardShortcutsDialog';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useEntityPermissions } from '@/hooks/useEntityPermissions';
+import { useAuth } from '@/hooks/useAuth';
 import { Entity, EntityType, GraphEdge } from '@/types/entity';
 import {
   entityService,
@@ -112,6 +114,10 @@ function EntityManagementContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { canCreate, canEdit, canDelete } = useEntityPermissions();
+  // There is no global 401 handler: an expired session on this page signs
+  // the user out through handleAuthError (GOO-760). It ignores anything
+  // that is not a 401 from our own backend.
+  const { handleAuthError } = useAuth();
 
   // Core state
   const [entities, setEntities] = useState<Entity[]>([]);
@@ -149,12 +155,12 @@ function EntityManagementContent() {
   const relationshipsRequestToken = useRef(0);
 
   // Dynamic types from API
-  const [availableEntityTypes, setAvailableEntityTypes] = useState<string[]>(
-    []
-  );
-  const [availableRelationshipTypes, setAvailableRelationshipTypes] = useState<
-    string[]
-  >([]);
+  const [entityTypeList, setEntityTypeList] = useState<TypeList>({
+    status: 'loading',
+  });
+  const [relationshipTypeList, setRelationshipTypeList] = useState<TypeList>({
+    status: 'loading',
+  });
   const [typeCounts, setTypeCounts] = useState<Record<string, number>>({});
 
   useEffect(() => {
@@ -192,26 +198,43 @@ function EntityManagementContent() {
   // Fetch available types and analytics on mount
   useEffect(() => {
     const fetchTypesAndAnalytics = async () => {
-      try {
-        const [entityTypes, relationshipTypes, analytics] = await Promise.all([
+      // Settled separately (GOO-760): one failed list must not drop the others.
+      const [entityTypes, relationshipTypes, analytics] =
+        await Promise.allSettled([
           entityService.getEntityTypes(),
           entityService.getRelationshipTypes(),
           entityService.getAnalytics(),
         ]);
-        setAvailableEntityTypes(entityTypes);
-        setAvailableRelationshipTypes(relationshipTypes);
-        setTypeCounts(analytics.entity_type_counts || {});
-      } catch (error) {
-        logEntityPageError('Error fetching types and analytics', error);
-        if (isServiceUnavailableError(error)) {
-          setServiceUnavailable(true);
-        } else {
-          toast.error('Failed to load entity types and analytics');
-        }
+      setEntityTypeList(typeListFrom(entityTypes));
+      setRelationshipTypeList(typeListFrom(relationshipTypes));
+      if (analytics.status === 'fulfilled') {
+        setTypeCounts(analytics.value.entity_type_counts || {});
+      }
+
+      const failed = (
+        [
+          ['entity types', entityTypes],
+          ['relationship types', relationshipTypes],
+          ['entity counts', analytics],
+        ] as const
+      ).flatMap(([label, result]) =>
+        result.status === 'rejected' ? [{ label, error: result.reason }] : []
+      );
+      if (failed.length === 0) return;
+      for (const { label, error } of failed) {
+        logEntityPageError(`Error fetching ${label}`, error);
+        handleAuthError(error);
+      }
+      if (failed.some(({ error }) => isServiceUnavailableError(error))) {
+        setServiceUnavailable(true);
+      } else {
+        toast.error(
+          `Couldn't load ${failed.map(({ label }) => label).join(', ')}`
+        );
       }
     };
     fetchTypesAndAnalytics();
-  }, []);
+  }, [handleAuthError]);
 
   // Fetch entities with pagination
   const fetchEntities = useCallback(async () => {
@@ -290,6 +313,7 @@ function EntityManagementContent() {
     } catch (error) {
       if (requestToken !== entitiesRequestToken.current) return;
       logEntityPageError('Error fetching entities', error);
+      handleAuthError(error);
       if (isServiceUnavailableError(error)) {
         setServiceUnavailable(true);
       } else {
@@ -303,6 +327,7 @@ function EntityManagementContent() {
   }, [
     confidenceRange,
     currentPage,
+    handleAuthError,
     pageSize,
     searchQuery,
     selectedTypes,
@@ -342,6 +367,7 @@ function EntityManagementContent() {
     } catch (error) {
       if (requestToken !== relationshipsRequestToken.current) return;
       logEntityPageError('Error fetching relationships', error);
+      handleAuthError(error);
       if (isServiceUnavailableError(error)) {
         setServiceUnavailable(true);
       }
@@ -354,7 +380,7 @@ function EntityManagementContent() {
         setRelationshipsLoading(false);
       }
     }
-  }, []);
+  }, [handleAuthError]);
 
   // Initial load
   useEffect(() => {
@@ -524,6 +550,7 @@ function EntityManagementContent() {
       toast.success('Entity updated successfully');
     } catch (error) {
       logEntityPageError('Error updating entity', error);
+      handleAuthError(error);
       toast.error('Failed to update entity');
     }
   };
@@ -543,6 +570,7 @@ function EntityManagementContent() {
       toast.success('Entity deleted successfully');
     } catch (error) {
       logEntityPageError('Error deleting entity', error);
+      handleAuthError(error);
       toast.error('Failed to delete entity');
     }
   };
@@ -584,6 +612,7 @@ function EntityManagementContent() {
       }
     } catch (error) {
       logEntityPageError('Error creating relationship', error);
+      handleAuthError(error);
       toast.error('Failed to create relationship');
     }
   };
@@ -801,11 +830,7 @@ function EntityManagementContent() {
                 onClearFilters={handleClearFilters}
                 totalCount={totalEntities}
                 filteredCount={filteredEntities.length}
-                availableTypes={
-                  availableEntityTypes.length > 0
-                    ? availableEntityTypes
-                    : undefined
-                }
+                types={entityTypeList}
                 typeCounts={typeCounts}
               />
             </CardContent>
@@ -1154,6 +1179,7 @@ function EntityManagementContent() {
                       fetchEntities();
                     } catch (error) {
                       logEntityPageError('Error creating entity', error);
+                      handleAuthError(error);
                       toast.error('Failed to create entity');
                     }
                   }
@@ -1209,6 +1235,7 @@ function EntityManagementContent() {
               <RelationshipForm
                 sourceEntityId={sourceEntityId || undefined}
                 onSubmit={handleCreateRelationship}
+                types={relationshipTypeList}
                 onCancel={() => {
                   setRelationshipDialogOpen(false);
                   setSourceEntityId(null);
