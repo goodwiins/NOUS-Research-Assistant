@@ -703,13 +703,29 @@ describe('tuning: robustness', () => {
     expect(performance.now() - start).toBeLessThan(50);
   });
 
-  it('scrubs a 100k-key object quickly', () => {
+  // GOO-773: this used to assert a 50 ms wall-clock bound, which flaked at
+  // 82 ms under coverage. What keeps a 100k-key object cheap is the key cap,
+  // so count the values scrubData reads instead of timing it: the count is
+  // exact on any machine, and an uncapped scan reads all 100k.
+  it(`reads only ${MAX_KEYS} values of a 100k-key object`, () => {
+    let reads = 0;
     const wide: Record<string, string> = {};
-    for (let i = 0; i < 100_000; i += 1) wide[`title${i}`] = 'x';
-    const start = performance.now();
-    scrubData(wide);
-    expect(performance.now() - start).toBeLessThan(50);
-  });
+    for (let i = 0; i < 100_000; i += 1) {
+      Object.defineProperty(wide, `title${i}`, {
+        enumerable: true,
+        get: () => {
+          reads += 1;
+          return 'x';
+        },
+      });
+    }
+
+    const out = scrubData(wide);
+
+    expect(reads).toBe(MAX_KEYS);
+    expect(Object.keys(out)).toHaveLength(MAX_KEYS + 1);
+    expect(out[TRUNCATED_KEYS]).toBe(100_000 - MAX_KEYS);
+  }, 30_000); // building 100k getters, not the scrub, takes the time
 });
 
 describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-R7)', () => {
