@@ -7,7 +7,7 @@ Create Date: 2026-11-23 00:00:00
 ``purge_soft_deleted_threads`` hard-deletes a chat's ``chat_messages`` and
 then its ``threads`` row with bulk DELETEs, and the CASCADE rules carry the
 delete on into the tables listed in
-``tests/unit/models/test_thread_purge_fk_contract.py``. For every deleted
+``tests/unit/architecture/test_thread_purge_fk_contract.py``. For every deleted
 row PostgreSQL checks each foreign key that points at it with
 ``WHERE <fk column> = $1`` on the referencing table. Without an index whose
 leading column is that FK, each check is a sequential scan, so a purge
@@ -46,6 +46,8 @@ Offline (``--sql``): there is no database to ask about INVALID indexes, so
 the check is skipped and only the SET/CREATE statements are rendered.
 """
 
+import logging
+
 import alembic.op as op
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -74,6 +76,8 @@ FK_COLUMNS = (
     ("native_artifact_intents", "thread_id"),
     ("threads", "selected_message_id"),
 )
+
+logger = logging.getLogger(__name__)
 
 # Per statement. Read at call time, so the PostgreSQL test can shorten it.
 _LOCK_TIMEOUT = "30s"
@@ -106,9 +110,11 @@ def _sqlstate(exc: DBAPIError) -> str | None:
 
 def _build(table: str, column: str, offline: bool) -> None:
     name = _name(table, column)
-    if not offline and _is_invalid(name):
-        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+    # The repair DROP waits on the same locks as the build, so both sit under
+    # the same lock_timeout and the same friendly error.
     try:
+        if not offline and _is_invalid(name):
+            op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
         op.execute(
             f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {table} ({column})"
         )
@@ -116,23 +122,48 @@ def _build(table: str, column: str, offline: bool) -> None:
         if _sqlstate(exc) != _LOCK_NOT_AVAILABLE:
             raise
         raise RuntimeError(
-            f"{name}: gave up after lock_timeout {_LOCK_TIMEOUT} waiting for "
-            f"other transactions on {table}. It may be left INVALID. Find the "
-            "blocking sessions (pg_stat_activity, often 'idle in transaction'), "
-            "end them, and re-run `alembic upgrade head`: it rebuilds INVALID "
-            "indexes."
+            f"index {name} on {table}: gave up after lock_timeout "
+            f"{_LOCK_TIMEOUT} waiting for other transactions on {table}. "
+            f"{name} may be left INVALID. Find the blocking sessions "
+            "(pg_stat_activity, often 'idle in transaction'), end them, and "
+            "re-run `alembic upgrade head`: it rebuilds INVALID indexes."
         ) from exc
+
+
+def _reset_after_failure() -> None:
+    """Best-effort RESET; after a terminated backend the connection is dead
+    and this fails too, which must not replace the error being raised."""
+    try:
+        op.execute("RESET lock_timeout")
+    except Exception:
+        logger.warning(
+            "RESET lock_timeout failed after a failed upgrade", exc_info=True
+        )
 
 
 def upgrade() -> None:
     offline = bool(op.get_context().as_sql)
-    with op.get_context().autocommit_block():
-        op.execute(f"SET lock_timeout = '{_LOCK_TIMEOUT}'")
-        try:
-            for table, column in FK_COLUMNS:
-                _build(table, column, offline)
-        finally:
+    failure: BaseException | None = None
+    try:
+        with op.get_context().autocommit_block():
+            op.execute(f"SET lock_timeout = '{_LOCK_TIMEOUT}'")
+            try:
+                for table, column in FK_COLUMNS:
+                    _build(table, column, offline)
+            except BaseException as exc:
+                failure = exc
+                _reset_after_failure()
+                raise
             op.execute("RESET lock_timeout")
+    except BaseException as exc:
+        # On a dead connection alembic's autocommit_block exit raises its own
+        # PendingRollbackError over ours; report the build's error instead.
+        if failure is not None and exc is not failure:
+            logger.warning(
+                "autocommit_block exit failed after a failed upgrade", exc_info=True
+            )
+            raise failure from None
+        raise
 
 
 def downgrade() -> None:

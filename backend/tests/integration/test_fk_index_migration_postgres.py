@@ -9,7 +9,10 @@ Requires ORCHESTRATION_TEST_DATABASE_URL (skips otherwise: NOT RUN).
 Mutation checks: skipping the INVALID-index drop fails
 test_upgrade_repairs_an_invalid_index; removing ``SET lock_timeout`` makes
 test_a_blocked_build_fails_fast_and_a_rerun_repairs_it hang until its
-asyncio timeout instead of failing fast.
+asyncio timeout instead of failing fast; moving the repair DROP out of the
+friendly-error try fails test_a_blocked_repair_drop_gets_the_same_clear_error;
+dropping the re-raise of the build's error fails
+test_a_terminated_build_keeps_its_own_error (PendingRollbackError instead).
 """
 
 from __future__ import annotations
@@ -177,7 +180,9 @@ async def test_a_blocked_build_fails_fast_and_a_rerun_repairs_it(
         await blocker.execute(
             text("INSERT INTO agent_runs (id) VALUES (gen_random_uuid())")
         )
-        with pytest.raises(RuntimeError, match=r"ix_agent_runs_thread_id: gave up"):
+        with pytest.raises(
+            RuntimeError, match=r"index ix_agent_runs_thread_id on agent_runs: gave up"
+        ):
             await asyncio.wait_for(
                 _run(engine, "upgrade", _LOCK_TIMEOUT="200ms"), timeout=30
             )
@@ -188,6 +193,70 @@ async def test_a_blocked_build_fails_fast_and_a_rerun_repairs_it(
 
     await _run(engine, "upgrade")
     assert await _indexes(engine) == _expected()
+
+
+async def test_a_blocked_repair_drop_gets_the_same_clear_error(
+    engine: AsyncEngine,
+) -> None:
+    await _run(engine, "upgrade")
+    async with engine.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE pg_index SET indisvalid = false "
+                "WHERE indexrelid = to_regclass('ix_agent_runs_thread_id')"
+            )
+        )
+    async with engine.connect() as blocker:
+        await blocker.execute(
+            text("INSERT INTO agent_runs (id) VALUES (gen_random_uuid())")
+        )
+        # The DROP of the INVALID index waits on the same writer.
+        with pytest.raises(
+            RuntimeError, match=r"index ix_agent_runs_thread_id on agent_runs"
+        ):
+            await asyncio.wait_for(
+                _run(engine, "upgrade", _LOCK_TIMEOUT="200ms"), timeout=30
+            )
+        await blocker.rollback()
+
+    await _run(engine, "upgrade")
+    assert await _indexes(engine) == _expected()
+
+
+async def test_a_terminated_build_keeps_its_own_error(engine: AsyncEngine) -> None:
+    # pg_terminate_backend kills the migration's connection mid-build; the
+    # RESET that follows then fails too, and must not hide the real error.
+    async def _terminate_the_build() -> None:
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            async with engine.connect() as admin:
+                killed = await admin.scalar(
+                    text(
+                        "SELECT count(pg_terminate_backend(pid)) "
+                        "FROM pg_stat_activity "
+                        "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                )
+            if killed:
+                return
+
+    async with engine.connect() as blocker:
+        await blocker.execute(
+            text("INSERT INTO agent_runs (id) VALUES (gen_random_uuid())")
+        )
+        killer = asyncio.create_task(_terminate_the_build())
+        with pytest.raises(Exception) as raised:
+            await asyncio.wait_for(
+                _run(engine, "upgrade", _LOCK_TIMEOUT="20s"), timeout=30
+            )
+        await killer
+        await blocker.rollback()
+
+    # The build's own error, not alembic's PendingRollbackError on exit.
+    assert type(raised.value).__name__ == "DBAPIError"
+    assert "CREATE INDEX CONCURRENTLY" in str(raised.value)
+    assert "connection was closed" in str(raised.value)
 
 
 async def test_downgrade_drops_every_index(engine: AsyncEngine) -> None:
