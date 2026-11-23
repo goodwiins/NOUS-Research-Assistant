@@ -265,16 +265,20 @@ async def _invalidate_releases(
     event_id: UUID | None,
     kind: str,
     document_id: UUID | None = None,
+    edges: Sequence[Any] | None = None,
 ) -> None:
     """GOO-307: stale the releases built on ``changed``, in this transaction.
     With ``document_id``, that document's outdated source revisions count as
     changed too: span links hang off the source itself, so a changed text
-    stales their releases even when no accepted tip was pinned to it."""
+    stales their releases even when no accepted tip was pinned to it.
+    ``edges``: the context's ``release_edges`` (GOO-721), or None."""
     from src.services.research import draft_release_service  # import cycle
 
     if document_id is not None:
+        if not await draft_release_service._live_release_ids(db, collection_id):
+            return  # nothing to stale; skip building the graph for sources
         changed = changed | await draft_release_service.source_nodes(
-            db, collection_id, document_id
+            db, collection_id, document_id, edges
         )
     await draft_release_service.invalidate_dependents(
         db,
@@ -287,6 +291,7 @@ async def _invalidate_releases(
             "event_id": None if event_id is None else str(event_id),
             "kind": kind,
         },
+        edges=edges,
     )
 
 
@@ -464,6 +469,7 @@ async def create_version(
             actor_role="editor",
             event_id=event_id,
             kind="extraction.staled",
+            edges=context.release_edges,
         )
     await db.commit()
     await db.refresh(version)
@@ -545,10 +551,12 @@ async def _stale_changed_source(
     document: Any,
     actor_id: UUID,
     actor_role: str,
+    edges: Sequence[Any] | None = None,
 ) -> list[str]:
     """Name this document's accepted tips pinned to an older source in one
     ``extraction.staled`` v2 event (``source_changed``). Rows are never
-    updated; tips staled before are skipped. The caller holds the stream."""
+    updated; tips staled before are skipped. The caller holds the stream.
+    ``edges``: the context's ``release_edges`` (GOO-721), or None."""
     pins = document_pins(document)
     versions = [cast(UUID, v.id) for v in await _versions(db, matrix.id)]
     already = await _staled_ids(db, stream)
@@ -591,6 +599,7 @@ async def _stale_changed_source(
         event_id=event_id,
         kind="source_changed",
         document_id=document.id,
+        edges=edges,
     )
     return staled
 
@@ -944,6 +953,7 @@ async def assert_anchor_acceptable(
             document=document,
             actor_id=actor_id,
             actor_role="adjudicator",
+            edges=context.release_edges,
         )
         return SourceChanged(staled)
     if data.missingness is not None:
@@ -1132,6 +1142,7 @@ async def accept_value(
             actor_role="adjudicator",
             event_id=event_id,
             kind="extraction.accepted",
+            edges=context.release_edges,
         )
     await db.commit()
     await db.refresh(row)

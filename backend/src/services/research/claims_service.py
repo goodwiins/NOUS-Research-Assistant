@@ -225,6 +225,7 @@ async def _invalidate(
         actor_id=actor_id,
         actor_role=actor_role,
         cause={"family": AGGREGATE_TYPE, "event_id": str(event_id), "kind": kind},
+        edges=context.release_edges,
     )
 
 
@@ -1304,7 +1305,10 @@ async def export_package(
             select(Document.id, Document.title).where(Document.id.in_(document_ids))
         )
     ).all():
-        source_hash, text_hash = pins[document_id]
+        pin = pins.get(document_id)
+        if pin is None:  # two reads; one the pins read missed is skipped
+            continue
+        source_hash, text_hash = pin
         documents.append(
             {
                 "id": str(document_id),
