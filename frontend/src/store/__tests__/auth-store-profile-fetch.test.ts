@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APIErrorClass } from '@/types/api';
 
 type AuthChangeHandler = (event: string, session: unknown) => void;
@@ -176,6 +176,121 @@ describe('useAuthStore profile fetching', () => {
 
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
     expect(useAuthStore.getState().user).toBeNull();
+  });
+});
+
+describe('useAuthStore first-load profile failures (FL2E-2)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const UNAVAILABLE = (): APIErrorClass =>
+    new APIErrorClass({
+      message: 'Service unavailable',
+      status_code: 503,
+      type: 'server_error',
+    });
+
+  // A reload of the same account: its owner stamp is already persisted, so
+  // observeIdentity keeps the caches and only the /auth/me outcome decides.
+  async function stampOwner(userId: string): Promise<void> {
+    const { writeClientOwner } = await import('@/lib/client-owner');
+    writeClientOwner(userId);
+  }
+
+  async function clearAuthMock(): Promise<ReturnType<typeof vi.fn>> {
+    const { api } = await import('@/services/api-client');
+    return api.clearAuth as unknown as ReturnType<typeof vi.fn>;
+  }
+
+  it('keeps the verified identity and retries a transient /auth/me failure', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    await stampOwner('user-1');
+    const clearAuth = await clearAuthMock();
+    vi.useFakeTimers();
+
+    apiGet.mockRejectedValueOnce(UNAVAILABLE());
+    await useAuthStore.getState().fetchProfile();
+
+    // Still booting: the shell must not settle into signed-out and redirect.
+    let state = useAuthStore.getState();
+    expect(state.isLoading).toBe(true);
+    expect(state.error).toBe('Service unavailable');
+    expect(clearAuth).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    state = useAuthStore.getState();
+    expect(apiGet).toHaveBeenCalledTimes(2);
+    expect(state.isAuthenticated).toBe(true);
+    expect(state.user).toEqual(PROFILE.user);
+    expect(state.isLoading).toBe(false);
+    expect(clearAuth).not.toHaveBeenCalled();
+  });
+
+  it('settles as profile-unavailable, without a sign-out, when retries run out', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    await stampOwner('user-1');
+    const clearAuth = await clearAuthMock();
+    const { useChatStore } = await import('@/store/chat-store');
+    const reset = vi.spyOn(useChatStore.getState(), 'reset');
+    vi.useFakeTimers();
+
+    apiGet.mockRejectedValue(new Error('Network request failed'));
+    await useAuthStore.getState().fetchProfile();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const state = useAuthStore.getState();
+    expect(apiGet).toHaveBeenCalledTimes(3);
+    expect(state.isLoading).toBe(false);
+    expect(state.isAuthenticated).toBe(false);
+    expect(state.error).toBe('Network request failed');
+    expect(clearAuth).not.toHaveBeenCalled();
+    expect(reset).not.toHaveBeenCalled();
+
+    // A later fetch (TOKEN_REFRESHED, a manual retry) can still recover.
+    apiGet.mockResolvedValueOnce(PROFILE);
+    await useAuthStore.getState().fetchProfile();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
+  it('still clears on a first-load 401', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    const clearAuth = await clearAuthMock();
+
+    apiGet.mockRejectedValueOnce(
+      new APIErrorClass({
+        message: 'Invalid token',
+        status_code: 401,
+        type: 'auth_error',
+      })
+    );
+    await useAuthStore.getState().fetchProfile();
+
+    const state = useAuthStore.getState();
+    expect(state.isAuthenticated).toBe(false);
+    expect(state.isLoading).toBe(false);
+    expect(clearAuth).toHaveBeenCalled();
+    expect(apiGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a pending retry when the user signs out meanwhile', async () => {
+    const { useAuthStore, apiGet, emit } = await loadStore();
+    vi.useFakeTimers();
+
+    apiGet.mockRejectedValueOnce(UNAVAILABLE());
+    await useAuthStore.getState().fetchProfile();
+    emit('SIGNED_OUT', null);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(apiGet).toHaveBeenCalledTimes(1);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(useAuthStore.getState().isLoading).toBe(false);
   });
 });
 

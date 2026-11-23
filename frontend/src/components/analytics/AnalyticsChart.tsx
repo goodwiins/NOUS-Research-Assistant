@@ -74,6 +74,16 @@ interface AnalyticsChartProps {
     onSettings?: () => void;
   };
   className?: string;
+  /**
+   * Show the "versus the prior period" badge. Turn it off when the series has
+   * no prior period in it (a fixed window), or the percentage is made up.
+   */
+  showTrend?: boolean;
+  /**
+   * Show the 7d/30d/90d/All selector. Turn it off when the source already
+   * returns a fixed window: the chart then plots `data` exactly as given.
+   */
+  showTimeRange?: boolean;
 }
 
 const CHART_COLORS = [
@@ -111,13 +121,15 @@ export function AnalyticsChart({
   format,
   actions,
   className,
+  showTrend = true,
+  showTimeRange = true,
 }: AnalyticsChartProps) {
   const [chartType, setChartType] = useState<ChartType>(type);
   const [timeRange, setTimeRange] = useState('7d');
 
   // Process data based on time range
   const processedData = useMemo(() => {
-    if (timeRange === 'all') return data;
+    if (!showTimeRange || timeRange === 'all') return data;
 
     const now = new Date();
     const daysMap: Record<string, number> = {
@@ -133,11 +145,11 @@ export function AnalyticsChart({
       if (!item.date) return true;
       return new Date(item.date) >= cutoffDate;
     });
-  }, [data, timeRange]);
+  }, [data, timeRange, showTimeRange]);
 
   // Calculate trend
   const trend = useMemo(() => {
-    if (processedData.length < 2) return null;
+    if (!showTrend || processedData.length < 2) return null;
 
     const recent = processedData.slice(-7);
     const previous = processedData.slice(-14, -7);
@@ -155,7 +167,7 @@ export function AnalyticsChart({
       value: Math.abs(change),
       direction: change > 0 ? 'up' : 'down',
     };
-  }, [processedData]);
+  }, [processedData, showTrend]);
 
   const yAxisTickFormatter = format?.yAxis
     ? (value: number | string | undefined) => {
@@ -508,20 +520,27 @@ export function AnalyticsChart({
               )}
             </div>
 
-            <Separator orientation="vertical" className="h-6" />
+            {showTimeRange && (
+              <>
+                <Separator orientation="vertical" className="h-6" />
 
-            {/* Time Range Selector */}
-            <Select value={timeRange} onValueChange={setTimeRange}>
-              <SelectTrigger className="h-7 w-[80px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="7d">7d</SelectItem>
-                <SelectItem value="30d">30d</SelectItem>
-                <SelectItem value="90d">90d</SelectItem>
-                <SelectItem value="all">All</SelectItem>
-              </SelectContent>
-            </Select>
+                {/* Time Range Selector */}
+                <Select value={timeRange} onValueChange={setTimeRange}>
+                  <SelectTrigger
+                    className="h-7 w-[80px]"
+                    aria-label="Time range"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="7d">7d</SelectItem>
+                    <SelectItem value="30d">30d</SelectItem>
+                    <SelectItem value="90d">90d</SelectItem>
+                    <SelectItem value="all">All</SelectItem>
+                  </SelectContent>
+                </Select>
+              </>
+            )}
 
             {/* Actions */}
             {actions && (

@@ -868,6 +868,7 @@ jobs:
           pnpm exec playwright test --config=playwright.replay-router.config.ts
           pnpm exec playwright test --config=playwright.chat-mobile-controls.config.ts --project=chromium-375
           pnpm exec playwright test --config=playwright.artifact-isolation.config.ts
+          pnpm exec playwright test --config=playwright.artifact-sharing.config.ts
       - name: Upload frontend browser failures
         if: failure() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

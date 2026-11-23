@@ -1,7 +1,12 @@
-import { type NextRequest } from 'next/server';
+import { type NextRequest, type NextResponse } from 'next/server';
 import { updateSession } from '@/lib/supabase/middleware';
 import { AUTH_RETURN_TO_HEADER } from '@/utils/authRedirect';
-import { buildCsp } from '@/lib/csp';
+import {
+  buildCsp,
+  connectSrcReportOnly,
+  processCspEnv,
+  reportingEndpoints,
+} from '@/lib/csp';
 
 /**
  * Per-request CSP with a script nonce (audit #4 completion).
@@ -30,7 +35,7 @@ import { buildCsp } from '@/lib/csp';
 // existing guarded layout) — there is no middleware backstop here. See the
 // comment on app/(dashboard)/layout.tsx for the full history of why an
 // earlier comment implied otherwise.
-export async function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest): Promise<NextResponse> {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const csp = buildCsp(nonce);
 
@@ -52,6 +57,17 @@ export async function proxy(request: NextRequest) {
   // And the browser needs the policy on the response.
   response.headers.set('Content-Security-Policy', csp);
 
+  // GOO-729: the explicit connect-src list, observed before it is enforced.
+  // Built from public config plus this request's host, which is how the
+  // browser derives the API origin when NEXT_PUBLIC_API_URL is unset.
+  // Reports go to the same-origin /api/csp-report route, which scrubs them.
+  const requestUrl = new URL(request.url);
+  response.headers.set(
+    'Content-Security-Policy-Report-Only',
+    connectSrcReportOnly(processCspEnv(), requestUrl)
+  );
+  response.headers.set('Reporting-Endpoints', reportingEndpoints(requestUrl));
+
   return response;
 }
 
@@ -63,7 +79,9 @@ export const config = {
      * - _next/image (image optimization)
      * - favicon.ico (favicon)
      * - public assets
+     * - api/csp-report: anonymous browser reports; no session refresh, no
+     *   auth redirect, no CSP headers on the 204 (GOO-729)
      */
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    '/((?!_next/static|_next/image|favicon.ico|api/csp-report/?$|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 };

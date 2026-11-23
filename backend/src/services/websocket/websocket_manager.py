@@ -221,6 +221,56 @@ class ConnectionInfo:
 # and then subscribe to an admin channel at runtime.
 _ADMIN_ONLY_CHANNELS = {"system_status", "admin_alerts"}
 
+# GOO-726: the per-resource channels the thread events publish to
+# (``thread_event_service``): ``thread:<id>``, ``conversation:<id>`` and
+# ``user:<id>:threads``. Delivery only checks ``target_organization``, so a
+# subscribe to one of these must pass the same read rule as the HTTP reads.
+_RESOURCE_CHANNEL_KINDS = frozenset({"thread", "conversation", "user"})
+
+
+def _is_resource_channel(channel: str) -> bool:
+    kind, sep, _ = channel.partition(":")
+    return bool(sep) and kind in _RESOURCE_CHANNEL_KINDS
+
+
+async def _may_subscribe_to_resource_channel(user_id: str, channel: str) -> bool:
+    """Whether ``user_id`` may read the resource behind ``channel``.
+
+    Reuses the thread read endpoints' rule (``workspace_access``: a live
+    thread/conversation in a live workspace the caller owns, is a member of,
+    or that is public). ``user:<id>:threads`` is the caller's own only. Any
+    malformed name, missing row or error is a refusal (fail closed); the
+    caller sends one generic denial for all of them, so the answer never
+    says whether the resource exists.
+    """
+    kind, _, rest = channel.partition(":")
+    try:
+        caller = uuid.UUID(str(user_id))
+        if kind == "user":
+            owner, sep, suffix = rest.partition(":")
+            return sep == ":" and suffix == "threads" and uuid.UUID(owner) == caller
+        resource = uuid.UUID(rest)
+    except (ValueError, TypeError):
+        return False
+
+    from src.services.threads import workspace_access
+
+    try:
+        async with get_async_session() as db:
+            if kind == "thread":
+                thread = await workspace_access.get_thread_lean(db, resource, caller)
+                return thread is not None
+            if kind == "conversation":
+                conversation = await workspace_access.get_conversation(
+                    db, resource, caller, load_threads=False
+                )
+                return conversation is not None
+    except Exception as e:
+        logger.error(
+            "WebSocket %s channel access check failed: %s", kind, type(e).__name__
+        )
+    return False
+
 
 async def _resolve_current_db_role(user_id: str) -> str:
     """Re-resolve *user_id*'s role from the DB at admin-channel subscribe time.
@@ -890,6 +940,36 @@ class EnhancedConnectionManager(BaseService):
                     # connect-time snapshot: a connection can outlive a
                     # demotion for the life of a long-lived CLI token (R4-M8).
                     conn = self.active_connections.get(connection_id)
+                    if _is_resource_channel(channel):
+                        # GOO-726: thread/conversation/user channels need
+                        # read access to that resource, not just the org.
+                        if (
+                            conn is not None
+                            and await _may_subscribe_to_resource_channel(
+                                conn.user_id, channel
+                            )
+                        ):
+                            await self.subscribe_to_channel(connection_id, channel)
+                        else:
+                            logger.warning(
+                                "Denied mid-session subscribe to a %s channel "
+                                "for connection %s",
+                                channel.partition(":")[0],
+                                connection_id,
+                            )
+                            await self.send_message_to_connection(
+                                connection_id,
+                                WebSocketMessage(
+                                    type=MessageType.ERROR,
+                                    data={
+                                        "error": "subscription_denied",
+                                        "channel": channel,
+                                        "reason": "not_authorized",
+                                    },
+                                    timestamp=datetime.now(dt_timezone.utc),
+                                ),
+                            )
+                        return
                     if channel in _ADMIN_ONLY_CHANNELS:
                         role = (
                             await _resolve_current_db_role(conn.user_id)

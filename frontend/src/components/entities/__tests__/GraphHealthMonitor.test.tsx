@@ -57,4 +57,52 @@ describe('GraphHealthMonitor', () => {
     expect(api.get).toHaveBeenCalledWith('/knowledge-graph/health');
     consoleError.mockRestore();
   });
+
+  it('shows a degraded graph as degraded and invents no health score (FR-3)', async () => {
+    (api.get as Mock).mockResolvedValue({
+      status: 'degraded',
+      neo4j_version: '5.0',
+      node_count: 10,
+      relationship_count: 3,
+      index_count: 0,
+      constraint_count: 0,
+      last_error: 'slow query',
+      response_time_ms: 900,
+    });
+
+    render(<GraphHealthMonitor />);
+
+    expect(await screen.findByText('degraded')).toBeInTheDocument();
+    expect(screen.queryByText(/health score/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('/100')).not.toBeInTheDocument();
+    expect(screen.queryByText(/last check:/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Last error: slow query')).toBeInTheDocument();
+  });
+
+  it('shows an unrecognised status as unknown, never healthy (FR-3)', async () => {
+    (api.get as Mock).mockResolvedValue({
+      status: 'starting',
+      neo4j_version: '5.0',
+      node_count: 0,
+      relationship_count: 0,
+      index_count: 0,
+      constraint_count: 0,
+      response_time_ms: 1,
+    });
+
+    render(<GraphHealthMonitor />);
+
+    expect(await screen.findByText('unknown')).toBeInTheDocument();
+    expect(screen.queryByText('healthy')).not.toBeInTheDocument();
+  });
+
+  it('renders an explicit unavailable state when the request fails (FR-3)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    (api.get as Mock).mockRejectedValue(new Error('down'));
+
+    render(<GraphHealthMonitor />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Graph health is unavailable');
+    consoleError.mockRestore();
+  });
 });

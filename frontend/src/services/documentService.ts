@@ -6,6 +6,7 @@ import {
   UploadProgress,
 } from '@/types/document';
 import { api } from '@/services/api-client';
+import { documentListQueryString } from '@/services/documentListParams';
 
 export class DocumentService {
   private readonly basePath = '/documents';
@@ -18,33 +19,9 @@ export class DocumentService {
     pageSize: number = 20,
     filters?: DocumentFilters
   ): Promise<DocumentListResponse> {
-    const params: Record<string, any> = {
-      page,
-      page_size: pageSize,
-    };
-
-    if (filters) {
-      if (filters.file_types?.length) {
-        params.file_types = filters.file_types.join(',');
-      }
-      if (filters.status?.length) {
-        params.status = filters.status.join(',');
-      }
-      if (filters.date_range) {
-        params.date_from = filters.date_range.start;
-        params.date_to = filters.date_range.end;
-      }
-      if (filters.search_term) {
-        params.search = filters.search_term;
-      }
-    }
-
-    const queryString = new URLSearchParams(
-      Object.entries(params)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => [k, String(v)])
-    ).toString();
-    return api.get(`${this.basePath}${queryString ? `?${queryString}` : ''}`);
+    // The backend's own names (size, document_type, processing_status).
+    const queryString = documentListQueryString(page, pageSize, filters);
+    return api.get(`${this.basePath}?${queryString}`);
   }
 
   /**

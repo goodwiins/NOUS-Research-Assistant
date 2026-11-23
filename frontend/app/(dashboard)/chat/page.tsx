@@ -78,6 +78,8 @@ function ChatPageContent() {
     setInput: streaming.setInput,
     handleSubmit: streaming.handleSubmit,
     retryLast: composerActions.retryLast,
+    isLoading: streaming.isLoading,
+    storeIsStreaming: streaming.storeIsStreaming,
     conversations: session.conversations,
     activeThreadId: session.activeThreadId,
     setCurrentThread: session.setCurrentThread,

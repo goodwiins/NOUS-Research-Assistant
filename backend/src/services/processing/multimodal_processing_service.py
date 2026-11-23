@@ -6,6 +6,8 @@ import asyncio
 import io
 import logging
 import os
+import re
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -75,6 +77,72 @@ from src.services.processing.entity_extraction_service import EntityExtractionSe
 logger = logging.getLogger(__name__)
 
 
+_entity_service_lock = threading.Lock()
+_entity_service_instance: Optional[EntityExtractionService] = None
+
+
+def _shared_entity_service() -> EntityExtractionService:
+    """One EntityExtractionService (one loaded spaCy model) per process.
+
+    Blocking; call it via ``asyncio.to_thread``. A failed load is not cached,
+    so the next document tries again.
+    """
+    global _entity_service_instance
+    with _entity_service_lock:
+        if _entity_service_instance is None:
+            _entity_service_instance = EntityExtractionService()
+        return _entity_service_instance
+
+
+_PAGE_MARKER_RE = re.compile(r"\[Page \d+\]")
+_NEEDS_TEXT = frozenset({DocumentType.PDF, DocumentType.IMAGE})
+_NO_TEXT_ERROR = "No text could be extracted from this document"
+# Fixed messages for steps that catch their own errors: these land in
+# processing_results and job.result, which the API returns.
+_KG_ENTITY_ERROR = "Could not store an entity in the knowledge graph"
+_KG_RELATIONSHIP_ERROR = "Could not store a relationship in the knowledge graph"
+_KG_EXTRACTION_ERROR = "Could not extract relationships"
+_KG_STORAGE_ERROR = "Knowledge graph storage failed"
+_QUALITY_ERROR = "Quality assessment failed"
+# Step outputs that can carry a PDF's or image's text (step name -> key).
+_TEXT_OUTPUTS = (
+    ("pdf_processing", "text_content"),
+    ("ocr_extraction", "ocr_text"),
+    ("image_ocr", "extracted_text"),
+)
+
+
+def _usable_text(text: Optional[str]) -> bool:
+    """True when ``text`` has content beyond ``[Page N]`` markers."""
+    return bool(text) and bool(_PAGE_MARKER_RE.sub("", text or "").strip())
+
+
+def _extracted_text(results: Dict[str, Any]) -> Optional[str]:
+    for step, key in _TEXT_OUTPUTS:
+        text = (results.get(step) or {}).get(key)
+        if isinstance(text, str) and _usable_text(text):
+            return text
+    return None
+
+
+def _record_warnings(document: Document, warnings: List[str], partial: bool) -> None:
+    """Write this run's warnings, replacing any earlier run's. ``partial`` is
+    set only for a document that completed with warnings."""
+    warnings = list(warnings)
+    document.add_metadata("processing_warnings", warnings)
+    document.add_metadata("processing_partial", bool(partial and warnings))
+
+
+def _entity_span(properties: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """Character span of an entity: spaCy entities carry ``start_char`` /
+    ``end_char``, the regex ones ``start`` / ``end``."""
+    props = properties or {}
+    return {
+        "start": int(props.get("start_char", props.get("start", 0)) or 0),
+        "end": int(props.get("end_char", props.get("end", 0)) or 0),
+    }
+
+
 class ProcessingStep:
     """Represents a processing step in the pipeline"""
 
@@ -137,7 +205,10 @@ class MultimodalProcessingService:
             "quality_assessment": {},
             "processing_time": 0,
             "success": False,
+            # Required-step failures: the document and the job fail.
             "errors": [],
+            # Optional-step failures: recorded and surfaced, never fatal.
+            "warnings": [],
         }
 
         try:
@@ -175,8 +246,30 @@ class MultimodalProcessingService:
                     step.error_message = str(e)
                     step.end_time = time.time()
 
-                    error_msg = f"Processing step '{step.name}' failed: {str(e)}"
-                    logger.error(error_msg)
+                    # Stable text only: these strings reach processing_error,
+                    # processing_warnings and the document API. The exception
+                    # detail goes to the log (exc_info), never to the client.
+                    error_msg = f"Processing step '{step.name}' failed"
+
+                    if not step.required:
+                        # Optional means optional: the document still
+                        # completes. The failure is a warning, stored on the
+                        # document (processing_warnings) and in the job result.
+                        logger.warning(
+                            "Optional processing step '%s' failed for document %s",
+                            step.name,
+                            getattr(document, "id", "?"),
+                            exc_info=True,
+                        )
+                        processing_results["warnings"].append(f"{step.name} failed")
+                        continue
+
+                    logger.error(
+                        "Required processing step '%s' failed for document %s",
+                        step.name,
+                        getattr(document, "id", "?"),
+                        exc_info=True,
+                    )
                     processing_results["errors"].append(error_msg)
 
                     if step.required:
@@ -202,6 +295,11 @@ class MultimodalProcessingService:
                             )
                             document.processing_status = ProcessingStatus.FAILED
                             document.processing_error = error_msg
+                        # This path skips update_document_with_results: replace
+                        # a previous run's flags so they don't outlive it.
+                        _record_warnings(
+                            document, processing_results["warnings"], partial=False
+                        )
                         self.db.commit()
                         return processing_results
 
@@ -219,11 +317,20 @@ class MultimodalProcessingService:
 
             return processing_results
 
-        except Exception as e:
-            error_msg = f"Document processing failed: {str(e)}"
-            logger.error(error_msg)
+        except Exception:
+            error_msg = "Document processing failed"
+            logger.exception(
+                "Document processing failed for document %s",
+                getattr(document, "id", "?"),
+            )
 
             job.fail_job(error_msg)
+            try:
+                _record_warnings(
+                    document, processing_results["warnings"], partial=False
+                )
+            except Exception:
+                logger.warning("could not reset processing flags", exc_info=True)
             self.db.commit()
 
             processing_results["errors"].append(error_msg)
@@ -237,7 +344,10 @@ class MultimodalProcessingService:
         # Common steps for all document types
         common_steps = [
             ProcessingStep("Text Extraction", self.extract_text_content),
-            ProcessingStep("Entity Extraction", self.extract_entities),
+            # Advisory: it returns transient entities (the persisted entity
+            # pipeline is processing_tasks), and its spaCy model is optional
+            # in the image, so it must never fail ingestion.
+            ProcessingStep("Entity Extraction", self.extract_entities, required=False),
             ProcessingStep(
                 "Knowledge Graph Storage",
                 self.store_entities_in_knowledge_graph,
@@ -872,50 +982,52 @@ class MultimodalProcessingService:
         in ``processing_tasks.process_document_ingestion``, which is made
         idempotent separately via ``_reset_pipeline_entities``
         (delete-before-insert on the same document).
+
+        Errors propagate; ``process_document`` records them once, as a
+        warning, because this step is optional.
         """
-        try:
-            if not self.entity_service:
-                self.entity_service = EntityExtractionService(self.db)
+        text_content = document.content_text or ""
+        if not text_content:
+            return {"entities": [], "entity_count": 0, "extraction_method": "none"}
 
-            text_content = document.content_text or ""
-            if not text_content:
-                return {"entities": [], "entity_count": 0, "extraction_method": "none"}
+        if not self.entity_service:
+            # spacy.load is slow and blocking: load it off the event loop, and
+            # once per process, not per document.
+            self.entity_service = await asyncio.to_thread(_shared_entity_service)
 
-            results = {
-                "entities": [],
-                "entity_count": 0,
-                "extraction_method": "spacy",
-                "processing_time": 0,
+        results: Dict[str, Any] = {
+            "entities": [],
+            "entity_count": 0,
+            "extraction_method": "spacy",
+            "processing_time": 0,
+        }
+
+        start_time = time.time()
+
+        # Synchronous, CPU-bound spaCy call: keep it off the event loop.
+        # (It used to be awaited with the wrong arguments, which raised a
+        # TypeError for every document with text, and the step was
+        # required, so every run and every retry failed the job: IS-5.)
+        entities = await asyncio.to_thread(
+            self.entity_service.extract_entities_from_text,
+            document,
+            text_content,
+        )
+
+        results["entities"] = [
+            {
+                "text": entity.name,
+                "label": entity.entity_type.value,
+                "confidence": entity.confidence,
+                **_entity_span(entity.properties),
             }
+            for entity in entities
+        ]
 
-            start_time = time.time()
+        results["entity_count"] = len(entities)
+        results["processing_time"] = time.time() - start_time
 
-            # Extract entities
-            entities = await self.entity_service.extract_entities_from_text(
-                text_content,
-                document_id=document.id,
-                organization_id=document.organization_id,
-            )
-
-            results["entities"] = [
-                {
-                    "text": entity.name,
-                    "label": entity.entity_type.value,
-                    "confidence": entity.confidence_score,
-                    "start": entity.metadata.get("start", 0) if entity.metadata else 0,
-                    "end": entity.metadata.get("end", 0) if entity.metadata else 0,
-                }
-                for entity in entities
-            ]
-
-            results["entity_count"] = len(entities)
-            results["processing_time"] = time.time() - start_time
-
-            return results
-
-        except Exception as e:
-            logger.error(f"Entity extraction failed: {str(e)}")
-            raise
+        return results
 
     async def store_entities_in_knowledge_graph(
         self, document: Document, job: ProcessingJob
@@ -1041,10 +1153,13 @@ class MultimodalProcessingService:
                         f"Stored entity in knowledge graph: {entity.name} ({entity_type_str})"
                     )
 
-                except Exception as e:
-                    error_msg = f"Failed to store entity {entity.name}: {str(e)}"
-                    logger.warning(error_msg)
-                    results["errors"].append(error_msg)
+                except Exception:
+                    logger.warning(
+                        "Failed to store entity %r in the knowledge graph",
+                        entity.name,
+                        exc_info=True,
+                    )
+                    results["errors"].append(_KG_ENTITY_ERROR)
 
             # Extract and store relationships
             try:
@@ -1118,15 +1233,16 @@ class MultimodalProcessingService:
                             f"Stored relationship: {source_entity.name} --[{graph_rel_type.value}]--> {target_entity.name}"
                         )
 
-                    except Exception as e:
-                        error_msg = f"Failed to store relationship: {str(e)}"
-                        logger.warning(error_msg)
-                        results["errors"].append(error_msg)
+                    except Exception:
+                        logger.warning(
+                            "Failed to store a relationship in the knowledge graph",
+                            exc_info=True,
+                        )
+                        results["errors"].append(_KG_RELATIONSHIP_ERROR)
 
-            except Exception as e:
-                error_msg = f"Failed to extract relationships: {str(e)}"
-                logger.warning(error_msg)
-                results["errors"].append(error_msg)
+            except Exception:
+                logger.warning("Failed to extract relationships", exc_info=True)
+                results["errors"].append(_KG_EXTRACTION_ERROR)
 
             results["processing_time"] = time.time() - start_time
 
@@ -1136,13 +1252,15 @@ class MultimodalProcessingService:
 
             return results
 
-        except Exception as e:
-            logger.error(f"Failed to store entities in knowledge graph: {str(e)}")
+        except Exception:
+            logger.error(
+                "Failed to store entities in the knowledge graph", exc_info=True
+            )
             return {
                 "entities_stored": 0,
                 "relationships_stored": 0,
                 "processing_time": 0,
-                "errors": [str(e)],
+                "errors": [_KG_STORAGE_ERROR],
             }
 
     async def generate_embeddings(
@@ -1282,11 +1400,11 @@ class MultimodalProcessingService:
 
             return results
 
-        except Exception as e:
-            logger.error(f"Quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Quality assessment failed", exc_info=True)
             return {
                 "quality_assessment_performed": False,
-                "error": str(e),
+                "error": _QUALITY_ERROR,
                 "overall_score": 0.0,
             }
 
@@ -1367,6 +1485,18 @@ class MultimodalProcessingService:
                     document.content_text, captions
                 )
 
+            # A PDF or image is only worth indexing with text. Optional OCR
+            # failing used to fail the document by accident; now that optional
+            # failures are warnings, check for usable text explicitly.
+            if results["success"] and document.document_type in _NEEDS_TEXT:
+                if not _usable_text(document.content_text):
+                    recovered = _extracted_text(results)
+                    if recovered:
+                        document.content_text = recovered
+                    else:
+                        results["success"] = False
+                        results["errors"].append(_NO_TEXT_ERROR)
+
             # Update processing status
             if results["success"]:
                 document.processing_status = ProcessingStatus.COMPLETED
@@ -1377,7 +1507,13 @@ class MultimodalProcessingService:
             # Update processing timestamps
             document.processing_completed_at = datetime.utcnow()
 
-            # Store processing results in metadata
+            # Store processing results in metadata. Optional-step failures are
+            # kept visible: processing_partial marks a document that completed
+            # without some optional output (GOO-658). Written every run, so a
+            # clean retry clears them.
+            _record_warnings(
+                document, results.get("warnings") or [], partial=results["success"]
+            )
             document.add_metadata("processing_results", results)
             document.add_metadata("processed_at", datetime.utcnow().isoformat())
 

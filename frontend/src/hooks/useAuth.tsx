@@ -15,6 +15,7 @@ import {
   onAccountSessionReset,
 } from '@/lib/account-session';
 import { useAuthStore } from '@/stores/authStore';
+import { isBackendSessionFailure } from '@/lib/backendAuthFailure';
 import { useShallow } from 'zustand/react/shallow';
 
 interface AuthContextType {
@@ -32,7 +33,12 @@ interface AuthContextType {
   signOut: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   fetchProfile: () => Promise<void>;
-  handleAuthError: () => void;
+  /**
+   * Sign out because `error` shows the session is gone. Does nothing unless
+   * it is a 401 from our own backend origin (GOO-727), so a third-party 401
+   * can never sign the user out.
+   */
+  handleAuthError: (error: unknown) => void;
   // Legacy aliases for backward compatibility
   login: (
     email: string,
@@ -84,11 +90,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only run on mount
   }, []);
 
-  const handleAuthError = useCallback(() => {
-    // signOut is now async and may reject if the network revocation fails;
-    // local state is cleared regardless, so swallow the rejection here.
-    void store.signOut().catch(() => {});
-  }, [store]);
+  const handleAuthError = useCallback(
+    (error: unknown) => {
+      if (!isBackendSessionFailure(error)) return;
+      // signOut is now async and may reject if the network revocation fails;
+      // local state is cleared regardless, so swallow the rejection here.
+      void store.signOut().catch(() => {});
+    },
+    [store]
+  );
 
   const contextValue: AuthContextType = useMemo(
     () => ({
