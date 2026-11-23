@@ -25040,6 +25040,20 @@ export interface components {
             };
         };
         /**
+         * WorkerHealthResponse
+         * @description Overall health of the Celery worker infrastructure
+         */
+        WorkerHealthResponse: {
+            /** Healthy */
+            healthy: boolean;
+            /** Issues */
+            issues: string[];
+            /** Timestamp */
+            timestamp: string;
+            /** Workers Online */
+            workers_online: number;
+        };
+        /**
          * WorkerStatsResponse
          * @description Celery worker statistics
          */
@@ -43407,7 +43421,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkerHealthResponse"];
                 };
             };
         };
