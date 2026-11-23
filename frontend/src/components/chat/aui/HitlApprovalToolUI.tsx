@@ -47,15 +47,16 @@ function formatArgValue(value: unknown, max = 140): string {
  * `approval` gate, so Approve/Deny call the runtime's `respondToApproval`,
  * which routes to the ExternalStore adapter's `onRespondToToolApproval`
  * (wired in ChatRuntimeProvider → handleConfirmation → streamConfirm). No
- * side-channel bridge. Accessibility (alertdialog role, Approve autofocus,
- * Escape=deny, disabled after submit) mirrors the banner it replaces.
+ * side-channel bridge. Accessibility: alertdialog role, the dialog itself takes
+ * focus (never Approve, GOO-637, so a stray Enter/Space typed while the gate
+ * appears cannot approve a tool run), Escape=deny, disabled after submit.
  */
 export function HitlApprovalRenderer({
   args,
   approval,
   respondToApproval,
 }: HitlApprovalRendererProps): ReactElement | null {
-  const approveRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const descriptionId = useId();
   // Local latch: disable the buttons the instant the user decides, until the
   // gate resolves and the message is removed. Prevents double-submit.
@@ -63,10 +64,15 @@ export function HitlApprovalRenderer({
     null
   );
 
-  // Move focus to Approve when the gate appears (mirrors the banner).
+  const openGateId =
+    approval && approval.approved === undefined ? approval.id : null;
+
+  // SECURITY (GOO-637): focus the dialog, not Approve, when a gate opens.
+  // Approving by keyboard then needs a deliberate Tab to the button, so
+  // keystrokes the user was already typing cannot approve a tool run.
   useEffect(() => {
-    approveRef.current?.focus();
-  }, []);
+    if (openGateId) dialogRef.current?.focus();
+  }, [openGateId]);
 
   // Only render while the gate is open (approved === undefined).
   if (!approval || approval.approved !== undefined) return null;
@@ -89,6 +95,7 @@ export function HitlApprovalRenderer({
 
   return (
     <div
+      ref={dialogRef}
       role="alertdialog"
       aria-label="Approval needed"
       aria-describedby={descriptionId}
@@ -167,7 +174,6 @@ export function HitlApprovalRenderer({
       <div className="flex items-center gap-3">
         <button
           type="button"
-          ref={approveRef}
           onClick={() => decide(true)}
           disabled={submitted}
           className="min-h-11 rounded-xl bg-(--nous-sol) px-4 py-2 text-xs font-semibold text-(--nous-erebus) transition-all hover:brightness-110 disabled:opacity-50"
