@@ -175,7 +175,9 @@ async def _seed(db: AsyncSession) -> None:
 _MODELS: list[Any] = [Organization, User, Workspace, WorkspaceMember, Collection]
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture(
+    params=["sqlite", pytest.param("postgres", marks=pytest.mark.requires_postgres)]
+)
 async def db(request: pytest.FixtureRequest) -> AsyncIterator[AsyncSession]:
     if request.param == "sqlite":
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")

@@ -23,6 +23,55 @@ from src.models.user import User
 logger = logging.getLogger(__name__)
 
 
+def analytics_window(
+    days_back: int,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+) -> Tuple[datetime, datetime]:
+    """``[start, end)`` for an analytics query, as naive UTC like the columns.
+
+    An explicit ``start_date``/``end_date`` wins; otherwise the window is the
+    last ``days_back`` days up to now.
+    """
+    end = end_date or datetime.utcnow()
+    return start_date or end - timedelta(days=days_back), end
+
+
+def _query_top_documents(
+    db: Session, organization_id: Any, cutoff_date: datetime, end_date: datetime
+) -> List[Any]:
+    """Most-accessed documents for one organization (``/insights``).
+
+    ``search_events.search_query_id`` has no FK, so every joined table is
+    filtered by org, not only ``documents``: an event from another org pointed
+    at this org's query must not count (same rule as content-usage analytics).
+    """
+    return db.execute(
+        text("""
+        SELECT
+            d.id,
+            d.title,
+            COUNT(DISTINCT s.user_id) as unique_users,
+            COUNT(*) as access_count
+        FROM search_results sr
+        JOIN documents d ON sr.document_id = d.id
+        JOIN search_queries sq ON sr.search_query_id = sq.id
+        JOIN search_events e ON sq.id = e.search_query_id
+        JOIN search_sessions s ON e.session_id = s.id
+        WHERE d.organization_id = :org_id
+            AND sq.organization_id = :org_id
+            AND e.organization_id = :org_id
+            AND s.organization_id = :org_id
+            AND e.created_at >= :cutoff_date
+            AND e.created_at < :end_date
+        GROUP BY d.id, d.title
+        ORDER BY unique_users DESC, access_count DESC
+        LIMIT 10
+    """),
+        {"org_id": organization_id, "cutoff_date": cutoff_date, "end_date": end_date},
+    ).fetchall()
+
+
 class BehaviorPattern(Enum):
     """User behavior patterns"""
 
@@ -379,14 +428,24 @@ class UserBehaviorService:
             db.close()
 
     async def get_behavior_trends(
-        self, organization_id: str, days_back: int = 30, group_by: str = "day"
+        self,
+        organization_id: str,
+        days_back: int = 30,
+        group_by: str = "day",
+        *,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Get behavior trends for organization"""
+        """Get behavior trends for organization.
+
+        The window is ``[start_date, end_date)`` when given (naive UTC),
+        otherwise the last ``days_back`` days.
+        """
 
         db = next(get_db_sync())
 
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+            cutoff_date, end_date = analytics_window(days_back, start_date, end_date)
 
             # Get daily/weekly/monthly aggregates
             if group_by == "day":
@@ -407,10 +466,15 @@ class UserBehaviorService:
                 FROM search_sessions
                 WHERE organization_id = :org_id
                     AND start_time >= :cutoff_date
+                    AND start_time < :end_date
                 GROUP BY period
                 ORDER BY period
             """),  # nosec: B608 - group_by constrained to enum-derived literal values
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
+                {
+                    "org_id": organization_id,
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
+                },
             ).fetchall()
 
             # Query search event trends
@@ -425,10 +489,15 @@ class UserBehaviorService:
                 FROM search_events
                 WHERE organization_id = :org_id
                     AND created_at >= :cutoff_date
+                    AND created_at < :end_date
                 GROUP BY period
                 ORDER BY period
             """),  # nosec: B608 - group_by constrained to enum-derived literal values
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
+                {
+                    "org_id": organization_id,
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
+                },
             ).fetchall()
 
             # Query user engagement trends
@@ -441,12 +510,18 @@ class UserBehaviorService:
                     AVG(CASE WHEN e.user_rating IS NOT NULL THEN e.user_rating END) as avg_satisfaction
                 FROM search_sessions s
                 LEFT JOIN search_events e ON s.id = e.session_id
+                    AND e.organization_id = :org_id
                 WHERE s.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
+                    AND s.start_time < :end_date
                 GROUP BY period
                 ORDER BY period
             """),  # nosec: B608 - group_by constrained to enum-derived literal values
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
+                {
+                    "org_id": organization_id,
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
+                },
             ).fetchall()
 
             return {
@@ -509,6 +584,7 @@ class UserBehaviorService:
                     AVG(CASE WHEN e.clicked_results > 0 THEN 1 ELSE 0 END) as success_rate
                 FROM search_sessions s
                 LEFT JOIN search_events e ON s.id = e.session_id
+                    AND e.organization_id = :org_id
                 WHERE s.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
             """),
@@ -526,6 +602,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY e.query
                 ORDER BY search_count DESC
@@ -544,6 +621,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY e.search_type
                 ORDER BY count DESC
@@ -560,6 +638,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY hour
                 ORDER BY search_count DESC
@@ -569,26 +648,9 @@ class UserBehaviorService:
             ).fetchall()
 
             # Get most accessed documents
-            top_documents = db.execute(
-                text("""
-                SELECT
-                    d.id,
-                    d.title,
-                    COUNT(DISTINCT s.user_id) as unique_users,
-                    COUNT(*) as access_count
-                FROM search_results sr
-                JOIN documents d ON sr.document_id = d.id
-                JOIN search_queries sq ON sr.search_query_id = sq.id
-                JOIN search_events e ON sq.id = e.search_query_id
-                JOIN search_sessions s ON e.session_id = s.id
-                WHERE d.organization_id = :org_id
-                    AND e.created_at >= :cutoff_date
-                GROUP BY d.id, d.title
-                ORDER BY unique_users DESC, access_count DESC
-                LIMIT 10
-            """),
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
-            ).fetchall()
+            top_documents = _query_top_documents(
+                db, organization_id, cutoff_date, datetime.utcnow()
+            )
 
             # Calculate engagement trend (compare with previous period)
             prev_cutoff = cutoff_date - timedelta(days=days_back)
@@ -662,6 +724,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                     AND e.user_rating IS NOT NULL
             """),
@@ -677,6 +740,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
             """),
                 {"org_id": organization_id, "cutoff_date": cutoff_date},
@@ -897,10 +961,20 @@ class UserBehaviorService:
         return recommendations
 
     async def identify_behavior_patterns(
-        self, organization_id: str, min_sessions: int = 5
+        self,
+        organization_id: str,
+        min_sessions: int = 5,
+        *,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Identify user behavior patterns in the organization"""
+        """Identify user behavior patterns in the organization.
 
+        The window is ``[start_date, end_date)`` when given (naive UTC),
+        otherwise the last 30 days.
+        """
+
+        cutoff_date, end_date = analytics_window(30, start_date, end_date)
         db = next(get_db_sync())
 
         try:
@@ -920,14 +994,18 @@ class UserBehaviorService:
                 JOIN search_sessions s ON u.id = s.user_id
                 JOIN search_events e ON s.id = e.session_id
                 WHERE u.organization_id = :org_id
+                    AND s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
+                    AND s.start_time < :end_date
                 GROUP BY u.id, u.first_name, u.last_name
                 HAVING COUNT(s.id) >= :min_sessions
                 ORDER BY search_count DESC
             """),
                 {
                     "org_id": organization_id,
-                    "cutoff_date": datetime.utcnow() - timedelta(days=30),
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
                     "min_sessions": min_sessions,
                 },
             ).fetchall()
@@ -950,7 +1028,9 @@ class UserBehaviorService:
                     avg_rating=user.avg_rating,
                 )
 
-                patterns[pattern.value].append(
+                # Response buckets are plural ("power_users"); the enum value
+                # alone raised KeyError for every classified user (GOO-691).
+                patterns[f"{pattern.value}s"].append(
                     {
                         "user_id": str(user.id),
                         "name": f"{user.first_name} {user.last_name}",

@@ -8,6 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Dict
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -120,6 +121,26 @@ def should_run_create_all(
     return (db_host or "") in LOCAL_DB_HOSTS
 
 
+def _sync_pool_settings() -> Dict[str, int]:
+    """Sync-engine pool sizing, overridable per component through env.
+
+    Up to 40 ``def`` handlers run at once in FastAPI's threadpool (anyio's
+    default token count), and each request-path sync consumer holds one
+    connection while it runs. ``pool_size + max_overflow`` is the ceiling on
+    concurrent sync-DB requests per worker; the rest wait up to
+    ``pool_timeout`` seconds for a connection, holding a threadpool thread
+    meanwhile. Raising the ceiling is bounded by the Supabase pooler budget
+    (every worker of every component counts), so the deployed sizes live in
+    the Helm values files, not here. ``DB_SYNC_POOL_TIMEOUT`` lets a lane
+    fail fast instead of parking threads for 30 s (GOO-693).
+    """
+    return {
+        "pool_size": _env_int("DB_SYNC_POOL_SIZE", 3),
+        "max_overflow": _env_int("DB_SYNC_MAX_OVERFLOW", 2),
+        "pool_timeout": _env_int("DB_SYNC_POOL_TIMEOUT", 30),
+    }
+
+
 # Check if using SQLite (for testing) - SQLite doesn't support pool options
 _is_sqlite = DATABASE_URL.startswith("sqlite")
 
@@ -142,16 +163,14 @@ else:
     # knowledge-graph, user-behavior and compliance routers, plus Celery tasks.
     # A 1+1 pool exhausts under two concurrent guarded requests ("QueuePool
     # limit of size 1 overflow 1"), stalling threadpool threads for
-    # pool_timeout=30s and restarting the backend. Defaults sized for local
+    # pool_timeout (30s by default) and restarting the backend. Defaults sized for local
     # dev (no pooler cap); deployed values override per-component to fit the
     # Supabase session-mode pooler budget (values-dev.yaml).
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
         pool_recycle=1800,
-        pool_size=_env_int("DB_SYNC_POOL_SIZE", 3),
-        max_overflow=_env_int("DB_SYNC_MAX_OVERFLOW", 2),
-        pool_timeout=30,
+        **_sync_pool_settings(),
         echo=os.getenv("ENVIRONMENT") == "development",
         hide_parameters=True,
     )

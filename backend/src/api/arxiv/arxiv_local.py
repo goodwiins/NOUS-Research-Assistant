@@ -6,6 +6,7 @@ For processing PDF files stored locally in the data/arxiv directory
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -67,6 +68,9 @@ from src.services.embedding.embedding_service import EmbeddingService  # noqa: E
 from src.services.expensive_work_admission import metered_expensive_work
 
 _shared_embedding_service = None
+# Two concurrent ingests used to both see None and each load the model
+# (GOO-693); the lock makes the build happen once.
+_shared_embedding_lock = threading.Lock()
 
 
 def _read_pdf_text_and_metadata(pdf_file: Path) -> Tuple[str, Dict[str, Any]]:
@@ -76,26 +80,29 @@ def _read_pdf_text_and_metadata(pdf_file: Path) -> Tuple[str, Dict[str, Any]]:
     """
     import fitz  # PyMuPDF
 
-    pdf_document = fitz.open(str(pdf_file))
-    try:
-        text_content = []
-        for page_num in range(len(pdf_document)):
-            page = pdf_document.load_page(page_num)
-            text_content.append(page.get_text())
+    from src.services.processing import pdf_lock
 
-        metadata = pdf_document.metadata or {}
-        pdf_metadata = {
-            "title": metadata.get("title") or "",
-            "author": metadata.get("author") or "",
-            "subject": metadata.get("subject") or "",
-            "creator": metadata.get("creator") or "",
-            "producer": metadata.get("producer") or "",
-            "creation_date": metadata.get("creationDate") or "",
-            "modification_date": metadata.get("modDate") or "",
-            "page_count": len(pdf_document),
-        }
-    finally:
-        pdf_document.close()
+    with pdf_lock.PYMUPDF_LOCK:  # PyMuPDF is not thread-safe
+        pdf_document = fitz.open(str(pdf_file))
+        try:
+            text_content = []
+            for page_num in range(len(pdf_document)):
+                page = pdf_document.load_page(page_num)
+                text_content.append(page.get_text())
+
+            metadata = pdf_document.metadata or {}
+            pdf_metadata = {
+                "title": metadata.get("title") or "",
+                "author": metadata.get("author") or "",
+                "subject": metadata.get("subject") or "",
+                "creator": metadata.get("creator") or "",
+                "producer": metadata.get("producer") or "",
+                "creation_date": metadata.get("creationDate") or "",
+                "modification_date": metadata.get("modDate") or "",
+                "page_count": len(pdf_document),
+            }
+        finally:
+            pdf_document.close()
     return "\n".join(text_content), pdf_metadata
 
 
@@ -103,7 +110,9 @@ def _get_shared_embedding_service():
     """Process-wide EmbeddingService (R6-M4: no per-document reloads)."""
     global _shared_embedding_service
     if _shared_embedding_service is None:
-        _shared_embedding_service = EmbeddingService(lazy=False)
+        with _shared_embedding_lock:
+            if _shared_embedding_service is None:
+                _shared_embedding_service = EmbeddingService(lazy=False)
     return _shared_embedding_service
 
 

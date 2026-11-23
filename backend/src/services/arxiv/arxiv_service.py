@@ -10,7 +10,9 @@ import json
 import logging
 import multiprocessing
 import re
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -22,6 +24,7 @@ import aiohttp
 import httpx
 from defusedxml import ElementTree as ET
 from pypdf import PdfReader
+from pypdf.generic import NullObject
 
 from src.models.document import DocumentType, ProcessingStatus
 from src.services.infrastructure.azure_openai_service import azure_openai_service
@@ -248,7 +251,11 @@ def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
                 value = value.get_object()
             except AttributeError:
                 pass
-            return "" if value is None else str(value)
+            # A PDF null (pypdf NullObject) is an absent value, not the text
+            # "NullObject": treat it like a missing field.
+            if value is None or isinstance(value, NullObject):
+                return ""
+            return str(value)
 
         metadata = {
             "title": _field("/Title"),
@@ -268,16 +275,70 @@ def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
     }
 
 
+# Upper bound for one pypdf parse of an arXiv PDF (at most _MAX_PDF_BYTES).
+_PDF_PARSE_TIMEOUT_SECONDS = 120.0
+
+# Parse threads one process may have running in the thread fallback, counting
+# ones whose caller already timed out (GOO-695). A thread cannot be killed, so
+# a timeout there only abandons the await; the slot is released by the thread
+# itself when the parse really ends, which bounds how many abandoned parses
+# can pile up. The parses get their own executor, one thread per slot, so
+# they never queue behind unrelated work in the loop's default executor.
+_MAX_THREAD_PARSES = 2
+_thread_parse_slots = threading.BoundedSemaphore(_MAX_THREAD_PARSES)
+_pdf_parse_executor = ThreadPoolExecutor(
+    max_workers=_MAX_THREAD_PARSES, thread_name_prefix="pdf-parse"
+)
+
+
+class _ParseSlotsBusy(Exception):
+    """Every thread-fallback parse slot is held by a parse still running."""
+
+
+def _parse_in_thread_slot(slots: threading.BoundedSemaphore, pdf_content: bytes):
+    try:
+        return _extract_pdf_content_sync(pdf_content)
+    finally:
+        slots.release()
+
+
+def _release_if_never_ran(
+    slots: threading.BoundedSemaphore, job: "Future[Any]"
+) -> None:
+    # A concurrent.futures job can only be cancelled before it starts, so a
+    # cancelled job never reached _parse_in_thread_slot's release: this is
+    # then the only release. A job that ran is never "cancelled" (GOO-701).
+    if job.cancelled():
+        slots.release()
+
+
 async def _parse_pdf_off_loop(pdf_content: bytes) -> Dict[str, Any]:
     """Run ``_extract_pdf_content_sync`` without blocking the event loop.
 
     pypdf is pure Python, so a thread still holds the GIL; a worker process
     (the bounded, per-call one ``arxiv_fulltext`` uses) keeps the API loop
-    free. A daemonic process (a Celery prefork worker) may not start
-    children, so there the parse falls back to a thread.
+    free, and is killed if the call times out or is cancelled. A daemonic
+    process (a Celery prefork worker) may not start children, so there the
+    parse falls back to a thread, which a timeout cannot stop: at most
+    ``_MAX_THREAD_PARSES`` such threads run per process, and a parse that
+    finds them all busy fails at once instead of starting another.
     """
     if multiprocessing.current_process().daemon:
-        return await asyncio.to_thread(_extract_pdf_content_sync, pdf_content)
+        slots = _thread_parse_slots
+        if not slots.acquire(blocking=False):
+            raise _ParseSlotsBusy(
+                f"{_MAX_THREAD_PARSES} earlier PDF parses are still running"
+            )
+        try:
+            job = _pdf_parse_executor.submit(_parse_in_thread_slot, slots, pdf_content)
+        except BaseException:
+            slots.release()
+            raise
+        # Exactly one release per slot: the thread releases a job that ran;
+        # a job cancelled while still queued (this await was cancelled before
+        # a worker picked it up) is released by this callback instead.
+        job.add_done_callback(lambda done: _release_if_never_ran(slots, done))
+        return await asyncio.wrap_future(job)
     from src.services.integrations.arxiv_fulltext import run_in_subprocess
 
     return await run_in_subprocess(_extract_pdf_content_sync, pdf_content)
@@ -884,7 +945,24 @@ class ArXivIngestionService:
             Dictionary with extracted content
         """
         try:
-            return await _parse_pdf_off_loop(pdf_content)
+            # A stuck parse must not hold its caller forever. In a worker
+            # process (arxiv_fulltext.run_in_subprocess) the timeout kills
+            # the process and frees its slot. In the thread fallback (Celery
+            # prefork) it only stops waiting: the thread runs on, holding one
+            # of the bounded thread slots until it ends (_parse_pdf_off_loop).
+            return await asyncio.wait_for(
+                _parse_pdf_off_loop(pdf_content), _PDF_PARSE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "PDF extraction timed out after %.0fs", _PDF_PARSE_TIMEOUT_SECONDS
+            )
+            raise IngestionError(
+                f"PDF extraction timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+            )
+        except _ParseSlotsBusy as e:
+            logger.error(f"PDF extraction refused: {e}")
+            raise IngestionError(f"PDF extraction refused: {e}")
         except Exception as e:
             logger.error(f"Failed to extract PDF content: {e}")
             raise IngestionError(f"PDF extraction failed: {e}")

@@ -133,8 +133,13 @@ def test_ordinary_item_error_still_continues(monkeypatch: pytest.MonkeyPatch) ->
     assert triad.await_count == 2
 
 
-def test_failure_message_for_other_errors_is_the_error_text() -> None:
-    assert et._failure_message(ValueError("bad dataset")) == "bad dataset"
+def test_failure_message_for_other_errors_is_a_fixed_safe_text() -> None:
+    # Raw exception text is never stored on the job (GOO-696); the task's own
+    # EvaluationFailure messages are.
+    assert et._failure_message(ValueError("bad dataset")) == (
+        et._UNEXPECTED_FAILURE_MESSAGE
+    )
+    assert et._failure_message(et.EvaluationFailure("bad dataset")) == "bad dataset"
 
 
 # ---- CI-3: shared event loop -----------------------------------------------

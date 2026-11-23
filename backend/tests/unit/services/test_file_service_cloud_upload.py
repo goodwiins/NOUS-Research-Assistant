@@ -312,9 +312,10 @@ async def test_duplicate_lookup_is_org_scoped_and_matches_legacy_hash(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancels", [1, 2])
 @pytest.mark.parametrize("backend", ["s3", "supabase"])
 async def test_cancelled_upload_deletes_the_object_once_it_lands(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str, cancels: int
 ) -> None:
     """GOO-643 review: cancelling the request while the upload thread runs
     must not orphan the object the thread goes on to store."""
@@ -362,8 +363,9 @@ async def test_cancelled_upload_deletes_the_object_once_it_lands(
         )
     )
     assert await asyncio.to_thread(entered.wait, 5)
-    task.cancel()
-    await asyncio.sleep(0.05)
+    for _ in range(cancels):  # GOO-693: a second cancel used to skip the delete
+        task.cancel()
+        await asyncio.sleep(0.05)
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task

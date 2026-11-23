@@ -410,3 +410,7 @@ class SatelliteSyncStatus(StrEnum):
     PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"
+    # Terminal: the reconciler re-drove a FAILED document
+    # RECONCILER_NEO4J_MAX_ATTEMPTS times without success and stopped
+    # (GOO-695). Only a reprocess of the document starts it over.
+    ABANDONED = "abandoned"

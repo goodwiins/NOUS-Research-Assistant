@@ -67,6 +67,10 @@ logger = logging.getLogger(__name__)
 # clobbered when this pipeline replays; scope the delete-before-insert to these.
 _PIPELINE_EXTRACTION_METHODS = (ExtractionMethod.SPACY, ExtractionMethod.REGEX)
 
+# documents.document_metadata key for the reconciler's Neo4j retry state:
+# {"attempts": int, "postgres_entities_stale": bool} (GOO-695).
+GRAPH_REDRIVE_KEY = "graph_redrive"
+
 
 def _reset_pipeline_entities(db, document_id) -> int:
     """Delete this pipeline's own auto-extracted entities for a document.
@@ -592,12 +596,25 @@ def process_document_ingestion(self, job_id: str):
             )
             if entities is None:
                 # Extraction errored: keep the entities a previous run wrote
-                # rather than resetting them to an empty set.
+                # rather than resetting them to an empty set, and mark the
+                # graph stage failed so the reconciler re-extracts it
+                # (reconcile_tasks re-drives neo4j_index_status=failed).
                 logger.warning(
                     "Entity extraction failed for document %s; keeping its "
-                    "existing entities",
+                    "existing entities and marking the graph stage failed",
                     document.id,
                 )
+                document.neo4j_index_status = SatelliteSyncStatus.FAILED.value
+                # The kept rows are the previous run's: tell the reconciler
+                # to rebuild them with its re-extraction, on a fresh budget.
+                document.document_metadata = {
+                    **(document.document_metadata or {}),
+                    GRAPH_REDRIVE_KEY: {
+                        "attempts": 0,
+                        "postgres_entities_stale": True,
+                    },
+                }
+                commit_if_active()
 
         if entities is not None:
             # Replay-safe write: drop any spaCy/regex entities left by a prior
@@ -613,6 +630,13 @@ def process_document_ingestion(self, job_id: str):
             _reset_pipeline_entities(db, document.id)
             for entity in entities:
                 db.add(entity)
+            # Fresh rows supersede any retry the reconciler had pending.
+            if GRAPH_REDRIVE_KEY in (document.document_metadata or {}):
+                document.document_metadata = {
+                    k: v
+                    for k, v in document.document_metadata.items()
+                    if k != GRAPH_REDRIVE_KEY
+                }
             commit_if_active()
 
             # Index entities into Neo4j knowledge graph. Best-effort (a Neo4j

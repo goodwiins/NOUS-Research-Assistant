@@ -394,44 +394,64 @@ class ProcessingPipeline:
             import pytesseract
             from PIL import Image
 
+            from src.services.processing import pdf_lock
+
+            # PyMuPDF is not thread-safe: every fitz call holds the
+            # process-wide lock (GOO-695). OCR runs outside it, so a slow
+            # page does not stall every other PDF path.
+            def _ocr(img_data: bytes) -> str:
+                return pytesseract.image_to_string(Image.open(io.BytesIO(img_data)))
+
             # First attempt: Extract text directly
             text = []
             try:
-                doc = fitz.open(file_path)
-                for page_num in range(len(doc)):
-                    page = doc.load_page(page_num)
-                    page_text = page.get_text()
+                with pdf_lock.PYMUPDF_LOCK:
+                    doc = fitz.open(file_path)
+                    page_count = len(doc)
+                try:
+                    for page_num in range(page_count):
+                        with pdf_lock.PYMUPDF_LOCK:
+                            page = doc.load_page(page_num)
+                            page_text = page.get_text()
+                            # If no text found, render the page for OCR
+                            img_data = (
+                                None
+                                if page_text.strip()
+                                else page.get_pixmap().tobytes("png")
+                            )
 
-                    if page_text.strip():
-                        cleaned = self._clean_extracted_text(page_text)
-                        text.append(f"[Page {page_num + 1}]\n{cleaned}")
-                    else:
-                        # If no text found, try OCR
-                        pix = page.get_pixmap()
-                        img_data = pix.tobytes("png")
-                        img = Image.open(io.BytesIO(img_data))
-                        ocr_text = pytesseract.image_to_string(img)
-                        if ocr_text.strip():
-                            cleaned = self._clean_extracted_text(ocr_text)
+                        if img_data is None:
+                            cleaned = self._clean_extracted_text(page_text)
                             text.append(f"[Page {page_num + 1}]\n{cleaned}")
-
-                doc.close()
+                        else:
+                            ocr_text = _ocr(img_data)
+                            if ocr_text.strip():
+                                cleaned = self._clean_extracted_text(ocr_text)
+                                text.append(f"[Page {page_num + 1}]\n{cleaned}")
+                finally:
+                    with pdf_lock.PYMUPDF_LOCK:
+                        doc.close()
 
             except Exception as pdf_error:
                 logger.warning(
                     f"Direct PDF extraction failed, trying OCR: {str(pdf_error)}"
                 )
                 # Fallback: Convert all pages to images and OCR them
-                with fitz.open(file_path) as doc:
-                    for page_num in range(len(doc)):
-                        page = doc.load_page(page_num)
-                        pix = page.get_pixmap()
-                        img_data = pix.tobytes("png")
-                        img = Image.open(io.BytesIO(img_data))
-                        ocr_text = pytesseract.image_to_string(img)
+                with pdf_lock.PYMUPDF_LOCK:
+                    doc = fitz.open(file_path)
+                    page_count = len(doc)
+                try:
+                    for page_num in range(page_count):
+                        with pdf_lock.PYMUPDF_LOCK:
+                            page = doc.load_page(page_num)
+                            img_data = page.get_pixmap().tobytes("png")
+                        ocr_text = _ocr(img_data)
                         if ocr_text.strip():
                             cleaned = self._clean_extracted_text(ocr_text)
                             text.append(f"[Page {page_num + 1}]\n{cleaned}")
+                finally:
+                    with pdf_lock.PYMUPDF_LOCK:
+                        doc.close()
 
             extracted_text = "\n\n".join(text)
 

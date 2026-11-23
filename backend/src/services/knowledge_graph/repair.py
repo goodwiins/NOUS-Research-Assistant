@@ -26,8 +26,8 @@ Never raises: failures are reported in :class:`GraphRepairOutcome` so callers
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional, Tuple
 
 from src.models.document import Document
 from src.models.graph import (
@@ -80,6 +80,13 @@ class GraphRepairOutcome:
     errors: int = 0
     skipped_reason: Optional[str] = None  # e.g. "no_content"
     error_message: Optional[str] = None
+    # The entities extraction produced, or None when extraction did not run
+    # or failed. The reconciler uses them to rebuild the document's Postgres
+    # ``Entity`` rows when ingestion-time extraction had failed (GOO-695),
+    # whether or not the graph write then succeeded.
+    extracted_entities: Optional[Tuple[Any, ...]] = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def ok(self) -> bool:
@@ -235,6 +242,7 @@ def repair_document_graph(
         # Nothing extractable — a vacuous but honest success (no drift left).
         return GraphRepairOutcome(
             document_id=doc_id,
+            extracted_entities=tuple(entities),
             entities_found=len(entities),
             relationships_found=len(relationships),
         )
@@ -253,6 +261,7 @@ def repair_document_graph(
         logger.warning("graph repair: entity batch failed for %s: %s", doc_id, exc)
         return GraphRepairOutcome(
             document_id=doc_id,
+            extracted_entities=tuple(entities),
             entities_found=len(entities),
             relationships_found=len(relationships),
             error_message=str(exc),
@@ -291,6 +300,7 @@ def repair_document_graph(
             )
             return GraphRepairOutcome(
                 document_id=doc_id,
+                extracted_entities=tuple(entities),
                 entities_found=len(entities),
                 relationships_found=len(relationships),
                 entities_created=len(entity_result.created_entities),
@@ -315,6 +325,7 @@ def repair_document_graph(
             logger.warning("graph repair: reconcile failed for %s: %s", doc_id, exc)
             return GraphRepairOutcome(
                 document_id=doc_id,
+                extracted_entities=tuple(entities),
                 entities_found=len(entities),
                 relationships_found=len(relationships),
                 entities_created=len(entity_result.created_entities),
@@ -325,6 +336,7 @@ def repair_document_graph(
 
     return GraphRepairOutcome(
         document_id=doc_id,
+        extracted_entities=tuple(entities),
         entities_found=len(entities),
         relationships_found=len(relationships),
         entities_created=len(entity_result.created_entities),
