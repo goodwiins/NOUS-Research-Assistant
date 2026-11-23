@@ -864,6 +864,8 @@ jobs:
         run: |
           sudo python3 ../scripts/ci/quarantine_apt_sources.py
           pnpm exec playwright install --with-deps chromium
+          pnpm exec playwright test --config=playwright.replay-privacy.config.ts
+          pnpm exec playwright test --config=playwright.replay-router.config.ts
           pnpm exec playwright test --config=playwright.chat-mobile-controls.config.ts --project=chromium-375
           pnpm exec playwright test --config=playwright.artifact-isolation.config.ts
           pnpm exec playwright test --config=playwright.artifact-sharing.config.ts
