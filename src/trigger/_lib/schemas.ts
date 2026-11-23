@@ -122,7 +122,10 @@ export const WorkerStatsResponseSchema = z.object({
 });
 export type WorkerStatsResponse = z.infer<typeof WorkerStatsResponseSchema>;
 
-/** GET /api/v1/workers/health (backend/src/api/infrastructure/workers.py). */
+/**
+ * GET /api/v1/workers/health (`WorkerHealthResponse` in backend/openapi.json).
+ * Contract: tests/trigger/worker-response-contract.test.mjs.
+ */
 export const WorkerHealthResponseSchema = z.object({
   healthy: z.boolean(),
   workers_online: z.number(),

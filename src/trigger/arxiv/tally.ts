@@ -1,8 +1,9 @@
 /**
  * Outcome counts for an arXiv bulk ingest. A child run that finished without
- * throwing is not automatically a success: `ingest-paper` returns `failed`,
- * `timeout` and `skipped` as normal outputs, and `accepted` when the backend
- * queued the paper but reported no document to watch.
+ * throwing is not automatically a success. `ingest-paper` returns `accepted`:
+ * the backend queues the paper and reports nothing to watch (GOO-718). Only an
+ * explicit `completed` counts as ingested; any outcome the tally does not know
+ * is a failure.
  */
 export interface IngestTally {
   ingested: number;
