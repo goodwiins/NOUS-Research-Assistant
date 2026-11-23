@@ -87,9 +87,7 @@ class AnalyticsCache:
         # not have. The old code called the async _init_redis() without
         # awaiting it, so Redis never connected and every pod silently used
         # its own in-memory cache. Connect lazily on first use instead.
-        self._redis_enabled = bool(
-            REDIS_AVAILABLE and self.config.redis_analytics_url
-        )
+        self._redis_enabled = bool(REDIS_AVAILABLE and self.config.redis_analytics_url)
         self._next_connect_attempt = 0.0
         self._connect_lock: Optional[asyncio.Lock] = None
         self._connect_lock_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -121,9 +119,7 @@ class AnalyticsCache:
                 return False
             await self._init_redis()
             if not self._connected:
-                self._next_connect_attempt = (
-                    loop.time() + _RECONNECT_INTERVAL_SECONDS
-                )
+                self._next_connect_attempt = loop.time() + _RECONNECT_INTERVAL_SECONDS
         return self._connected
 
     async def _init_redis(self):

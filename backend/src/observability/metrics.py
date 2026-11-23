@@ -96,7 +96,9 @@ class MetricsRegistry:
         """Create or get an up-down counter metric"""
         with self._lock:
             if config.name not in self.updown_counters:
-                self.updown_counters[config.name] = _active_meter().create_up_down_counter(
+                self.updown_counters[
+                    config.name
+                ] = _active_meter().create_up_down_counter(
                     name=config.name, description=config.description, unit=config.unit
                 )
             return self.updown_counters[config.name]
@@ -112,7 +114,6 @@ class MetricsRegistry:
                     callbacks=[callback],
                 )
             return self.gauges[config.name]
-
 
     def kind_of(self, name: str) -> Optional[str]:
         if name in self.histograms:
