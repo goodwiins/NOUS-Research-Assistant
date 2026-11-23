@@ -21,7 +21,7 @@ from src.models import Collection, CollectionDocument, Workspace
 from src.models.document import Document
 from src.models.extraction_matrix import ExtractionCell, ExtractionMatrix
 from src.models.user import User
-from src.services.research import extraction_forms_service
+from src.services.research import draft_release_service, extraction_forms_service
 from src.services.research.extraction_matrix_service import ExtractionMatrixService
 from src.services.research_engine.project_access import (
     ProjectContext,
@@ -286,7 +286,7 @@ async def update_matrix(
             detail="Matrix not found",
         )
 
-    context = await resolve_project(
+    context = await draft_release_service.resolve_for_staling(
         db, matrix.project_id, current_user.id, ResearchAction.EDIT
     )
 
@@ -587,8 +587,9 @@ async def accept_extraction_value(
     db: AsyncSession = Depends(get_db),
 ) -> ExtractionAcceptedValueResponse:
     """Accept a value that equals a cited observation (ADJUDICATOR role only)."""
-    context = await _matrix_context(
-        db, matrix_id, current_user, ResearchAction.ADJUDICATE
+    project_id = await extraction_forms_service.matrix_project_id(db, matrix_id)
+    context = await draft_release_service.resolve_for_staling(
+        db, project_id, current_user.id, ResearchAction.ADJUDICATE
     )
     return await extraction_forms_service.accept_value(
         db, context, matrix_id, current_user.id, request

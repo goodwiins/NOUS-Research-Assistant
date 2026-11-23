@@ -10,7 +10,7 @@ transaction (which already holds the Collection lock and its own stream), so
 ``draft_releases`` rows plus the evidence graph; nothing is stored on drafts.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence, cast
 from uuid import UUID, uuid4
@@ -34,7 +34,7 @@ from src.models.research_claim import (
     ResearchClaimStanceObservation,
     ResearchClaimVersion,
 )
-from src.models.research_decision import ResearchDecisionEvent
+from src.models.research_decision import ResearchDecisionEvent, ResearchDecisionStream
 from src.models.research_project_role import ResearchProjectRole
 from src.models.user import User
 from src.services.research import claim_rules, extraction_rules
@@ -50,7 +50,11 @@ from src.services.research_engine.identity_service import (
     _replayed_event,
     current_protocol_version_id,
 )
-from src.services.research_engine.project_access import ProjectContext
+from src.services.research_engine.project_access import (
+    ProjectContext,
+    ResearchAction,
+    resolve_project,
+)
 from src.services.research_engine.screening_service import _is_unique_violation
 from src.shared.research_schemas import (
     DraftPromoteRequest,
@@ -123,6 +127,93 @@ async def load_edges(db: AsyncSession, collection_id: UUID) -> list[Edge]:
     observation hop adds no reachability; walk it if observations ever
     carry their own dependents.``"""
     return (await _graph(db, collection_id)).edges
+
+
+@dataclass(frozen=True)
+class EdgeSnapshot:
+    """``load_edges`` read before the Collection lock (GOO-721), with the
+    Collection's decision-stream heads read just before it."""
+
+    collection_id: UUID
+    heads: tuple[tuple[str, int], ...]
+    edges: tuple[Edge, ...]
+
+
+async def _stream_heads(
+    db: AsyncSession, collection_id: UUID
+) -> tuple[tuple[str, int], ...]:
+    """Every graph input (accepted value, link, assessment, release,
+    appraisal, evidence table, certainty, contradiction, synthesis result,
+    run manifest, figure) is written by a function that appends a decision
+    to one of this Collection's streams in the same transaction, so equal
+    heads mean equal edges."""
+    rows = await db.execute(
+        select(ResearchDecisionStream.id, ResearchDecisionStream.next_seq)
+        .where(ResearchDecisionStream.collection_id == collection_id)
+        .order_by(ResearchDecisionStream.id)
+    )
+    return tuple((str(stream_id), int(head)) for stream_id, head in rows.all())
+
+
+async def _live_release_ids(db: AsyncSession, collection_id: UUID) -> list[UUID]:
+    return await _all(
+        db,
+        select(DraftRelease.id).where(
+            DraftRelease.collection_id == collection_id,
+            DraftRelease.stale_at.is_(None),
+        ),
+    )
+
+
+async def snapshot_edges(db: AsyncSession, collection_id: UUID) -> EdgeSnapshot:
+    """Read the edges without holding any lock. Heads first: a commit that
+    lands mid-read moves the heads past the snapshot, so the check under the
+    lock discards it rather than trusting a graph older than its heads.
+
+    The rows read here are expunged afterwards, so the locked writer that
+    follows in this session loads them fresh instead of from the identity
+    map as they were before the lock."""
+    heads = await _stream_heads(db, collection_id)
+    if not await _live_release_ids(db, collection_id):
+        # Nothing to stale. A release promoted before the lock moves the
+        # heads, which discards this empty snapshot.
+        return EdgeSnapshot(collection_id, heads, ())
+    loaded = set(db.identity_map.keys())
+    edges = tuple(await load_edges(db, collection_id))
+    for key in set(db.identity_map.keys()) - loaded:
+        instance = db.identity_map.get(key)
+        if instance is not None:
+            db.expunge(instance)
+    return EdgeSnapshot(collection_id, heads, edges)
+
+
+async def resolve_for_staling(
+    db: AsyncSession,
+    project_id: UUID,
+    user_id: UUID,
+    action: ResearchAction,
+) -> ProjectContext:
+    """``resolve_project`` for a writer that may stale releases (GOO-721).
+
+    Rebuilding the graph under the Collection ``FOR UPDATE`` lock made every
+    writer in a project wait for it. Here the edges are read after the VIEW
+    access checks but before the lock. Once the lock is held no other writer
+    can append, so if the stream heads still match, the snapshot is exactly
+    the graph at lock time and rides on the context; if not, the context
+    carries None and ``invalidate_dependents`` rebuilds under the lock.
+
+    Only for writers whose own new rows are leaves of the graph (a new tip
+    superseding an old one): their edges cannot reach a release in the same
+    transaction. A writer that adds edges between existing nodes (a review
+    version's accepted delta) must keep resolving with ``resolve_project``."""
+    viewer = await resolve_project(db, project_id, user_id)
+    snapshot = await snapshot_edges(db, _cid(viewer))
+    context = await resolve_project(db, project_id, user_id, action)
+    if _cid(context) != snapshot.collection_id or snapshot.heads != (
+        await _stream_heads(db, snapshot.collection_id)
+    ):
+        return context
+    return replace(context, release_edges=snapshot.edges)
 
 
 async def _graph(db: AsyncSession, collection_id: UUID) -> Graph:
@@ -686,10 +777,16 @@ async def promote(
 
 
 async def source_nodes(
-    db: AsyncSession, collection_id: UUID, document_id: UUID
+    db: AsyncSession,
+    collection_id: UUID,
+    document_id: UUID,
+    edges: Sequence[Edge] | None = None,
 ) -> set[rules.Node]:
-    """This document's graph source revisions that its text no longer matches."""
-    edges = (await _graph(db, collection_id)).edges
+    """This document's graph source revisions that its text no longer matches.
+    ``edges``: the context's ``release_edges`` (GOO-721); None rebuilds them.
+    The document's pins are always read fresh."""
+    if edges is None:
+        edges = await load_edges(db, collection_id)
     return await _changed_sources(db, edges, document_id)
 
 
@@ -701,15 +798,21 @@ async def invalidate_dependents(
     actor_id: UUID,
     actor_role: str,
     cause: dict[str, Any],
+    edges: Sequence[Edge] | None = None,
 ) -> list[UUID]:
     """Stamp every live release reachable from ``changed`` stale and append
     one ``release.staled``. Runs in the caller's transaction; never commits.
-    The ``stale_at IS NULL`` guard makes a release stale exactly once."""
+    The ``stale_at IS NULL`` guard makes a release stale exactly once.
+
+    ``edges``: the context's ``release_edges``, checked current when the
+    Collection lock was taken (``resolve_for_staling``). None rebuilds the
+    graph here, under the lock (GOO-721)."""
     changed = set(changed)
-    if not changed:
+    if not changed or not await _live_release_ids(db, collection_id):
         return []
-    graph = await _graph(db, collection_id)
-    reached = rules.dependents(graph.edges, changed)
+    if edges is None:
+        edges = await load_edges(db, collection_id)
+    reached = rules.dependents(list(edges), changed)
     candidates = [UUID(value) for kind, value in reached if kind == "release"]
     if not candidates:
         return []
