@@ -294,6 +294,30 @@ def fresh_api_rate_limiter(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def no_real_database(monkeypatch):
+    """Keep these suites off any real database (GOO-780 review).
+
+    Every successful search queues ``log_search_query`` as a background task,
+    and it opened a real ``SessionLocal()`` against localhost:5432. Without a
+    server that failed and was swallowed by the analytics logger; with a slow
+    or busy one it stalled the request. The analytics write is replaced by a
+    recorder, and any other ``SessionLocal()`` use fails the test.
+    """
+    import src.api.search.search as search_api
+    import src.core.database as database
+
+    analytics = Mock(name="log_search_query")
+    monkeypatch.setattr(search_api, "log_search_query", analytics)
+    real_sessions = Mock(name="SessionLocal")
+    monkeypatch.setattr(database, "SessionLocal", real_sessions)
+    yield analytics
+    assert not real_sessions.called, (
+        "a search-security test opened a real database session: "
+        f"{real_sessions.call_args_list}"
+    )
+
+
 @pytest.fixture
 async def rate_limiter_mock():
     """Mock rate limiter for testing"""
@@ -390,6 +414,18 @@ class SecurityTestCase:
         except Exception:
             pass
         return False
+
+    @staticmethod
+    def assert_query_reached_search_as_data(search_service_mocks, payload: str) -> None:
+        """The endpoint handed ``payload`` to the search layer once, unchanged,
+        as the request's query value: no SQL was built from it on the way."""
+        calls = [
+            call
+            for mock in search_service_mocks.values()
+            for call in mock.search.call_args_list
+        ]
+        assert len(calls) == 1, f"expected one search call, got {len(calls)}"
+        assert calls[0].kwargs["search_request"].query == payload
 
     def assert_no_information_disclosure(self, response, sensitive_patterns: List[str]):
         """Assert response doesn't disclose sensitive information"""
