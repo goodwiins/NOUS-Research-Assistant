@@ -100,6 +100,9 @@ export interface UseChatSessionReturn {
   /** Signed out in the store, but the profile is still resolving or only
    * /auth/me is unavailable for a verified user: no login redirect. */
   isAuthPending: boolean;
+  /** Pending because /auth/me failed every retry, with no retry in flight:
+   * show the outage, not a loading state. */
+  isProfileUnavailable: boolean;
 
   // Derived
   activeThreadId: string | null;
@@ -188,6 +191,10 @@ export function useChatSession(): UseChatSessionReturn {
   // not redirect to login while it lasts.
   const isAuthPending =
     !isAuthenticated && (isAuthLoading || profileUnavailable);
+  // GOO-759: the retries ran out and nothing is in flight. The transcript
+  // says so instead of spinning; a Retry puts it back to loading.
+  const isProfileUnavailable =
+    !isAuthenticated && profileUnavailable && !isAuthLoading;
   const userId = user?.id ?? null;
 
   // ---- Store bindings ----
@@ -1098,6 +1105,7 @@ export function useChatSession(): UseChatSessionReturn {
     addMessageToStore,
     isAuthenticated,
     isAuthPending,
+    isProfileUnavailable,
 
     // Derived
     activeThreadId,

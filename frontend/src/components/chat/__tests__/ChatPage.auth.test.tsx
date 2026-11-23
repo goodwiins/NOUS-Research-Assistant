@@ -123,6 +123,26 @@ describe('ChatPage auth states', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('says the account could not be loaded, without a spinner, during an outage (GOO-759)', () => {
+    mockUseChatSession.mockReturnValue({
+      ...mockUseChatSession(),
+      isAuthenticated: false,
+      isAuthPending: true,
+      isProfileUnavailable: true,
+    });
+
+    const { container } = render(<ChatPage />);
+
+    expect(
+      screen.getByText("Your account couldn't be loaded")
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Loading your account…')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Authentication required. Redirecting...')
+    ).not.toBeInTheDocument();
+    expect(container.querySelector('.animate-spin')).toBeNull();
+  });
+
   it('shows the cold-init skeleton before session data loads, even once authenticated', () => {
     mockUseChatSession.mockReturnValue({
       ...mockUseChatSession(),

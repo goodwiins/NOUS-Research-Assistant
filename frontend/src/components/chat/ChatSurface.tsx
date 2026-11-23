@@ -84,6 +84,7 @@ export function ChatSurface({
     displayedMessages,
     isAuthenticated,
     isAuthPending,
+    isProfileUnavailable,
     isInitializing,
     initError,
     isLoadingMessages,
@@ -429,6 +430,7 @@ export function ChatSurface({
           <ChatTranscriptState
             isAuthenticated={isAuthenticated}
             isAuthPending={isAuthPending}
+            isProfileUnavailable={isProfileUnavailable}
             isInitializing={isInitializing}
             initError={initError}
             isLoadingMessages={isLoadingMessages}

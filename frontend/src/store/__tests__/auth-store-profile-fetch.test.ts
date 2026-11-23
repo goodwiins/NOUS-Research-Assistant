@@ -394,6 +394,71 @@ describe('useAuthStore first-load profile failures (FL2E-2)', () => {
     expect(useAuthStore.getState().profileUnavailable).toBe(true);
   });
 
+  // GOO-759: every path that settles who the user is must drop the
+  // "unavailable" flag, or /chat keeps waiting instead of redirecting or
+  // loading.
+  async function settleUnavailable(harness: Harness): Promise<void> {
+    harness.apiGet.mockRejectedValue(UNAVAILABLE());
+    await harness.useAuthStore.getState().fetchProfile();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.useAuthStore.getState().profileUnavailable).toBe(true);
+  }
+
+  it('clears profileUnavailable when a retry finds the token rejected', async () => {
+    const harness = await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+    await settleUnavailable(harness);
+
+    harness.apiGet.mockRejectedValue(
+      new APIErrorClass({
+        message: 'Invalid token',
+        status_code: 401,
+        type: 'auth_error',
+      })
+    );
+    await harness.useAuthStore.getState().retryProfile();
+
+    expect(harness.useAuthStore.getState()).toMatchObject({
+      isAuthenticated: false,
+      isLoading: false,
+      profileUnavailable: false,
+    });
+  });
+
+  it('clears profileUnavailable when the same account signs in', async () => {
+    const harness = await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+    await settleUnavailable(harness);
+
+    harness.apiGet.mockResolvedValue(PROFILE);
+    await harness.useAuthStore
+      .getState()
+      .signIn('ada@example.com', 'synthetic-password');
+
+    expect(harness.useAuthStore.getState()).toMatchObject({
+      isAuthenticated: true,
+      profileUnavailable: false,
+    });
+  });
+
+  it('clears profileUnavailable as soon as another account signs in', async () => {
+    const harness = await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+    await settleUnavailable(harness);
+
+    const userB = { id: 'user-2' };
+    harness.emit('SIGNED_IN', { access_token: 'access-token-2', user: userB });
+
+    // Before user 2's own /auth/me runs: user 1's outage is not user 2's.
+    expect(harness.useAuthStore.getState()).toMatchObject({
+      isLoading: true,
+      profileUnavailable: false,
+    });
+  });
+
   it('drops a pending retry when the user signs out meanwhile', async () => {
     const { useAuthStore, apiGet, emit } = await loadStore();
     vi.useFakeTimers();
