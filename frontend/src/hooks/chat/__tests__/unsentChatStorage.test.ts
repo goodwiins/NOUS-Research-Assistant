@@ -137,6 +137,27 @@ describe('unsentChatStorage', () => {
       }),
     ],
     [
+      'an attachment with a valid id but a bad document_id',
+      JSON.stringify({
+        version: 1,
+        ownerUserId: 'user-1',
+        threads: {
+          'thread:thread-A': {
+            updatedAt: 1,
+            unsent: [
+              {
+                runtimeId: 'r1',
+                content: 'x',
+                timestamp: 1,
+                sendFailed: { message: 'Not sent.' },
+                attachments: [{ id: 'att-1', document_id: 42 }],
+              },
+            ],
+          },
+        },
+      }),
+    ],
+    [
       'an attachment with a non-string label',
       JSON.stringify({
         version: 1,

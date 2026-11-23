@@ -1,9 +1,10 @@
 /**
  * GOO-788: unsent turns and composer drafts live in this tab's
- * sessionStorage. Every route that ends a session must remove them, not just
- * an explicit sign-out: a SIGNED_OUT from another tab or an expiry, and a
- * token the backend rejected. Another account observed in this tab must
- * never find the previous account's text either.
+ * sessionStorage. A real end of the session removes them: an explicit
+ * sign-out, a SIGNED_OUT (another tab, an expiry), a 401/403 from Supabase or
+ * our backend. Another account observed in this tab never finds them either.
+ * A transient failure to verify the session (offline, timeout, 5xx) keeps
+ * them: that is when a send failed and the user reloads.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '@/stores/authStore';
@@ -103,6 +104,62 @@ describe('unsent chat text ends with the session (GOO-788)', () => {
     expect(useAuthStore.getState().user).toBeNull();
     expect(window.sessionStorage.getItem(UNSENT_CHAT_STORAGE_KEY)).toBeNull();
     expect(loadChatDraft('A', 'ws-1', 'thread-A')).toBeUndefined();
+  });
+
+  it('is cleared when Supabase rejects the token (401) on verification', async () => {
+    leaveUnsentTextFor('A');
+    auth.getUser.mockResolvedValueOnce({
+      data: { user: null },
+      error: Object.assign(new Error('invalid JWT'), { status: 401 }),
+    });
+
+    await useAuthStore.getState().fetchProfile();
+
+    expect(window.sessionStorage.getItem(UNSENT_CHAT_STORAGE_KEY)).toBeNull();
+  });
+
+  it('is cleared when /auth/me rejects the token (403)', async () => {
+    leaveUnsentTextFor('A');
+    useAuthStore.setState({ user: null, isAuthenticated: false });
+    vi.mocked(api.get).mockRejectedValueOnce({ error: { status_code: 403 } });
+
+    await useAuthStore.getState().fetchProfile();
+
+    expect(useAuthStore.getState().user).toBeNull();
+    expect(window.sessionStorage.getItem(UNSENT_CHAT_STORAGE_KEY)).toBeNull();
+  });
+
+  it.each([
+    ['offline', Object.assign(new Error('Failed to fetch'), { status: 0 })],
+    ['a 5xx', Object.assign(new Error('upstream down'), { status: 503 })],
+    ['a timeout', Object.assign(new Error('timed out'), { status: undefined })],
+  ])(
+    'survives a reload whose session check fails with %s',
+    async (_label, error) => {
+      leaveUnsentTextFor('A');
+      // A reload: memory no longer knows the profile.
+      useAuthStore.setState({ user: null, isAuthenticated: false });
+      auth.getUser.mockResolvedValueOnce({ data: { user: null }, error });
+
+      await useAuthStore.getState().fetchProfile();
+
+      expect(useAuthStore.getState().user).toBeNull();
+      expect(loadUnsentTurns('A', 'thread-A')).toEqual([
+        expect.objectContaining({ content: 'rejected question' }),
+      ]);
+      expect(loadChatDraft('A', 'ws-1', 'thread-A')).toBe('half-typed');
+    }
+  );
+
+  it('survives a reload whose session check throws', async () => {
+    leaveUnsentTextFor('A');
+    useAuthStore.setState({ user: null, isAuthenticated: false });
+    auth.getUser.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+    await useAuthStore.getState().fetchProfile();
+
+    expect(loadUnsentTurns('A', 'thread-A')).toHaveLength(1);
+    expect(loadChatDraft('A', 'ws-1', 'thread-A')).toBe('half-typed');
   });
 
   it('is cleared by an explicit sign-out', async () => {

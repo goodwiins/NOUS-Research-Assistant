@@ -111,6 +111,30 @@ function errorStatusCode(error: unknown): number | undefined {
     : undefined;
 }
 
+/** Supabase AuthError carries the HTTP status on `status`. */
+function authErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object' || !('status' in error)) {
+    return undefined;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+const isRejectionStatus = (status: number | undefined): boolean =>
+  status === 401 || status === 403;
+
+/**
+ * GOO-788: this tab's unsent turns and drafts go only when the session has
+ * really ended: an explicit sign-out, SIGNED_OUT, a 401/403 rejection, or
+ * another account (observeIdentity). A network, timeout or 5xx failure while
+ * verifying on reload must keep them: that is exactly when a send failed and
+ * the user reloads. The record's owner stamp already keeps it from any other
+ * account.
+ */
+function discardUnsentChatText(): void {
+  attempt('clear unsent chat text', clearUnsentChatStorage);
+}
+
 let authStateListenerRegistered = false;
 
 // FL2E-2: a transient /auth/me failure after getUser() verified the user is
@@ -223,10 +247,6 @@ function clearSession(): void {
   resetProfileRetries();
   sessionUserId = null;
   activeSignIn = null;
-  // Every route that ends a session lands here: an explicit sign-out, a
-  // SIGNED_OUT from another tab, a missing or expired session, a rejected
-  // token. None may leave this tab's unsent turns or drafts behind (GOO-788).
-  attempt('clear unsent chat text', clearUnsentChatStorage);
   clearUserScopedClientState();
   useAuthStore.setState({
     user: null,
@@ -255,8 +275,8 @@ function observeIdentity(userId: string): void {
   // A rejected session keeps its staged chat draft for the same user's
   // re-login, so clearSession() cannot drop it; any other identity must.
   discardForeignChatAuthRecovery(userId);
-  // Unsent turns and drafts (GOO-788) are already gone if a session ended;
-  // this covers a switch to another account with no session end between.
+  // Unsent turns and drafts (GOO-788): another account never sees them, even
+  // when no sign-out came between.
   discardForeignUnsentChat(userId);
   // In-memory identity answers first: a tab still holding A must clear on
   // B's event even when another tab already re-stamped the shared storage as
@@ -326,6 +346,7 @@ function getSupabaseClient(): SupabaseClient {
       }
 
       if (event === 'SIGNED_OUT') {
+        discardUnsentChatText();
         settleMissingSession();
       }
     });
@@ -518,6 +539,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   signOut: async () => {
+    discardUnsentChatText();
     clearSession();
     const revision = authRevision;
 
@@ -553,6 +575,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       return;
     }
 
+    // The backend answered 401 for this account: the session is over.
+    discardUnsentChatText();
     clearSession();
     clearSupabaseAuthCookies();
   },
@@ -621,6 +645,11 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
         if (revision !== authRevision) return;
         if (userError || !user) {
+          // Only Supabase rejecting the token ends the session for the
+          // unsent text; offline, a timeout or a 5xx keeps it (GOO-788).
+          if (isRejectionStatus(authErrorStatus(userError))) {
+            discardUnsentChatText();
+          }
           settleMissingSession();
           return;
         }
@@ -712,6 +741,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
           return;
         }
 
+        if (tokenRejected) discardUnsentChatText();
         settleMissingSession();
         set({ error: message });
       }

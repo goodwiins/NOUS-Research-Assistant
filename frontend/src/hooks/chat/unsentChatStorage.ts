@@ -7,9 +7,9 @@ import type { ChatPageMessage } from '@/components/chat/shared/cloudMessageView'
  * rejected (`sendFailed` bubbles, GOO-772) and the composer draft, per thread.
  * Without it a reload lost both, because the chat store persists only
  * selection ids. sessionStorage, not localStorage: the text never outlives the
- * tab and is never shared between accounts on one machine. Every end of a
- * session (sign-out here or in another tab, expiry, a rejected token) and an
- * account change remove it (authStore).
+ * tab and is never shared between accounts on one machine. A real end of the
+ * session (sign-out here or in another tab, a 401/403) and an account change
+ * remove it (authStore); a transient failure to verify the session keeps it.
  *
  * Storage is best-effort. When it is denied or full, chat keeps working with
  * the in-memory state it has always had.
