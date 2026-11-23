@@ -133,45 +133,6 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
-  // Load document content based on type
-  useEffect(() => {
-    const loadDocument = async () => {
-      setIsLoading(true);
-      setError(null);
-
-      try {
-        switch (document.file_type) {
-          case 'pdf':
-            await loadPDFDocument();
-            break;
-          case 'txt':
-            await loadTextDocument();
-            break;
-          case 'jpg':
-          case 'png':
-            await loadImageDocument();
-            break;
-          case 'mp3':
-            await loadAudioDocument();
-            break;
-          case 'mp4':
-            await loadVideoDocument();
-            break;
-          default:
-            throw new Error('Unsupported document type');
-        }
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : 'Failed to load document'
-        );
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    loadDocument();
-  }, [document.id, document.file_type]);
-
   // Load PDF document
   const loadPDFDocument = async () => {
     // Mock PDF loading - in real implementation, use PDF.js or similar
@@ -234,6 +195,46 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
     setVideoMetadata(mockVideoMetadata);
     setDuration(mockVideoMetadata.duration);
   };
+
+  // Load document content based on type. Declared after the loaders it
+  // calls (they are const arrow functions, not hoisted).
+  useEffect(() => {
+    const loadDocument = async () => {
+      setIsLoading(true);
+      setError(null);
+
+      try {
+        switch (document.file_type) {
+          case 'pdf':
+            await loadPDFDocument();
+            break;
+          case 'txt':
+            await loadTextDocument();
+            break;
+          case 'jpg':
+          case 'png':
+            await loadImageDocument();
+            break;
+          case 'mp3':
+            await loadAudioDocument();
+            break;
+          case 'mp4':
+            await loadVideoDocument();
+            break;
+          default:
+            throw new Error('Unsupported document type');
+        }
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : 'Failed to load document'
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadDocument();
+  }, [document.id, document.file_type]);
 
   // Audio controls
   const togglePlayPause = useCallback(() => {
@@ -607,15 +608,20 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                       : 'transform 0.2s',
                   }}
                 >
-                  <img
-                    src={
-                      document.thumbnail_url ||
-                      `https://via.placeholder.com/800x600?text=${document.filename}`
-                    }
-                    alt={document.title}
-                    className="max-w-full max-h-full object-contain"
-                    draggable={false}
-                  />
+                  {/* No third-party placeholder: it sent the file name to an
+                      outside host and CSP img-src blocks it (GOO-722). */}
+                  {document.thumbnail_url ? (
+                    <img
+                      src={document.thumbnail_url}
+                      alt={document.title}
+                      className="max-w-full max-h-full object-contain"
+                      draggable={false}
+                    />
+                  ) : (
+                    <span className="text-sm text-muted-foreground">
+                      No preview available
+                    </span>
+                  )}
                 </div>
               </div>
             )}

@@ -1,26 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
+import { buildCsp } from '../../src/lib/csp';
 import { build } from 'esbuild';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const host = 'https://pdf-preview.test';
 const nonce = 'cGRmLWNhbnZhcy1wcmV2aWV3LWJyb3dzZXI=';
-// Match the complete production parent policy; PDF preview adds no exemptions.
-const csp = [
-  "default-src 'self'",
-  "base-uri 'self'",
-  "object-src 'none'",
-  "frame-src 'self' blob:",
-  "frame-ancestors 'none'",
-  "form-action 'self'",
-  `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https:",
-  "font-src 'self' data:",
-  "connect-src 'self' https: wss:",
-  "worker-src 'self' blob:",
-  'upgrade-insecure-requests',
-].join('; ');
+// The exact production policy (src/lib/csp.ts); previews add no exemptions.
+const csp = buildCsp(nonce, { NODE_ENV: 'production' });
 let bundle: string;
 let worker: Buffer;
 
