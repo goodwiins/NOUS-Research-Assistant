@@ -534,7 +534,7 @@ class QualityRecommendationsService:
                 await performance_dashboard_service.get_system_health_metrics()
             )
 
-            if system_health.cpu_usage > 80:
+            if system_health.cpu_usage is not None and system_health.cpu_usage > 80:
                 recommendations.append(
                     QualityRecommendation(
                         id=str(uuid.uuid4()),
@@ -561,7 +561,10 @@ class QualityRecommendationsService:
                     )
                 )
 
-            if system_health.memory_usage > 85:
+            if (
+                system_health.memory_usage is not None
+                and system_health.memory_usage > 85
+            ):
                 recommendations.append(
                     QualityRecommendation(
                         id=str(uuid.uuid4()),

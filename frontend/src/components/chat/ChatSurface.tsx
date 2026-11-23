@@ -82,6 +82,7 @@ export function ChatSurface({
     activeThreadId,
     displayedMessages,
     isAuthenticated,
+    isAuthPending,
     isInitializing,
     initError,
     isLoadingMessages,
@@ -430,6 +431,7 @@ export function ChatSurface({
 
           <ChatTranscriptState
             isAuthenticated={isAuthenticated}
+            isAuthPending={isAuthPending}
             isInitializing={isInitializing}
             initError={initError}
             isLoadingMessages={isLoadingMessages}

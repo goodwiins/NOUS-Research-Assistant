@@ -296,7 +296,8 @@ async def get_user_behavior_analytics(
         # different org. Guard against None==None: a null-org caller must not
         # read other null-org users' behavior.
         target_user = await to_thread_finish_on_cancel(
-            lambda: db.query(UserModel).filter(UserModel.id == user_id).first()
+            lambda: db.query(UserModel).filter(UserModel.id == user_id).first(),
+            guard_session=db,
         )
         if (
             not current_user.organization_id
@@ -542,7 +543,8 @@ async def get_organization_user_behavior(
                     "cutoff_date": datetime.utcnow() - timedelta(days=90),
                     "limit": limit * 2,  # Get more to filter
                 },
-            ).fetchall()
+            ).fetchall(),
+            guard_session=db,
         )
 
         user_analytics = []
@@ -737,7 +739,8 @@ async def generate_behavior_report(
             target_user = await to_thread_finish_on_cancel(
                 lambda: db.query(UserModel)
                 .filter(UserModel.id == report_request.user_id)
-                .first()
+                .first(),
+                guard_session=db,
             )
             if (
                 not current_user.organization_id
@@ -836,6 +839,7 @@ async def export_behavior_data(
                 limit=500,
                 start_date=start_date,
                 end_date=end_date,
+                guard_session=db,
             )
 
         data: Dict[str, Any] = (

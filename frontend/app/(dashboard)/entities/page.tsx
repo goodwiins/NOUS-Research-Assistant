@@ -47,7 +47,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { EntityList } from '@/components/entities/EntityList';
 import { EntityForm } from '@/components/entities/EntityForm';
 import { EntityDetail } from '@/components/entities/EntityDetail';
-import { EntityGraph } from '@/components/entities/EntityGraph';
+import { EntityGraphPanel } from '@/components/entities/EntityGraphPanel';
 import {
   EntityFilters,
   SortField,
@@ -120,6 +120,7 @@ function EntityManagementContent() {
   const [selectedEntity, setSelectedEntity] = useState<Entity | null>(null);
   const [loading, setLoading] = useState(true);
   const [relationshipsLoading, setRelationshipsLoading] = useState(false);
+  const [relationshipsFailed, setRelationshipsFailed] = useState(false);
   const [serviceUnavailable, setServiceUnavailable] = useState(false);
 
   // Pagination state
@@ -314,6 +315,7 @@ function EntityManagementContent() {
     const requestToken = ++relationshipsRequestToken.current;
     try {
       setRelationshipsLoading(true);
+      setRelationshipsFailed(false);
       const [rels, connectedResponse] = await Promise.all([
         entityService.getAllRelationships(200),
         entityService.getEntities(200, 0, undefined, true),
@@ -343,6 +345,8 @@ function EntityManagementContent() {
       if (isServiceUnavailableError(error)) {
         setServiceUnavailable(true);
       }
+      // Show the failure, not an empty graph (GOO-749).
+      setRelationshipsFailed(true);
       setRelationships([]);
       setGraphEntities([]);
     } finally {
@@ -938,32 +942,17 @@ function EntityManagementContent() {
 
             <TabsContent value="graph" className="mt-0 outline-hidden">
               <div className="rounded-xl border border-border bg-card overflow-hidden shadow-xs p-4">
-                {relationshipsLoading ? (
-                  <div
-                    role="status"
-                    aria-label="Loading graph data"
-                    className="space-y-4"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="h-4 w-40 rounded bg-muted animate-pulse" />
-                      <div className="h-4 w-24 rounded bg-muted animate-pulse" />
-                    </div>
-                    <div className="h-[600px] rounded-lg border border-border bg-muted/30 animate-pulse" />
-                    <p className="text-sm text-muted-foreground">
-                      Loading connected nodes and relationships…
-                    </p>
-                  </div>
-                ) : (
-                  <EntityGraph
-                    entities={graphEntities}
-                    relationships={relationships}
-                    onEntityClick={(entity) => {
-                      setSelectedEntity(entity);
-                      setDetailDialogOpen(true);
-                    }}
-                    height={600}
-                  />
-                )}
+                <EntityGraphPanel
+                  loading={relationshipsLoading}
+                  failed={relationshipsFailed}
+                  onRetry={fetchRelationships}
+                  entities={graphEntities}
+                  relationships={relationships}
+                  onEntityClick={(entity) => {
+                    setSelectedEntity(entity);
+                    setDetailDialogOpen(true);
+                  }}
+                />
               </div>
             </TabsContent>
 

@@ -173,9 +173,8 @@ export function useChatComposerActions({
       if (priorUserIndex < 0) return;
       const priorUser = displayedMessages[priorUserIndex];
       const regenerationHistory = displayedMessages.slice(0, priorUserIndex);
-      setInput(priorUser.content);
       // Bug 2: pass the content explicitly. `handleSubmit` reads `input` from
-      // its closure, and `setInput` above only schedules a state update — the
+      // its closure, and `setInput` below only schedules a state update — the
       // deferred `handleSubmit` would otherwise see the stale pre-setInput value.
       const contentToSend = priorUser.content;
       // Durable regenerate: name the turn being replaced so the server
@@ -189,6 +188,9 @@ export function useChatComposerActions({
         toast.error('Wait for this branch to load before retrying.');
         return;
       }
+      // Only replace the composer draft once the send is going ahead; a
+      // rejected retry must leave whatever the user was typing intact.
+      setInput(contentToSend);
       // Preserve attachments while fencing the deferred send to its account.
       const attachments = priorUser.attachments;
       const attachmentIds = attachments?.map((file) => file.document_id);
@@ -226,7 +228,6 @@ export function useChatComposerActions({
       const edited = displayedMessages[userMessageIndex];
       if (!edited || edited.role !== 'user') return;
       const editedHistory = displayedMessages.slice(0, userMessageIndex);
-      setInput(content);
       // Durable edit: name the turn being replaced so the server tombstones it
       // (and everything after it) instead of only truncating the request
       // context. Omitted when the edited turn has no persisted
@@ -238,6 +239,7 @@ export function useChatComposerActions({
         toast.error('Wait for this branch to load before editing.');
         return;
       }
+      setInput(content);
       const attachments = edited.attachments;
       const attachmentIds = attachments?.map((file) => file.document_id);
       // Pass content explicitly — setInput only schedules an update, and the

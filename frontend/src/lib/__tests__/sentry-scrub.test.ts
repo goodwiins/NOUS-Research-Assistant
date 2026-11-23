@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest';
 import type { Breadcrumb, ErrorEvent, Log } from '@sentry/nextjs';
 import {
   FILTERED,
+  MAX_KEYS,
   MAX_STRING_LENGTH,
+  TRUNCATED_KEYS,
   OBJECT_PLACEHOLDER,
   isSensitiveKey,
   minimalEvent,
@@ -26,6 +28,7 @@ import {
   sentryScrubOptions,
   SENTRY_CONSOLE_LOG_LEVELS,
 } from '@/lib/sentry-scrub';
+import { REPLAY_PRIVACY_OPTIONS } from '@/lib/replay-privacy';
 
 // Secret-shaped fixtures are assembled at runtime so no literal credential
 // is committed (secret scanners match on the source text).
@@ -472,9 +475,319 @@ describe('Sentry config wiring', () => {
 
   it('instrumentation-client scrubs replay frames and the replay URL list', () => {
     const source = readFileSync(resolve(__dirname, '../../..', 'instrumentation-client.ts'), 'utf8');
-    expect(source).toContain('beforeAddRecordingEvent: scrubReplayRecordingEvent');
+    expect(source).toContain('Sentry.replayIntegration(REPLAY_PRIVACY_OPTIONS)');
     expect(source).toContain('scrubReplayEventsIntegration()');
-    expect(source).toContain('maskAllText: true');
-    expect(source).toContain('blockAllMedia: true');
+    // The page-load snapshot is checked right after init (GOO-734).
+    expect(source).toMatch(/installReplayUrlGuard\(\(\) => Sentry\.getReplay\(\)/);
+    expect(REPLAY_PRIVACY_OPTIONS).toMatchObject({
+      maskAllText: true,
+      blockAllMedia: true,
+      beforeAddRecordingEvent: scrubReplayRecordingEvent,
+    });
+    expect(REPLAY_PRIVACY_OPTIONS.block).toEqual(
+      expect.arrayContaining(['a[href*="?"]'])
+    );
+  });
+});
+
+// GOO-735: tuning from the #2265 review. Credentials are assembled at
+// runtime (see the note at the top of the file).
+describe('tuning: ordinary error messages stay readable', () => {
+  it.each([
+    'Unexpected token undefined in JSON at position 0',
+    'token validation failed',
+    'Token expired, please sign in again',
+    'basic authentication failed',
+    'Basic authentication required',
+    'authorization: required',
+    'cookie: not set',
+    'Cookie: missing',
+    'Invalid data: expected a number',
+  ])('keeps %j', (message) => {
+    expect(scrubString(message)).toBe(message);
+  });
+
+  it('keeps http.route and next.route span attributes', () => {
+    const span = {
+      span_id: 's',
+      trace_id: 't',
+      start_timestamp: 1,
+      data: { 'http.route': '/chat/[threadId]', 'next.route': '/api/threads/[id]' },
+    };
+    expect(safeBeforeSendSpan(span as never).data).toEqual(span.data);
+  });
+
+  it('still filters a JSON SSE frame and real credentials after those words', () => {
+    expect(scrubString(SSE_LINE)).toBe('data: [Filtered]');
+    const tokenValue = ['tok', 'A1b2C3d4E5f6'].join('_');
+    expect(scrubString(`Token ${tokenValue}`)).toBe('Token [Filtered]');
+    expect(scrubString(`Basic ${BASIC}`)).toBe('Basic [Filtered]');
+    expect(scrubString('Bearer abcdefghijklmnop')).toBe('Bearer [Filtered]');
+    expect(scrubString(`authorization: ${tokenValue}`)).toBe('Authorization: [Filtered]');
+    expect(scrubString('cookie: sid=abc123; theme=dark')).toBe('Cookie: [Filtered]');
+  });
+
+  it('filters Bearer even before a word Token/Basic would keep (#2278 delta review)', () => {
+    // The scheme rule needs 8+ characters (as at base), so these are the
+    // SCHEME_PROSE words; after Bearer none of them is kept.
+    for (const word of ['required', 'undefined', 'validation', 'authentication', 'exchange', 'rejected']) {
+      expect(scrubString(`Bearer ${word}`), word).toBe('Bearer [Filtered]');
+      expect(scrubString(`Token ${word}`), word).toBe(`Token ${word}`);
+      expect(scrubString(`Token ${word}.`), word).toBe(`Token ${word}.`);
+      expect(scrubString(`Bearer ${word}.`), word).toBe('Bearer [Filtered]');
+    }
+    // "refresh" is not prose: with its dot it reaches the rule's 8
+    // characters and is filtered ("Token refresh" alone is below them).
+    for (const text of ['Token refresh.', 'Basic refreshed']) {
+      expect(scrubString(text), text).toMatch(/^(Token|Basic) \[Filtered\]$/);
+    }
+  });
+
+  it('stays linear on a long run of dots after a scheme (#2278 delta review)', () => {
+    // A run of dots that does not end the value is the slow shape for
+    // /[.!]+$/: every start position scans to the end and fails.
+    for (const value of [
+      `Token ${'.'.repeat(4080)}x`,
+      `Authorization: ${'.'.repeat(4000)}x`,
+    ]) {
+      scrubString(value); // warm up
+      const start = performance.now();
+      for (let i = 0; i < 100; i += 1) scrubString(value);
+      // The quadratic regex took 8-21 ms per call here (0.8 s+ for 100).
+      expect(performance.now() - start, value.slice(0, 14)).toBeLessThan(250);
+    }
+  });
+});
+
+describe('tuning: secrets that used to pass', () => {
+  it('filters key ids in any case and separator style (#2278 delta review)', () => {
+    for (const key of [
+      'keyId', 'key_id', 'apiKeyId', 'KEY_ID', 'API_KEY_ID', 'AWS_ACCESS_KEY_ID',
+      'X-API-KEY-ID', 'apiKey_ID', 'apiKey.id', 'APIKeyId', 'passkeyId', 'KeyIds',
+    ]) {
+      expect(isSensitiveKey(key), key).toBe(true);
+      expect(scrubData({ [key]: 'AKIAABCDEFGH1234' }), key).toEqual({ [key]: FILTERED });
+    }
+  });
+
+  it('filters every key that ends in a key id, ordinary words included (#2278 review)', () => {
+    // No exception list: "monkeyId" is over-scrubbed so that camel-case
+    // splits such as "monKeyId" can never slip through.
+    for (const key of [
+      'keyId', 'key_id', 'apiKeyID', 'signing_key_ids',
+      'monKeyId', 'monkeyId', 'commonKeyId', 'adHocKeyId', 'turKeyId',
+      'user.monKeyId', 'hockeyIds',
+    ]) {
+      expect(isSensitiveKey(key), key).toBe(true);
+    }
+  });
+
+  it('denies session and key identifiers but keeps other ids', () => {
+    for (const key of ['sessionId', 'session_id', 'apiKeyId', 'api_key_id', 'keyIds']) {
+      expect(isSensitiveKey(key), key).toBe(true);
+    }
+    const out = scrubData({
+      sessionId: 'sess-1',
+      apiKeyId: 'key-1',
+      threadId: 'th-1',
+      threadID: 'th-2',
+      span_id: 'sp-1',
+      paid: 'yes-paid',
+      valid: 'valid-text',
+    });
+    expect(out).toEqual({
+      sessionId: FILTERED,
+      apiKeyId: FILTERED,
+      threadId: 'th-1',
+      threadID: 'th-2',
+      span_id: 'sp-1',
+      paid: FILTERED,
+      valid: FILTERED,
+    });
+  });
+
+  it('filters x-api-key, password, api_key and client_secret written name: value', () => {
+    const secret = ['s3cr', 'et-', 'v4lue'].join('');
+    const out = scrubString(
+      [
+        `x-api-key: ${secret}`,
+        `X-API-KEY:${secret}`,
+        `password: "${secret}"`,
+        `api_key: ${secret}`,
+        `client_secret: ${secret}`,
+      ].join('\n')
+    );
+    expectNoLeak(out, [secret]);
+    expect(out).toContain('x-api-key: [Filtered]');
+    expect(out).toContain('password: [Filtered]');
+    expect(out).toContain('api_key: [Filtered]');
+    // Passwords are often plain words, so the name alone is enough here.
+    expect(scrubString(`password: ${'sunflower'}`)).toBe('password: [Filtered]');
+  });
+
+  it('filters credentials in a URL', () => {
+    const pass = ['hun', 'ter2', '-x'].join('');
+    const url = ['https://', 'deploy', ':', pass, '@db.example.test/app'].join('');
+    const out = scrubString(`connect failed: ${url}`);
+    expectNoLeak(out, [pass, 'deploy:']);
+    expect(out).toBe('connect failed: https://[Filtered]@db.example.test/app');
+    const pg = ['postgres://', 'admin', ':', pass, '@10.0.0.5:5432/db'].join('');
+    expect(scrubString(pg)).toBe('postgres://[Filtered]@10.0.0.5:5432/db');
+    expect(scrubString('see https://example.test:8443/path')).toBe(
+      'see https://example.test:8443/path'
+    );
+  });
+
+  it('keeps only known technical strings in device, app and os contexts', () => {
+    const event = {
+      event_id: 'e',
+      contexts: {
+        device: { name: "Alice's iPhone", model: 'iPhone15,2', family: 'iOS', memory_size: 4096 },
+        os: { name: 'macOS', version: '15.1', raw: 'Mozilla/5.0 (custom alice build)' },
+        app: { app_name: 'NOUS', app_version: '1.2.3', device_app_hash: 'free text alice' },
+        browser: { name: 'Chrome', version: '131' },
+      },
+    };
+    const out = JSON.parse(dump(scrubEvent(event as never)));
+    expect(out.contexts.device).toEqual({ model: 'iPhone15,2', family: 'iOS', memory_size: 4096 });
+    expect(out.contexts.os).toEqual({ name: 'macOS', version: '15.1' });
+    expect(out.contexts.app).toEqual({ app_name: 'NOUS', app_version: '1.2.3' });
+    expect(out.contexts.browser).toEqual({ name: 'Chrome', version: '131' });
+    expectNoLeak(out, ['alice', 'Alice']);
+  });
+});
+
+describe('tuning: robustness', () => {
+  const boom = (): never => {
+    throw new Error('boom');
+  };
+
+  it('reads each span field safely in the fallback', () => {
+    const span = Object.defineProperties(
+      { trace_id: 't', start_timestamp: 1, op: 'http' },
+      {
+        span_id: { enumerable: true, get: boom },
+        description: { enumerable: true, get: boom },
+      }
+    );
+    expect(safeBeforeSendSpan(span as never)).toEqual({
+      span_id: '',
+      trace_id: 't',
+      start_timestamp: 1,
+      op: 'http',
+      data: {},
+    });
+  });
+
+  it(`scans at most ${MAX_KEYS} keys per object and counts the rest`, () => {
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < MAX_KEYS + 25; i += 1) wide[`k${i}`] = i;
+    const out = scrubData(wide);
+    expect(Object.keys(out)).toHaveLength(MAX_KEYS + 1);
+    expect(out[TRUNCATED_KEYS]).toBe(25);
+    expect(out.k0).toBe(0);
+    expect(out[`k${MAX_KEYS}`]).toBeUndefined();
+  });
+
+  it.each([
+    ['5 MB of scheme-like text', 'ab://cd:'.repeat(625_000)],
+    ['5 MB of password: prefixes', 'password: '.repeat(500_000)],
+    ['5 MB of Token words', 'Token abcdefgh '.repeat(333_334)],
+    ['5 MB of cookie: prose', 'cookie: not set '.repeat(312_500)],
+  ])('scrubs %s in well under 50 ms', (_label, input) => {
+    scrubString('warm up');
+    const start = performance.now();
+    scrubString(input);
+    expect(performance.now() - start).toBeLessThan(50);
+  });
+
+  it('scrubs a 100k-key object quickly', () => {
+    const wide: Record<string, string> = {};
+    for (let i = 0; i < 100_000; i += 1) wide[`title${i}`] = 'x';
+    const start = performance.now();
+    scrubData(wide);
+    expect(performance.now() - start).toBeLessThan(50);
+  });
+});
+
+describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-R7)', () => {
+  // Credential shapes, assembled at runtime.
+  const letters = ['xQ', 'pLmN', 'oRtz'].join('');
+  const hex = ['9f8e', '7d6c', '5b4a', '3921'].join('');
+  const uuid = ['3f2a1b4c', '9d8e', '4f7a', 'b6c5', 'd4e3f2a1b0c9'].join('-');
+  const b64 = Buffer.from('svc:letmein-now').toString('base64');
+  const SHAPES = [letters, letters.toLowerCase(), hex, uuid, b64, JWT.split('.')[2]];
+
+  const expectFiltered = (input: string, secret: string): void => {
+    const out = scrubString(input);
+    expect(out, input).not.toContain(secret);
+    expect(out, input).toContain(FILTERED);
+  };
+
+  it.each(['ApiKey', 'Key', 'SSWS', 'OAuth', 'DPoP', 'Custom', 'Bearer', 'Basic'])(
+    'R1: Authorization with the %s scheme is filtered for every credential shape',
+    (scheme) => {
+      for (const cred of SHAPES) {
+        expectFiltered(`Authorization: ${scheme} ${cred}`, cred);
+        expectFiltered(`proxy-authorization=${scheme} ${cred}`, cred);
+      }
+    }
+  );
+
+  it('R2: a bare letters-only Authorization value is filtered', () => {
+    for (const cred of [letters, letters.toLowerCase(), 'abcdefghijklmnopqrstuvwxyzabcde']) {
+      expectFiltered(`Authorization: ${cred}`, cred);
+      expectFiltered(`Proxy-Authorization: ${cred}`, cred);
+    }
+    // Only a single prose word stays.
+    expect(scrubString('Authorization: required')).toBe('Authorization: required');
+    expectFiltered('Authorization: required abcdefgh', 'abcdefgh');
+  });
+
+  it('R3: a letters-only credential after Token or Basic is filtered', () => {
+    for (const cred of [letters, letters.toLowerCase(), 'qwertyuiopasdf']) {
+      expectFiltered(`Token ${cred}`, cred);
+      expectFiltered(`basic ${cred}`, cred);
+    }
+  });
+
+  it('R4: any value after cookie:, Set-Cookie: or cookie= is filtered', () => {
+    for (const prefix of ['cookie: ', 'Cookie:', 'COOKIE: ', 'Set-Cookie: ', 'set-cookie:', 'cookie=']) {
+      for (const cred of SHAPES) expectFiltered(`${prefix}${cred}`, cred);
+    }
+  });
+
+  it.each([
+    'sid = v4lue',
+    '; sid=v4lue',
+    '     sid=v4lue',
+    'sid:v4lue',
+    '{sid: v4lue}',
+    'missing, sid=v4lue',
+    'not set; sid=v4lue',
+  ])('R5: Cookie: %j is filtered', (value) => {
+    expectFiltered(`Cookie: ${value}`, 'v4lue');
+  });
+
+  it.each([
+    `data: ${letters}`,
+    `data:${letters}`,
+    `   data: ${letters}`,
+    `event: message\ndata: ${letters}`,
+    `id: 7\ndata: ${letters}`,
+  ])('R6: a plain-text SSE frame %j is filtered', (input) => {
+    expectFiltered(input, letters);
+  });
+
+  it('R7: SSE frames carrying message content are filtered', () => {
+    expectFiltered('data: my password is hunter-two', 'hunter-two');
+    expectFiltered('data: user said my diagnosis is bipolar', 'diagnosis');
+  });
+
+  it('keeps the readability fixes only for exact prose', () => {
+    expect(scrubString('Unexpected token undefined in JSON')).toBe('Unexpected token undefined in JSON');
+    expect(scrubString('basic authentication failed')).toBe('basic authentication failed');
+    expect(scrubString('cookie: not set')).toBe('cookie: not set');
+    expect(scrubString('Invalid data: expected a number')).toBe('Invalid data: expected a number');
   });
 });

@@ -43,6 +43,110 @@ let inflightProjectFetch: { id: string; promise: Promise<void> } | null = null;
 // the original caller's in-flight request and that caller already owns it.
 let projectFetchToken: object | null = null;
 
+// Ownership for the per-project lists (GOO-666 FL2E-4). Each list fetch
+// installs its own owner object for its project; a response commits only if
+// it still owns its kind, so a slow response for project A can no longer
+// overwrite project B's documents, notes or bibliography. A newer request of
+// the same kind supersedes an older one, and switching to another project
+// drops every owner (in flight or committed) that belongs to a different
+// project. Module scope, same pattern as projectFetchToken.
+type ListKind = 'documents' | 'notes' | 'bibliography';
+interface ListOwner {
+  readonly projectId: string;
+}
+const listRequest: Record<ListKind, ListOwner | null> = {
+  documents: null,
+  notes: null,
+  bibliography: null,
+};
+// Which project the committed list currently shown belongs to.
+const listShownFor: Record<ListKind, string | null> = {
+  documents: null,
+  notes: null,
+  bibliography: null,
+};
+
+function claimList(kind: ListKind, projectId: string): ListOwner {
+  const owner: ListOwner = { projectId };
+  listRequest[kind] = owner;
+  return owner;
+}
+
+const ownsList = (kind: ListKind, owner: ListOwner): boolean =>
+  listRequest[kind] === owner;
+
+function commitList(kind: ListKind, owner: ListOwner): void {
+  listRequest[kind] = null;
+  listShownFor[kind] = owner.projectId;
+}
+
+/**
+ * State to apply when the current project becomes `projectId`: drop every
+ * in-flight list request and committed list that belongs to another project
+ * (and clear its spinner), keep the ones that already belong to this one.
+ */
+function releaseListsNotOwnedBy(
+  projectId: string | null,
+  previousProjectId: string | null
+): Partial<
+  Pick<
+    ProjectState,
+    | 'projectDocuments'
+    | 'projectNotes'
+    | 'bibliography'
+    | 'documentsLoading'
+    | 'notesLoading'
+  >
+> {
+  const patch: Partial<
+    Pick<
+      ProjectState,
+      | 'projectDocuments'
+      | 'projectNotes'
+      | 'bibliography'
+      | 'documentsLoading'
+      | 'notesLoading'
+    >
+  > = {};
+  const foreign = (id: string | null | undefined): boolean =>
+    id != null && id !== projectId;
+  if (foreign(listRequest.documents?.projectId)) {
+    listRequest.documents = null;
+    patch.documentsLoading = false;
+  }
+  if (foreign(listRequest.notes?.projectId)) {
+    listRequest.notes = null;
+    patch.notesLoading = false;
+  }
+  if (foreign(listRequest.bibliography?.projectId)) {
+    listRequest.bibliography = null;
+  }
+  // A list with no recorded owner (set by a mutation, or before any fetch)
+  // is taken to belong to the previous current project, as before.
+  const shownFor = (kind: ListKind): string | null =>
+    listShownFor[kind] ?? previousProjectId;
+  if (foreign(shownFor('documents'))) {
+    listShownFor.documents = null;
+    patch.projectDocuments = [];
+  }
+  if (foreign(shownFor('notes'))) {
+    listShownFor.notes = null;
+    patch.projectNotes = [];
+  }
+  if (foreign(shownFor('bibliography'))) {
+    listShownFor.bibliography = null;
+    patch.bibliography = null;
+  }
+  return patch;
+}
+
+function resetListOwnership(): void {
+  for (const kind of ['documents', 'notes', 'bibliography'] as const) {
+    listRequest[kind] = null;
+    listShownFor[kind] = null;
+  }
+}
+
 // Dual-cache reconciliation (docs/engineering/frontend.md, "Legacy
 // server-state stores"): the context rail caches the same project documents/
 // notes via useProjectWorkingFolders under ['project', id, 'documents'|
@@ -189,18 +293,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const project = await projectService.getProject(projectId);
         if (!isCurrentAccount()) return;
         if (projectFetchToken !== requestToken) return; // superseded
-        // Clear stale documents/notes from the previous project on switch
-        const prev = get().currentProject;
-        if (prev && prev.id !== projectId) {
-          set({
-            currentProject: project,
-            projectDocuments: [],
-            projectNotes: [],
-            loading: false,
-          });
-        } else {
-          set({ currentProject: project, loading: false });
-        }
+        // Drop lists (and in-flight list requests) that belong to another
+        // project; keep any that already belong to this one.
+        set({
+          currentProject: project,
+          ...releaseListsNotOwnedBy(
+            projectId,
+            get().currentProject?.id ?? null
+          ),
+          loading: false,
+        });
       } catch (error: unknown) {
         if (!isCurrentAccount()) return;
         if (projectFetchToken !== requestToken) return; // superseded
@@ -297,9 +399,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setCurrentProject: (project) => {
     const prev = get().currentProject;
-    // Clear stale documents/notes when switching to a different project
-    if (prev && project && prev.id !== project.id) {
-      set({ currentProject: project, projectDocuments: [], projectNotes: [] });
+    if (prev?.id !== project?.id) {
+      // Switching project (or to none): drop lists and in-flight list
+      // requests that belong to another one.
+      set({
+        currentProject: project,
+        ...releaseListsNotOwnedBy(project?.id ?? null, prev?.id ?? null),
+      });
     } else {
       set({ currentProject: project });
     }
@@ -311,16 +417,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   fetchProjectDocuments: async (projectId) => {
     const isCurrentAccount = captureAccountSession();
+    const owner = claimList('documents', projectId);
     set({ documentsLoading: true, error: null });
     try {
       const response = await projectService.listProjectDocuments(projectId);
       if (!isCurrentAccount()) return;
+      if (!ownsList('documents', owner)) return; // superseded or switched away
+      commitList('documents', owner);
       set({
         projectDocuments: response.documents,
         documentsLoading: false,
       });
     } catch (error: unknown) {
       if (!isCurrentAccount()) return;
+      if (!ownsList('documents', owner)) return;
+      listRequest.documents = null;
       console.error('[ProjectStore] Failed to fetch documents:', error);
       set({
         error: getErrorMessage(error, 'Failed to fetch documents'),
@@ -384,18 +495,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   fetchProjectNotes: async (projectId, pinnedOnly = false) => {
     const isCurrentAccount = captureAccountSession();
+    const owner = claimList('notes', projectId);
     set({ notesLoading: true, error: null });
     try {
       const response = await projectService.listProjectNotes(projectId, {
         pinned_only: pinnedOnly,
       });
       if (!isCurrentAccount()) return;
+      if (!ownsList('notes', owner)) return; // superseded or switched away
+      commitList('notes', owner);
       set({
         projectNotes: response.notes,
         notesLoading: false,
       });
     } catch (error: unknown) {
       if (!isCurrentAccount()) return;
+      if (!ownsList('notes', owner)) return;
+      listRequest.notes = null;
       console.error('[ProjectStore] Failed to fetch notes:', error);
       set({
         error: getErrorMessage(error, 'Failed to fetch notes'),
@@ -501,16 +617,28 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   fetchBibliography: async (projectId, format = 'bibtex') => {
     const isCurrentAccount = captureAccountSession();
+    const owner = claimList('bibliography', projectId);
     set({ loading: true, error: null });
+    // A dropped bibliography request still owns the shared `loading` flag
+    // unless a project fetch has taken it over.
+    const releaseLoading = (): void => {
+      if (!listRequest.bibliography && !inflightProjectFetch) {
+        set({ loading: false });
+      }
+    };
     try {
       const bibliography = await projectService.getProjectBibliography(
         projectId,
         format
       );
       if (!isCurrentAccount()) return;
+      if (!ownsList('bibliography', owner)) return releaseLoading();
+      commitList('bibliography', owner);
       set({ bibliography, loading: false });
     } catch (error: unknown) {
       if (!isCurrentAccount()) return;
+      if (!ownsList('bibliography', owner)) return releaseLoading();
+      listRequest.bibliography = null;
       console.error('[ProjectStore] Failed to fetch bibliography:', error);
       set({
         error: getErrorMessage(error, 'Failed to fetch bibliography'),
@@ -545,6 +673,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   reset: () => {
     projectFetchToken = null;
     inflightProjectFetch = null;
+    resetListOwnership();
     set({
       projects: [],
       currentProject: null,

@@ -78,6 +78,8 @@ function setup(overrides: Record<string, unknown> = {}): {
     setInput,
     handleSubmit,
     retryLast,
+    isLoading: false,
+    storeIsStreaming: false,
     conversations: [makeConversation()],
     activeThreadId: 'thread-1',
     setCurrentThread,
@@ -301,4 +303,57 @@ it('does not re-list memories after old account deletion settles', async () => {
   });
   expect(result.current.commandOutputs).toEqual([]);
   expect(listMemoriesMock).not.toHaveBeenCalled();
+});
+
+describe('synthesis commands', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useChatStore.getState().reset();
+  });
+
+  it('sends the template through a deferred handleSubmit', async () => {
+    const { result, setInput, handleSubmit } = setup();
+    act(() => {
+      result.current.handleSlashCommand('summarize');
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(setInput).toHaveBeenCalledWith(
+      expect.stringContaining('Summarize the key findings')
+    );
+    expect(handleSubmit).toHaveBeenCalledWith(
+      expect.stringContaining('Summarize the key findings')
+    );
+  });
+
+  it.each([
+    ['isLoading', { isLoading: true }],
+    ['storeIsStreaming', { storeIsStreaming: true }],
+  ])(
+    'keeps the draft and sends nothing while %s',
+    async (_label, overrides) => {
+      const { result, setInput, handleSubmit } = setup(overrides);
+      act(() => {
+        result.current.handleSlashCommand('gaps');
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(setInput).not.toHaveBeenCalled();
+      expect(handleSubmit).not.toHaveBeenCalled();
+    }
+  );
+
+  it('drops the deferred send when the account resets inside the window', async () => {
+    const { result, handleSubmit } = setup();
+    act(() => {
+      result.current.handleSlashCommand('timeline');
+      useChatStore.getState().reset();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(handleSubmit).not.toHaveBeenCalled();
+  });
 });
