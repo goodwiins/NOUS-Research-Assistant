@@ -123,7 +123,8 @@ function releaseListsNotOwnedBy(
   }
   // A list with no recorded owner (set by a mutation, or before any fetch)
   // is taken to belong to the previous current project, as before.
-  const shownFor = (kind: ListKind) => listShownFor[kind] ?? previousProjectId;
+  const shownFor = (kind: ListKind): string | null =>
+    listShownFor[kind] ?? previousProjectId;
   if (foreign(shownFor('documents'))) {
     listShownFor.documents = null;
     patch.projectDocuments = [];
@@ -619,7 +620,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ loading: true, error: null });
     // A dropped bibliography request still owns the shared `loading` flag
     // unless a project fetch has taken it over.
-    const releaseLoading = () => {
+    const releaseLoading = (): void => {
       if (!listRequest.bibliography && !inflightProjectFetch) {
         set({ loading: false });
       }

@@ -28,17 +28,21 @@ const svc = projectService as Mocked<typeof projectService>;
 
 const project = (id: string): Project =>
   ({ id, name: `Project ${id}` }) as Project;
-const docs = (id: string) => ({
+const docs = (id: string): { documents: ProjectDocument[] } => ({
   documents: [{ document_id: `doc-${id}` } as ProjectDocument],
 });
-const notes = (id: string) => ({
+const notes = (id: string): { notes: ProjectNote[] } => ({
   notes: [{ id: `note-${id}` } as ProjectNote],
 });
-const bib = (id: string) =>
+const bib = (id: string): ProjectBibliography =>
   ({ project_id: id, content: `bib-${id}` }) as unknown as ProjectBibliography;
 
 /** A promise the test settles by hand. */
-function deferred<T>() {
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} {
   let resolve!: (v: T) => void;
   let reject!: (e: unknown) => void;
   const promise = new Promise<T>((res, rej) => {
@@ -48,7 +52,8 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const state = () => useProjectStore.getState();
+const state = (): ReturnType<typeof useProjectStore.getState> =>
+  useProjectStore.getState();
 type Kind = 'documents' | 'notes' | 'bibliography';
 
 const KINDS: Array<{
@@ -87,7 +92,7 @@ const KINDS: Array<{
   },
 ];
 
-const label = (kind: Kind, id: string) =>
+const label = (kind: Kind, id: string): string =>
   ({ documents: `doc-${id}`, notes: `note-${id}`, bibliography: `bib-${id}` })[
     kind
   ];
