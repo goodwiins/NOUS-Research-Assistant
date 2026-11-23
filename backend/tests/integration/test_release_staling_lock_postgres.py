@@ -27,7 +27,7 @@ backend/tests/integration/test_release_staling_lock_postgres.py``.
 import asyncio
 import hashlib
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 from uuid import UUID
 
 import pytest
@@ -60,7 +60,7 @@ from tests.integration.test_screening_queue_postgres import (  # noqa: F401
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_postgres]
 
-Factory = async_sessionmaker[AsyncSession]
+Factory: TypeAlias = async_sessionmaker[AsyncSession]
 SOURCE = "Methods. We enrolled 412 participants. Discussion follows."
 QUOTE = "We enrolled 412 participants."
 SENTENCE = "The trial enrolled 412 participants."
