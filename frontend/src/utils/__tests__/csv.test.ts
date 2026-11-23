@@ -28,8 +28,34 @@ describe('neutralizeCsvFormula', () => {
     }
   );
 
+  it.each(['-5', '-3.2', '+1.5', '-12%', '42', '0.5'])(
+    'leaves the plain number %j as it is',
+    (value) => {
+      expect(neutralizeCsvFormula(value)).toBe(value);
+    }
+  );
+
+  it.each([
+    '-1e5',
+    '-5.',
+    '-.5',
+    '--5',
+    '-5%%',
+    '-5,000',
+    '- 5',
+    ' -5',
+    '-5\n=cmd',
+    '+1+1',
+  ])('still prefixes %j, which is not strictly a plain number', (value) => {
+    expect(neutralizeCsvFormula(value)).toBe(`'${value}`);
+  });
+
   it('keeps numbers (including negative ones) and booleans as they are', () => {
     expect(neutralizeCsvFormula(-5)).toBe('-5');
+    // Non-strings are never prefixed, even when their text is not a plain
+    // number.
+    expect(neutralizeCsvFormula(-1e21)).toBe('-1e+21');
+    expect(neutralizeCsvFormula(Number.NEGATIVE_INFINITY)).toBe('-Infinity');
     expect(neutralizeCsvFormula(1024)).toBe('1024');
     expect(neutralizeCsvFormula(true)).toBe('true');
     expect(neutralizeCsvFormula(null)).toBe('');

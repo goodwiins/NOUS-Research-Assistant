@@ -17,7 +17,8 @@ const table = {
     [' @SUM(A1)', 'a, b'],
   ],
 };
-const EXPECTED = `Name,Value\n"'=HYPERLINK(""http://x.test"")",'-3\n' @SUM(A1),"a, b"`;
+// -3 is a plain signed number and stays a number; the formulas are prefixed.
+const EXPECTED = `Name,Value\n"'=HYPERLINK(""http://x.test"")",-3\n' @SUM(A1),"a, b"`;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -26,8 +27,13 @@ afterEach(() => {
 describe('ExtractedTablePreview CSV', () => {
   it('copies neutralised, quoted CSV', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    render(<ExtractedTablePreview documentId="d1" table={table} onClose={vi.fn()} />);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    render(
+      <ExtractedTablePreview documentId="d1" table={table} onClose={vi.fn()} />
+    );
     fireEvent.click(screen.getByRole('button', { name: /copy csv/i }));
     expect(writeText).toHaveBeenCalledWith(EXPECTED);
   });
@@ -39,8 +45,12 @@ describe('ExtractedTablePreview CSV', () => {
       return 'blob:x';
     }) as typeof URL.createObjectURL;
     URL.revokeObjectURL = vi.fn();
-    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
-    render(<ExtractedTablePreview documentId="d1" table={table} onClose={vi.fn()} />);
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(
+      () => undefined
+    );
+    render(
+      <ExtractedTablePreview documentId="d1" table={table} onClose={vi.fn()} />
+    );
     fireEvent.click(screen.getByRole('button', { name: /download csv/i }));
     // jsdom's Blob has no text(): read it the browser way.
     const text = await new Promise<string>((done) => {
