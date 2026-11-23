@@ -5,7 +5,6 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e/artifacts',
   testMatch: 'sharing.spec.ts',
-  outputDir: '/tmp/rag-completion-sharing-browser-results',
   timeout: 30_000,
   workers: 1,
   retries: 0,
