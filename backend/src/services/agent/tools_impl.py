@@ -2426,9 +2426,11 @@ async def _dispatch_tool(
             page_context=None,
         )
     if tool_name == "load_project_skill":
+        if current_user is None:
+            return {"error": "load_project_skill: authentication required"}
         return await _tool_load_project_skill(
             args,
-            user_id=user_id,
+            user_id=str(current_user.id),
             project_id=project_id,
             runtime_snapshot_id=runtime_snapshot_id,
             db=db,
@@ -3933,9 +3935,18 @@ async def _tool_do_kb_retrieve(
         retrieve_kb_chunks,
     )
 
-    kb_uuid: Optional[str] = None
-    if db is not None:
-        kb_uuid = await resolve_org_kb_uuid(db, current_user.organization_id)
+    if db is None:
+        if scoped_intent:
+            return scoped_limitation("scoped_retrieval_unavailable")
+        return {
+            "chunks": [],
+            "total": 0,
+            "source": "do_kb",
+            "reason": "runtime_unavailable",
+            "error": "Knowledge base retrieval requires a server session.",
+        }
+
+    kb_uuid: Optional[str] = await resolve_org_kb_uuid(db, current_user.organization_id)
 
     if not kb_uuid:
         if scoped_intent:
