@@ -19,7 +19,7 @@ vi.mock('@/lib/supabase/client', () => ({
 
 import { agentChatService } from '../agentChatService';
 
-const SECRET = 'patient-record-7731';
+const MARKER = 'zebra-teacup-meadow';
 
 function fetchWith(chunks: string[]): typeof fetch {
   const encoder = new TextEncoder();
@@ -63,7 +63,7 @@ describe('SSE dispatch failure logging', () => {
   it('a throwing tool callback logs neither the frame nor the error message', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     global.fetch = fetchWith([
-      `event: tool_start\ndata: {"tool":"create_project_note","args":{"content":"${SECRET}"}}\n\n`,
+      `event: tool_start\ndata: {"tool":"create_project_note","args":{"content":"${MARKER}"}}\n\n`,
     ]);
     await agentChatService.streamMessage(request, {
       onToolStart: (_tool, args) => {
@@ -73,18 +73,18 @@ describe('SSE dispatch failure logging', () => {
 
     expect(warn).toHaveBeenCalled();
     const text = warnedText(warn);
-    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain(MARKER);
     expect(text).toContain('tool_start');
   });
 
   it('a truncated frame logs neither the frame nor the parse error message', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     global.fetch = fetchWith([
-      `event: tool_end\ndata: {"tool":"create_draft","result":"${SECRET}\n\n`,
+      `event: tool_end\ndata: {"tool":"create_draft","result":"${MARKER}\n\n`,
     ]);
     await agentChatService.streamMessage(request, {});
 
     expect(warn).toHaveBeenCalled();
-    expect(warnedText(warn)).not.toContain(SECRET);
+    expect(warnedText(warn)).not.toContain(MARKER);
   });
 });

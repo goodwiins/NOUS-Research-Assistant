@@ -522,7 +522,14 @@ export class SecurityLogger {
 
     // Log to console
     const logMethod = severity === 'critical' || severity === 'high' ? 'error' : 'warn';
-    console[logMethod](`[Security Event] ${type}:`, event);
+    // Log the event's identity only. `data` can hold the triggering user
+    // input (XSS_ATTEMPT / SQL_INJECTION_ATTEMPT keep it), and console
+    // output reaches Sentry (GOO-638).
+    console[logMethod](`[Security Event] ${type}`, {
+      id: event.id,
+      severity: event.severity,
+      timestamp: event.timestamp,
+    });
 
     // Send to server
     this.sendEventToServer(event);
