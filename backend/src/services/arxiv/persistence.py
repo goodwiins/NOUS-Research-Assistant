@@ -709,7 +709,10 @@ async def persist_arxiv_documents(
                         with_for_update=True,
                     )
                     if document.is_deleted:
-                        await kb_db.rollback()
+                        # Commit, not rollback: a rollback expires every loaded
+                        # row, and the rest of the batch is only partially
+                        # refreshed before staging reads content_text.
+                        await kb_db.commit()
                         continue
                     write_token = begin_stage_write(document)
                     await kb_db.commit()  # durable before the upload starts

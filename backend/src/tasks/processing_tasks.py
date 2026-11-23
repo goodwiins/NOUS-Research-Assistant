@@ -27,9 +27,7 @@ from src.models.graph import EntityType as GraphEntityType
 from src.models.graph import ExtractionMethod as GraphExtractionMethod
 from src.models.graph import RelationshipType as GraphRelationshipType
 from src.models.processing import JobStatus, JobType, ProcessingJob
-from src.services.bedrock_sync import (
-    STAGE_WRITE_COLUMNS,
-)
+from src.services.bedrock_sync import STAGE_WRITE_COLUMNS
 from src.services.bedrock_sync import WRITE_SATELLITE as BEDROCK_WRITE_SATELLITE
 from src.services.bedrock_sync import StageOutcome as BedrockStageOutcome
 from src.services.bedrock_sync import (
@@ -38,9 +36,7 @@ from src.services.bedrock_sync import (
     finish_stage_write,
 )
 from src.services.bedrock_sync import mark_deleted as mark_bedrock_deleted
-from src.services.bedrock_sync import (
-    stage_document_sync,
-)
+from src.services.bedrock_sync import stage_document_sync
 from src.services.documents.satellite_state import begin_write, finish_write
 from src.services.knowledge_graph.knowledge_graph_service import (
     GraphExtractor,
