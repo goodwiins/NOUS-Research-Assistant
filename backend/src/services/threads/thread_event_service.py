@@ -43,46 +43,17 @@ class ThreadEventService:
     async def _broadcast_to_channels(
         self, channels: list[str], message: WebSocketMessage
     ) -> None:
-        """Broadcast message to multiple channels with recipient deduplication.
+        """Broadcast to several channels, at most once per connection.
 
-        This prevents duplicate messages to clients subscribed to multiple channels.
-
-        Thread-safety: This method is safe for concurrent async calls. The `sent_to`
-        set is local to each invocation, and asyncio's single-threaded event loop
-        ensures that dictionary/set operations on `channel_subscribers` and
-        `active_connections` are atomic between await points. Each broadcast
-        operation completes its iteration before yielding control.
-
-        Args:
-            channels: List of channel names to broadcast to
-            message: WebSocket message to send
+        Delegates to ``connection_manager.broadcast_to_channels``: it snapshots
+        the subscriber sets before awaiting (a connect/disconnect mid-send can
+        no longer break the loop), sends concurrently with a per-socket
+        timeout so one stuck client cannot stall the rest, applies the
+        per-connection tenant gate (``should_receive_message`` enforces
+        ``target_organization``), and publishes through Redis so subscribers
+        held by other workers/replicas receive the event too.
         """
-        # Track which connection IDs have already received the message
-        # Note: Local set is inherently thread-safe - no shared state between calls
-        sent_to: set[str] = set()
-
-        for channel in channels:
-            # Add channel to target channels if not already present
-            if channel not in message.target_channels:
-                message.target_channels.append(channel)
-
-            # Get subscribers for this channel
-            subscriber_ids = self._manager.channel_subscribers.get(channel, set())
-
-            # Send only to subscribers we haven't sent to yet
-            for connection_id in subscriber_ids:
-                if connection_id in sent_to:
-                    continue  # Skip - already received message
-
-                if connection_id in self._manager.active_connections:
-                    connection_info = self._manager.active_connections[connection_id]
-                    # should_receive_message enforces the target_organization gate
-                    # — a cross-org subscriber is dropped here.
-                    if connection_info.should_receive_message(message):
-                        await self._manager.send_message_to_connection(
-                            connection_id, message
-                        )
-                        sent_to.add(connection_id)
+        await self._manager.broadcast_to_channels(channels, message)
 
     async def broadcast_thread_created(
         self,
