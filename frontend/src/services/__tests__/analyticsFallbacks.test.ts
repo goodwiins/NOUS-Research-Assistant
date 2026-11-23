@@ -127,6 +127,18 @@ describe('an unmeasured search time stays null, never 0 (GOO-745)', () => {
     expect(get).toHaveBeenCalledTimes(1);
   });
 
+  it('fallback: a null /search/analytics average stays null (GOO-761)', async () => {
+    route({
+      '/analytics/performance/search-performance': new Error('500'),
+      '/search/analytics': { ...searchAnalyticsBody, average_search_time_ms: null },
+    });
+
+    const combined = await searchAnalyticsApi.getCombinedSearchAnalytics();
+
+    expect(combined.avgResponseTimeMs).toBeNull();
+    expect(combined.totalSearches).toBe(searchAnalyticsBody.total_searches);
+  });
+
   it.each([
     ['missing', undefined],
     ['a string', '12'],
