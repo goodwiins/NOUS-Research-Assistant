@@ -223,6 +223,10 @@ function clearSession(): void {
   resetProfileRetries();
   sessionUserId = null;
   activeSignIn = null;
+  // Every route that ends a session lands here: an explicit sign-out, a
+  // SIGNED_OUT from another tab, a missing or expired session, a rejected
+  // token. None may leave this tab's unsent turns or drafts behind (GOO-788).
+  attempt('clear unsent chat text', clearUnsentChatStorage);
   clearUserScopedClientState();
   useAuthStore.setState({
     user: null,
@@ -251,8 +255,8 @@ function observeIdentity(userId: string): void {
   // A rejected session keeps its staged chat draft for the same user's
   // re-login, so clearSession() cannot drop it; any other identity must.
   discardForeignChatAuthRecovery(userId);
-  // Same rule for unsent turns and drafts (GOO-788): the same account keeps
-  // them across a lost session, any other account never sees them.
+  // Unsent turns and drafts (GOO-788) are already gone if a session ended;
+  // this covers a switch to another account with no session end between.
   discardForeignUnsentChat(userId);
   // In-memory identity answers first: a tab still holding A must clear on
   // B's event even when another tab already re-stamped the shared storage as
@@ -514,10 +518,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   signOut: async () => {
-    // Only an explicit sign-out drops this tab's unsent turns and drafts
-    // (GOO-788). clearSession() also runs when a session merely lapses or a
-    // profile check fails transiently; the owner stamp covers those.
-    attempt('clear unsent chat text', clearUnsentChatStorage);
     clearSession();
     const revision = authRevision;
 

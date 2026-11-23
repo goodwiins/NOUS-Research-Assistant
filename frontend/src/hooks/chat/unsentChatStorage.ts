@@ -7,7 +7,8 @@ import type { ChatPageMessage } from '@/components/chat/shared/cloudMessageView'
  * rejected (`sendFailed` bubbles, GOO-772) and the composer draft, per thread.
  * Without it a reload lost both, because the chat store persists only
  * selection ids. sessionStorage, not localStorage: the text never outlives the
- * tab and is never shared between accounts on one machine. Sign-out and an
+ * tab and is never shared between accounts on one machine. Every end of a
+ * session (sign-out here or in another tab, expiry, a rejected token) and an
  * account change remove it (authStore).
  *
  * Storage is best-effort. When it is denied or full, chat keeps working with
@@ -57,6 +58,31 @@ function removeRecord(storage: Storage): void {
   }
 }
 
+const OPTIONAL_ATTACHMENT_FIELDS = [
+  'display_name',
+  'thumbnail_url',
+  'document_title',
+  'document_type',
+  'mime_type',
+] as const;
+
+/** An attachment as the composer renders it: string ids and, if present,
+ * string labels. Anything else makes the whole record unreadable. */
+function isAttachment(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const attachment = value as Record<string, unknown>;
+  return (
+    typeof attachment.id === 'string' &&
+    attachment.id.length > 0 &&
+    typeof attachment.document_id === 'string' &&
+    attachment.document_id.length > 0 &&
+    OPTIONAL_ATTACHMENT_FIELDS.every(
+      (field) =>
+        attachment[field] === undefined || typeof attachment[field] === 'string'
+    )
+  );
+}
+
 function isUnsentTurn(value: unknown): value is StoredUnsentTurn {
   if (!value || typeof value !== 'object') return false;
   const turn = value as Record<string, unknown>;
@@ -70,7 +96,8 @@ function isUnsentTurn(value: unknown): value is StoredUnsentTurn {
     !!failure &&
     typeof failure === 'object' &&
     typeof failure.message === 'string' &&
-    (turn.attachments === undefined || Array.isArray(turn.attachments))
+    (turn.attachments === undefined ||
+      (Array.isArray(turn.attachments) && turn.attachments.every(isAttachment)))
   );
 }
 
@@ -244,7 +271,7 @@ export function loadChatDraft(
   return ownedSlot(ownerUserId, draftSlot(workspaceId, threadId))?.draft || undefined;
 }
 
-/** Sign-out: nothing typed in this tab outlives the session. */
+/** Session end: nothing typed in this tab outlives the session. */
 export function clearUnsentChatStorage(): void {
   const storage = unsentStorage();
   if (storage) removeRecord(storage);

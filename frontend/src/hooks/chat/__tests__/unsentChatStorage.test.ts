@@ -115,6 +115,71 @@ describe('unsentChatStorage', () => {
         threads: { 'thread-A': { updatedAt: 1, unsent: [{ content: 'x' }] } },
       }),
     ],
+    [
+      'an attachment without ids',
+      JSON.stringify({
+        version: 1,
+        ownerUserId: 'user-1',
+        threads: {
+          'thread:thread-A': {
+            updatedAt: 1,
+            unsent: [
+              {
+                runtimeId: 'r1',
+                content: 'x',
+                timestamp: 1,
+                sendFailed: { message: 'Not sent.' },
+                attachments: [{ display_name: 'paper.pdf' }],
+              },
+            ],
+          },
+        },
+      }),
+    ],
+    [
+      'an attachment with a non-string label',
+      JSON.stringify({
+        version: 1,
+        ownerUserId: 'user-1',
+        threads: {
+          'thread:thread-A': {
+            updatedAt: 1,
+            unsent: [
+              {
+                runtimeId: 'r1',
+                content: 'x',
+                timestamp: 1,
+                sendFailed: { message: 'Not sent.' },
+                attachments: [
+                  { id: 'a', document_id: 'd', thumbnail_url: { href: 'x' } },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    ],
+    [
+      'an attachment that is not an object',
+      JSON.stringify({
+        version: 1,
+        ownerUserId: 'user-1',
+        threads: {
+          'thread:thread-A': {
+            updatedAt: 1,
+            unsent: [
+              {
+                runtimeId: 'r1',
+                content: 'x',
+                timestamp: 1,
+                sendFailed: { message: 'Not sent.' },
+                attachments: ['att-1'],
+              },
+            ],
+          },
+        },
+      }),
+    ],
   ])('drops a record that is %s instead of restoring it', (_label, raw) => {
     window.sessionStorage.setItem(UNSENT_CHAT_STORAGE_KEY, raw);
 
