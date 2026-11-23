@@ -1,7 +1,7 @@
 import { logger, task, metadata } from "@trigger.dev/sdk";
 import { ingestPaper } from "./ingest-paper";
 import { backendClient } from "../_lib/backend-client";
-import { emptyTally, tallyIngestRuns } from "./tally";
+import { bulkIngestStatus, emptyTally, tallyIngestRuns } from "./tally";
 import {
   ArxivSearchResponseSchema,
   type ArxivBulkIngestPayload,
@@ -87,7 +87,14 @@ export const bulkIngestArxiv = task({
       });
     }
 
-    metadata.set("status", "completed");
-    return { status: "completed", ...tally, total: papers.length };
+    // Never report `completed` when a child failed (GOO-764). The run itself
+    // still succeeds: re-running the bulk task would re-ingest the papers
+    // that were accepted, so a total failure is reported, not thrown.
+    const status = bulkIngestStatus(tally);
+    metadata.set("status", status);
+    if (status !== "completed") {
+      logger.warn("Bulk ingest had failed papers", { status, ...tally });
+    }
+    return { status, ...tally, total: papers.length };
   },
 });
