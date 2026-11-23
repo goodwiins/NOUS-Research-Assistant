@@ -1519,7 +1519,6 @@ export function useChatStreaming(
             },
             onToolStart: (tool, args, callId) => {
               if (!isCurrentSession()) return;
-              console.log('[Agent] Tool start:', tool, args);
               if (currentThreadId && !isReplayedPrefix?.()) {
                 useAgentActivityStore
                   .getState()
@@ -1546,7 +1545,6 @@ export function useChatStreaming(
             },
             onToolEnd: (tool, result, isError, callId) => {
               if (!isCurrentSession()) return;
-              console.log('[Agent] Tool end:', tool, result, { isError });
               const remainsPending = isPendingToolResult(result, isError);
               const resultFailed = isFailedToolResult(result, isError);
               const replayedPrefix = isReplayedPrefix?.() ?? false;
@@ -1639,7 +1637,6 @@ export function useChatStreaming(
             },
             onConfirmation: (threadId, confirmation, runId) => {
               if (!isCurrentSession()) return;
-              console.log('[Agent] HITL confirmation needed:', confirmation);
               streamHadConfirmation = true;
               const confirmationRunId =
                 runId ??
@@ -2416,10 +2413,6 @@ export function useChatStreaming(
 
             if (preflightWasSuperseded()) return;
             const dynamicTitle = generateConversationTitle(content);
-            console.log(
-              '[Chat] Creating new thread in database with title:',
-              dynamicTitle
-            );
             const newThread = await workspaceService.createThread(
               buildThreadCreateRequest({
                 conversationId: threadConversation.id,
