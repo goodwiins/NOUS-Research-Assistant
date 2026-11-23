@@ -24,13 +24,19 @@ from src.schemas.quality_metrics import (
 )
 from src.services.quality.performance_dashboard_service import (
     DashboardWidgetType,
+    MetricsUnavailable,
     MetricTimeRange,
+    chart_granularity,
     performance_dashboard_service,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Stable, safe body for "the metrics store is down": the client shows
+# "unavailable" instead of an empty chart (GOO-732).
+_METRICS_UNAVAILABLE = "Metrics are temporarily unavailable"
 
 
 def _is_org_admin(user: User) -> bool:
@@ -301,6 +307,10 @@ async def get_metric_chart_data(
     time_range: MetricTimeRange = Query(
         MetricTimeRange.LAST_24H, description="Time range for metrics"
     ),
+    # Kept for compatibility but not honoured: the bucket size follows
+    # time_range (1h/24h: hour, 7d: day, longer: week), and the response
+    # reports the one used. A 503 means the metrics store is unreachable, so
+    # an outage is never drawn as an empty chart (GOO-732).
     granularity: str = Query(
         "hour", pattern="^(minute|hour|day|week|month)$", description="Data granularity"
     ),
@@ -336,14 +346,18 @@ async def get_metric_chart_data(
         return {
             "metric_name": metric_name,
             "time_range": time_range.value,
-            "granularity": granularity,
+            # What the data is bucketed by, not what was asked for: weekly
+            # totals were being labelled with the caller's "day".
+            "granularity": chart_granularity(time_range),
             "data": chart_data,
         }
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Failed to get metric chart data: {e}")
+    except MetricsUnavailable:
+        raise HTTPException(status_code=503, detail=_METRICS_UNAVAILABLE)
+    except Exception:
+        logger.exception("Failed to get metric chart data")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -410,8 +424,10 @@ async def create_dashboard_widgets(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Failed to create dashboard widgets: {e}")
+    except MetricsUnavailable:
+        raise HTTPException(status_code=503, detail=_METRICS_UNAVAILABLE)
+    except Exception:
+        logger.exception("Failed to create dashboard widgets")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
