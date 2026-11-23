@@ -15,6 +15,7 @@ import type {
   PageContext,
   ToolExecution,
 } from '@/types/agent-chat';
+import { PROJECT_MUTATING_TOOLS } from '@/lib/agent-tools';
 
 // Callbacks that fire without the backend having accepted the run: auth
 // retries happen before the request lands, and onError covers HTTP-level
@@ -108,15 +109,6 @@ const DEFAULT_PAGE_CONTEXT: PageContext = {
   type: 'unknown',
   label: 'Dashboard',
 };
-
-/** Tools that mutate project data — triggers a refetch on the project page */
-const PROJECT_MUTATING_TOOLS = new Set([
-  'add_document_to_project',
-  'ingest_arxiv_papers',
-  'create_draft',
-  'revise_draft',
-  'create_project_note',
-]);
 
 export function projectIdFromToolResult(result: unknown): string | undefined {
   try {

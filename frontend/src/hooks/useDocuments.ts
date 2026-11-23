@@ -195,6 +195,14 @@ interface UseDocumentsReturn {
 const NON_TERMINAL_STATUSES: ReadonlySet<Document['processing_status']> =
   new Set(['queued', 'processing']);
 
+// A 403 is "not allowed", never "signed out" (GOO-651). Only a 401 may call
+// handleAuthError(); these are shown instead when the server says forbidden.
+const FORBIDDEN_MESSAGES = {
+  list: "You don't have permission to view these documents.",
+  delete: "You don't have permission to delete this document.",
+  reprocess: "You don't have permission to reprocess this document.",
+} as const;
+
 const DOCUMENT_POLL_INTERVAL_MS = 5000;
 const DOCUMENT_POLL_MAX_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -378,11 +386,18 @@ export const useDocuments = (
 
         // Handle APIErrorClass instances (from API client)
         if (error instanceof APIErrorClass) {
-          // Check if it's an authentication error (401/403)
-          if (
-            error.error.status_code === 401 ||
-            error.error.status_code === 403
-          ) {
+          // Only 401 means the session is gone (GOO-651). A 403 is a
+          // permission decision: report it and keep the user signed in.
+          if (error.error.status_code === 403) {
+            if (isStale()) return;
+            setState((prev) => ({
+              ...prev,
+              loading: false,
+              error: FORBIDDEN_MESSAGES.list,
+            }));
+            return;
+          }
+          if (error.error.status_code === 401) {
             handleAuthError();
             if (isStale()) return;
             setState((prev) => ({
@@ -511,16 +526,18 @@ export const useDocuments = (
 
   // Shared by deleteDocument/deleteDocuments: normalize a caught delete error
   // into `{ message, isAuth }`, firing the same handleAuthError side effect
-  // fetchDocuments does for 401/403. Never throws — callers decide what to
+  // fetchDocuments does for 401. Never throws — callers decide what to
   // do with the result (deleteDocument re-throws message; deleteDocuments
   // uses isAuth to stop the loop).
   const mapDeleteError = useCallback(
     (error: unknown): { message: string; isAuth: boolean } => {
       if (error instanceof APIErrorClass) {
-        if (
-          error.error.status_code === 401 ||
-          error.error.status_code === 403
-        ) {
+        // A forbidden id is a per-document failure, not a dead session: it
+        // must not sign the user out or abort the rest of a bulk delete.
+        if (error.error.status_code === 403) {
+          return { message: FORBIDDEN_MESSAGES.delete, isAuth: false };
+        }
+        if (error.error.status_code === 401) {
           handleAuthError();
           return {
             message: 'Your session has expired. Please log in again.',
@@ -677,11 +694,16 @@ export const useDocuments = (
       } catch (error) {
         // Handle APIErrorClass instances (from API client)
         if (error instanceof APIErrorClass) {
-          // Check if it's an authentication error (401/403)
-          if (
-            error.error.status_code === 401 ||
-            error.error.status_code === 403
-          ) {
+          // Only 401 signs the user out (GOO-651); 403 is a permission error.
+          if (error.error.status_code === 403) {
+            setState((prev) => ({
+              ...prev,
+              loading: false,
+              error: FORBIDDEN_MESSAGES.reprocess,
+            }));
+            throw new Error(FORBIDDEN_MESSAGES.reprocess);
+          }
+          if (error.error.status_code === 401) {
             handleAuthError();
             setState((prev) => ({
               ...prev,
