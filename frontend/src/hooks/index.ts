@@ -10,8 +10,9 @@ export type { UIMessage, UIConversation } from './useChatPersistence';
 
 export { useProjectChat } from './useProjectChat';
 
-export { useCitationsForThread } from './useCitationsForThread';
-export type { CitationItem } from './useCitationsForThread';
+// useCitationsForThread is deliberately not re-exported: it pulls in the
+// Markdown parser (unified/remark/micromark), and the root layout imports
+// this barrel. Import it from '@/hooks/useCitationsForThread'.
 
 export {
   useEvidenceMeter,
