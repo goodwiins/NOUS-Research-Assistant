@@ -338,10 +338,9 @@ class Document(BaseModel):
                 self.processing_error = error
 
     def add_metadata(self, key: str, value):
-        """Add metadata entry"""
-        current_metadata = self.get_metadata()
-        current_metadata[key] = value
-        self.set_metadata(current_metadata)
+        """Add metadata entry. A new dict, so the session sees the change: the
+        JSON column does not track in-place mutation (GOO-743)."""
+        self.set_metadata({**self.get_metadata(), key: value})
 
     def get_metadata_value(self, key: str, default=None):
         """Get metadata value"""
