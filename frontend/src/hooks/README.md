@@ -43,7 +43,7 @@ Custom React hooks for the NOUS platform. All hooks follow the `useX` naming con
 
 **TanStack Query** (`@tanstack/react-query`) is used for all read-heavy server state: analytics, evaluations, evidence, dashboards, reports, and optimistic uploads. Mutations call `queryClient.invalidateQueries` or patch the cache directly.
 
-**Custom fetch** (raw `api-client`) is used for stateful document operations (`useDocuments`) and auth flows where TanStack Query's caching semantics would complicate error handling (401 triggers immediate `handleAuthError` + store clear).
+**Custom fetch** (raw `api-client`) is used for stateful document operations (`useDocuments`) and auth flows where TanStack Query's caching semantics would complicate error handling (a 401 from the backend origin triggers immediate `handleAuthError` + store clear; a 403 or a third-party 401 never signs the user out).
 
 **Zustand stores** are the source of truth for chat state, auth state, and sidebar state. Hooks are thin selectors + action binders over those stores, not independent state owners.
 

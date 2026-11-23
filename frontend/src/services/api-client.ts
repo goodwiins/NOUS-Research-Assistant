@@ -211,7 +211,7 @@ export class APIClient {
       accountSignal.throwIfAborted();
 
       if (!response.ok) {
-        const error = await this.handleErrorResponse(response);
+        const error = await this.handleErrorResponse(response, url);
         throw error;
       }
 
@@ -280,14 +280,16 @@ export class APIClient {
       await this.ensureAuth(accountSignal);
       accountSignal.throwIfAborted();
 
-      const response = await fetch(this.resolveUrl(endpoint), {
+      const requestUrl = this.resolveUrl(endpoint);
+
+      const response = await fetch(requestUrl, {
         ...options,
         signal,
         headers: this.mergeHeaders(options.headers, options.body),
       });
 
       if (!response.ok) {
-        throw await this.handleErrorResponse(response);
+        throw await this.handleErrorResponse(response, requestUrl);
       }
 
       const rawData = await response.json();
@@ -558,9 +560,13 @@ export class APIClient {
           } catch {
             // Response body may not be JSON
           }
-          reject(
-            this.toAPIError(body, xhr.status, xhr.statusText || 'Upload failed')
+          const error = this.toAPIError(
+            body,
+            xhr.status,
+            xhr.statusText || 'Upload failed'
           );
+          error.requestUrl = url;
+          reject(error);
         }
       };
 
@@ -614,13 +620,15 @@ export class APIClient {
     await this.ensureAuth(accountSignal);
     accountSignal.throwIfAborted();
 
-    const response = await fetch(this.resolveUrl(url), {
+    const requestUrl = this.resolveUrl(url);
+
+    const response = await fetch(requestUrl, {
       headers: this.getHeaders(),
       signal: accountSignal,
     });
 
     if (!response.ok) {
-      throw await this.handleErrorResponse(response);
+      throw await this.handleErrorResponse(response, requestUrl);
     }
 
     const blob = await response.blob();
@@ -652,7 +660,9 @@ export class APIClient {
     await this.ensureAuth(accountSignal);
     accountSignal.throwIfAborted();
 
-    const response = await fetch(this.resolveUrl(url), {
+    const requestUrl = this.resolveUrl(url);
+
+    const response = await fetch(requestUrl, {
       method: 'POST',
       headers: this.getHeaders(),
       signal: accountSignal,
@@ -660,7 +670,7 @@ export class APIClient {
     });
 
     if (!response.ok) {
-      throw await this.handleErrorResponse(response);
+      throw await this.handleErrorResponse(response, requestUrl);
     }
 
     const blob = await response.blob();
@@ -759,13 +769,15 @@ export class APIClient {
       await this.ensureAuth(signal);
       signal.throwIfAborted();
 
-      const response = await fetch(this.resolveUrl(url), {
+      const requestUrl = this.resolveUrl(url);
+
+      const response = await fetch(requestUrl, {
         headers: this.getHeaders(),
         signal,
       });
 
       if (!response.ok) {
-        throw await this.handleErrorResponse(response);
+        throw await this.handleErrorResponse(response, requestUrl);
       }
 
       const blob = await response.blob();
@@ -798,7 +810,8 @@ export class APIClient {
   // --------------------------------------------------------------------------
 
   private async handleErrorResponse(
-    response: Response
+    response: Response,
+    requestUrl: string
   ): Promise<APIErrorClass> {
     let errorData: unknown = {};
 
@@ -808,7 +821,13 @@ export class APIClient {
       // Response body may not be JSON
     }
 
-    return this.toAPIError(errorData, response.status, response.statusText);
+    const error = this.toAPIError(
+      errorData,
+      response.status,
+      response.statusText
+    );
+    error.requestUrl = requestUrl;
+    return error;
   }
 
   // Shared by handleErrorResponse (fetch path) and uploadWithProgress's XHR

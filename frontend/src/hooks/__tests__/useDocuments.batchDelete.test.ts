@@ -133,6 +133,62 @@ describe('useDocuments.deleteDocuments', () => {
     expect(mockGet).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps failed ids selected so the user can retry them (GOO-727)', async () => {
+    mockDelete.mockImplementation((path: string) =>
+      path === '/documents/b'
+        ? Promise.reject(new Error('boom'))
+        : Promise.resolve(undefined)
+    );
+    const { result } = renderHook(() => useDocuments({ autoFetch: false }));
+    act(() => {
+      result.current.selectDocument('a');
+      result.current.selectDocument('b');
+    });
+    // After the batch, the refetch still returns the one that failed.
+    mockGet.mockResolvedValue({
+      documents: [{ id: 'b', title: 'Kept', filename: 'b.pdf' }],
+      pagination: {
+        page: 1,
+        page_size: 20,
+        total: 1,
+        total_pages: 1,
+        has_next: false,
+        has_prev: false,
+      },
+    });
+
+    await act(async () => {
+      await result.current.deleteDocuments(['a', 'b']).catch(() => undefined);
+    });
+
+    expect(result.current.selectedDocuments.has('a')).toBe(false);
+    expect(result.current.selectedDocuments.has('b')).toBe(true);
+    expect(result.current.selectedCount).toBe(1);
+  });
+
+  it('keeps a failed id selected even when it is off the current page', async () => {
+    mockDelete.mockImplementation((path: string) =>
+      path === '/documents/off-page'
+        ? Promise.reject(new Error('timeout'))
+        : Promise.resolve(undefined)
+    );
+    const { result } = renderHook(() => useDocuments({ autoFetch: false }));
+    act(() => {
+      result.current.selectDocument('on-page');
+      result.current.selectDocument('off-page');
+    });
+
+    // The refetch returns a page that does not contain the failed id.
+    await act(async () => {
+      await result.current
+        .deleteDocuments(['on-page', 'off-page'])
+        .catch(() => undefined);
+    });
+
+    expect(result.current.selectedDocuments.has('on-page')).toBe(false);
+    expect(result.current.selectedDocuments.has('off-page')).toBe(true);
+  });
+
   it('stops the loop on a mid-batch auth failure, skips the rest, and calls handleAuthError once', async () => {
     mockDelete.mockImplementation((path: string) => {
       if (path === '/documents/b') {
