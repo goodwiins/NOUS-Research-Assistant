@@ -10506,6 +10506,11 @@
             ],
             "title": "Processing Error"
           },
+          "processing_partial": {
+            "default": false,
+            "title": "Processing Partial",
+            "type": "boolean"
+          },
           "processing_retry_count": {
             "default": 0,
             "title": "Processing Retry Count",
@@ -10721,6 +10726,11 @@
           "organization_id": {
             "title": "Organization Id",
             "type": "string"
+          },
+          "processing_partial": {
+            "default": false,
+            "title": "Processing Partial",
+            "type": "boolean"
           },
           "processing_status": {
             "$ref": "#/components/schemas/ApiDocumentStatus"

@@ -30,6 +30,9 @@ export interface Document {
   // ProcessingStatusSchema in types/schemas.ts and backend ApiDocumentStatus.
   processing_status: 'queued' | 'processing' | 'indexed' | 'failed';
   processing_error?: string;
+  // Indexed, but some optional processing steps failed (GOO-765). The backend
+  // sets it only on an indexed document; absent means false.
+  processing_partial?: boolean;
   // Support both frontend naming (upload_timestamp) and backend naming (created_at)
   upload_timestamp?: string; // Legacy frontend field
   created_at?: string; // Backend field name
