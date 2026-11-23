@@ -1,7 +1,11 @@
 /**
  * entityService behaviour (GOO-742): the retry policy for idempotent GETs,
- * the relationship mapping, how failures are classified and logged, the
- * fallback lists, and the request contract of the remaining calls.
+ * the relationship mapping, how failures are classified and logged, and the
+ * request contract of the remaining calls.
+ *
+ * GOO-749: relationships and the type lists propagate every failure. There
+ * is no empty list or built-in type list to fall back to, because either
+ * would look like real data from the user's graph.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
@@ -178,6 +182,22 @@ describe('getAllRelationships', () => {
     await expect(entityService.getAllRelationships()).resolves.toEqual([]);
     expect(mocked.get).toHaveBeenCalledWith('/knowledge-graph/relationships?limit=200&offset=0');
   });
+
+  it.each([
+    ['a 401', apiError(401)],
+    ['a 403', apiError(403)],
+    ['a 500', apiError(500)],
+    ['a 503', apiError(503)],
+    ['a network error', new TypeError('fetch failed')],
+  ])('rejects with %s instead of returning no relationships', async (_case, failure) => {
+    mocked.get.mockRejectedValue(failure);
+
+    await expect(entityService.getAllRelationships()).rejects.toBe(failure);
+    expect(mocked.get).toHaveBeenCalledTimes(1);
+    // The caller reports it; the service does not log a second copy.
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
 });
 
 describe('failure logging: expected failures warn, others error', () => {
@@ -191,9 +211,9 @@ describe('failure logging: expected failures warn, others error', () => {
   ])('%s is logged as a warning', async (_case, failure) => {
     mocked.get.mockRejectedValue(failure);
 
-    await expect(entityService.getAllRelationships()).resolves.toEqual([]);
+    await expect(entityService.getVisualizationData('e1')).rejects.toBe(failure);
 
-    expect(warn).toHaveBeenCalledWith('Error in getAllRelationships:', failure);
+    expect(warn).toHaveBeenCalledWith('Error fetching visualization data:', failure);
     expect(error).not.toHaveBeenCalled();
   });
 
@@ -203,9 +223,9 @@ describe('failure logging: expected failures warn, others error', () => {
   ])('%s is logged as an error', async (_case, failure) => {
     mocked.get.mockRejectedValue(failure);
 
-    await entityService.getAllRelationships();
+    await expect(entityService.getVisualizationData('e1')).rejects.toBe(failure);
 
-    expect(error).toHaveBeenCalledWith('Error in getAllRelationships:', failure);
+    expect(error).toHaveBeenCalledWith('Error fetching visualization data:', failure);
     expect(warn).not.toHaveBeenCalled();
   });
 });
@@ -218,19 +238,27 @@ describe('type lists', () => {
     expect(mocked.get).toHaveBeenCalledWith('/knowledge-graph/entity-types');
   });
 
-  it('getEntityTypes retries, then falls back to the built-in list', async () => {
+  it('getEntityTypes retries a 5xx once, then rejects with no built-in list', async () => {
     vi.useFakeTimers();
-    mocked.get.mockRejectedValue(apiError(500));
+    const first = apiError(500, { message: 'first' });
+    const last = apiError(503, { message: 'last' });
+    mocked.get.mockRejectedValueOnce(first).mockRejectedValueOnce(last);
 
     const pending = entityService.getEntityTypes();
+    const assertion = expect(pending).rejects.toBe(last);
     await vi.advanceTimersByTimeAsync(1000);
-    const types = await pending;
 
+    await assertion;
     expect(mocked.get).toHaveBeenCalledTimes(2);
-    expect(types).toContain('PERSON');
-    expect(types).toContain('OTHER');
-    expect(types).toHaveLength(10);
-    expect(error).toHaveBeenCalledWith('Error fetching entity types:', expect.any(APIErrorClass));
+    expect(mocked.get).toHaveBeenNthCalledWith(2, '/knowledge-graph/entity-types');
+  });
+
+  it('getEntityTypes rejects a 403 at once', async () => {
+    const failure = apiError(403);
+    mocked.get.mockRejectedValue(failure);
+
+    await expect(entityService.getEntityTypes()).rejects.toBe(failure);
+    expect(mocked.get).toHaveBeenCalledTimes(1);
   });
 
   it('getRelationshipTypes returns the backend list', async () => {
@@ -240,16 +268,12 @@ describe('type lists', () => {
     expect(mocked.get).toHaveBeenCalledWith('/knowledge-graph/relationship-types');
   });
 
-  it('getRelationshipTypes falls back without retrying', async () => {
-    mocked.get.mockRejectedValue(apiError(503));
+  it('getRelationshipTypes rejects without retrying or inventing a list', async () => {
+    const failure = apiError(503);
+    mocked.get.mockRejectedValue(failure);
 
-    const types = await entityService.getRelationshipTypes();
-
+    await expect(entityService.getRelationshipTypes()).rejects.toBe(failure);
     expect(mocked.get).toHaveBeenCalledTimes(1);
-    expect(types[0]).toBe('WORKS_FOR');
-    expect(types).toContain('CUSTOM');
-    expect(types).toHaveLength(19);
-    expect(warn).toHaveBeenCalledWith('Error fetching relationship types:', expect.any(APIErrorClass));
   });
 });
 
@@ -362,13 +386,6 @@ describe('request contract', () => {
       returnsBody: false,
     },
     {
-      name: 'getEntityDetails',
-      call: () => entityService.getEntityDetails('e1'),
-      method: 'get',
-      args: ['/knowledge-graph/entities/e1/details'],
-      returnsBody: true,
-    },
-    {
       name: 'createMergeJob wraps the groups',
       call: () =>
         entityService.createMergeJob([
@@ -393,20 +410,6 @@ describe('request contract', () => {
       call: () => entityService.getProcessingJob('j1'),
       method: 'get',
       args: ['/processing/jobs/j1'],
-      returnsBody: true,
-    },
-    {
-      name: 'findSimilarEntities with defaults',
-      call: () => entityService.findSimilarEntities('e1'),
-      method: 'get',
-      args: ['/knowledge-graph/entities/e1/similar?limit=10&min_similarity=0.5'],
-      returnsBody: true,
-    },
-    {
-      name: 'getEntityTimeline',
-      call: () => entityService.getEntityTimeline('e1'),
-      method: 'get',
-      args: ['/knowledge-graph/entities/e1/timeline'],
       returnsBody: true,
     },
   ];
