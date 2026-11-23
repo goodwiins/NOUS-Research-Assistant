@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -71,7 +72,7 @@ class _RealSignatureService:
                 confidence=0.9,
                 extraction_method=ExtractionMethod.SPACY,
                 # spaCy entities carry start_char/end_char ...
-                properties={"start_char": 0, "end_char": 12},
+                properties={"start_char": 4, "end_char": 16},
             ),
             Entity(
                 entity_type=EntityType.EMAIL,
@@ -106,8 +107,8 @@ async def test_entity_step_returns_entities_with_the_real_signatures(
         "text": "Ada Lovelace",
         "label": EntityType.PERSON.value,
         "confidence": 0.9,
-        "start": 0,
-        "end": 12,
+        "start": 4,  # non-zero: 0 is also the default
+        "end": 16,
     }
     assert (result["entities"][1]["start"], result["entities"][1]["end"]) == (20, 35)
     assert result["entities"][2]["start"] == 0  # no properties: defaults
@@ -225,22 +226,29 @@ async def _ok(document: Any, job: Any) -> dict:
     return {}
 
 
-def _real_doc() -> Document:
+def _real_doc(
+    document_type: DocumentType = DocumentType.TEXT, content_text: Any = TEXT
+) -> Document:
     return Document(
         id=uuid4(),
         organization_id=uuid4(),
-        content_text=TEXT,
-        document_type=DocumentType.TEXT,
+        content_text=content_text,
+        document_type=document_type,
         processing_status=ProcessingStatus.PROCESSING,
     )
 
 
 def _pipeline_with(
-    svc: MultimodalProcessingService, monkeypatch: pytest.MonkeyPatch, **broken: Any
+    svc: MultimodalProcessingService,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    document_type: DocumentType = DocumentType.TEXT,
+    broken: Optional[Dict[str, Any]] = None,
 ) -> None:
     """The production TEXT pipeline (names and required flags), every step
     stubbed to succeed except the real entity step and any ``broken`` one."""
-    steps = MultimodalProcessingService.get_processing_pipeline(svc, DocumentType.TEXT)
+    steps = MultimodalProcessingService.get_processing_pipeline(svc, document_type)
+    broken = broken or {}
     for step in steps:
         if step.name in broken:
             step.function = broken[step.name]
@@ -309,7 +317,7 @@ async def test_a_required_step_failure_still_fails_document_and_job(
     monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
     svc = _svc()
     svc.processed_dir = tmp_path
-    _pipeline_with(svc, monkeypatch, **{"Text Extraction": _broken})
+    _pipeline_with(svc, monkeypatch, broken={"Text Extraction": _broken})
     doc, job = _real_doc(), ProcessingJob()
 
     results = await svc.process_document(doc, job)
@@ -318,3 +326,201 @@ async def test_a_required_step_failure_still_fails_document_and_job(
     assert any("Text Extraction" in e for e in results["errors"])
     assert doc.processing_status == ProcessingStatus.FAILED
     assert job.status == JobStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_calls_load_spacy_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loads: List[int] = []
+
+    class _Slow(_RealSignatureService):
+        def __init__(self) -> None:
+            loads.append(1)
+            time.sleep(0.2)  # long enough for every caller to arrive
+            super().__init__()
+
+    monkeypatch.setattr(mps, "EntityExtractionService", _Slow)
+
+    results = await asyncio.gather(
+        *(_svc().extract_entities(_doc(), MagicMock()) for _ in range(5))
+    )
+
+    assert loads == [1]
+    assert all(r["entity_count"] == 3 for r in results)
+
+
+# --- usable text, stable messages, stale flags ------------------------------
+
+SECRET = "/opt/venv/bin/tesseract: libleptonica.so.5 missing at 10.0.3.7"
+
+
+async def _leaky(document: Any, job: Any) -> dict:
+    raise RuntimeError(SECRET)
+
+
+@pytest.mark.asyncio
+async def test_a_scanned_pdf_whose_ocr_fails_ends_failed_not_indexed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(
+        svc,
+        monkeypatch,
+        document_type=DocumentType.PDF,
+        broken={"OCR Extraction": _leaky},
+    )
+    doc = _real_doc(DocumentType.PDF, "[Page 1]\n\n[Page 2]\n  \n")
+    job = ProcessingJob()
+
+    results = await svc.process_document(doc, job)
+
+    assert results["success"] is False
+    assert doc.processing_status == ProcessingStatus.FAILED
+    assert not doc.is_indexed
+    assert doc.processing_error == mps._NO_TEXT_ERROR
+    assert job.status == JobStatus.FAILED
+    assert doc.get_metadata()["processing_partial"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_image_whose_ocr_fails_ends_failed_not_indexed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(
+        svc, monkeypatch, document_type=DocumentType.IMAGE, broken={"Image OCR": _leaky}
+    )
+    doc, job = _real_doc(DocumentType.IMAGE, None), ProcessingJob()
+
+    await svc.process_document(doc, job)
+
+    assert doc.processing_status == ProcessingStatus.FAILED
+    assert not doc.is_indexed
+    assert job.status == JobStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_a_scanned_pdf_keeps_the_text_ocr_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def _ocr(document: Any, job: Any) -> dict:
+        return {"ocr_text": "Scanned words"}
+
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(
+        svc,
+        monkeypatch,
+        document_type=DocumentType.PDF,
+        broken={"OCR Extraction": _ocr},
+    )
+    doc, job = _real_doc(DocumentType.PDF, "[Page 1]\n"), ProcessingJob()
+
+    await svc.process_document(doc, job)
+
+    assert doc.processing_status == ProcessingStatus.COMPLETED
+    assert doc.is_indexed is True
+    assert doc.content_text == "Scanned words"
+
+
+@pytest.mark.asyncio
+async def test_a_pdf_with_text_completes_when_ocr_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(
+        svc,
+        monkeypatch,
+        document_type=DocumentType.PDF,
+        broken={"OCR Extraction": _leaky},
+    )
+    doc, job = _real_doc(DocumentType.PDF, "[Page 1]\n" + TEXT), ProcessingJob()
+
+    await svc.process_document(doc, job)
+
+    assert doc.processing_status == ProcessingStatus.COMPLETED
+    assert doc.get_metadata()["processing_partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_no_exception_text_reaches_the_document(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(
+        svc,
+        monkeypatch,
+        document_type=DocumentType.PDF,
+        broken={"OCR Extraction": _leaky},
+    )
+    warned = _real_doc(DocumentType.PDF, "[Page 1]\n" + TEXT)
+    await svc.process_document(warned, ProcessingJob())
+
+    svc2 = _svc()
+    svc2.processed_dir = tmp_path
+    _pipeline_with(
+        svc2,
+        monkeypatch,
+        document_type=DocumentType.PDF,
+        broken={"PDF Processing": _leaky},
+    )
+    failed, failed_job = _real_doc(DocumentType.PDF, TEXT), ProcessingJob()
+    await svc2.process_document(failed, failed_job)
+
+    assert warned.get_metadata()["processing_warnings"] == ["OCR Extraction failed"]
+    assert failed.processing_error == "Processing step 'PDF Processing' failed"
+    for doc in (warned, failed):
+        assert SECRET not in repr(doc.get_metadata())
+        assert SECRET not in (doc.processing_error or "")
+    assert SECRET not in repr(failed_job.error_message)
+
+
+@pytest.mark.asyncio
+async def test_a_required_failure_replaces_stale_partial_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(svc, monkeypatch, broken={"Text Extraction": _leaky})
+    doc = _real_doc()
+    doc.add_metadata("processing_warnings", ["AI Analysis failed"])
+    doc.add_metadata("processing_partial", True)
+
+    await svc.process_document(doc, ProcessingJob())
+
+    assert doc.processing_status == ProcessingStatus.FAILED
+    assert doc.get_metadata()["processing_partial"] is False
+    assert doc.get_metadata()["processing_warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_crash_replaces_stale_partial_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(svc, monkeypatch)
+
+    async def _boom(document: Any, results: Any) -> None:
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(svc, "update_document_with_results", _boom)
+    doc, job = _real_doc(), ProcessingJob()
+    doc.add_metadata("processing_partial", True)
+
+    results = await svc.process_document(doc, job)
+
+    assert doc.get_metadata()["processing_partial"] is False
+    assert results["errors"] == ["Document processing failed"]
+    assert SECRET not in repr(job.error_message)

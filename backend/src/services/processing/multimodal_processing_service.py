@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -91,6 +92,38 @@ def _shared_entity_service() -> EntityExtractionService:
         if _entity_service_instance is None:
             _entity_service_instance = EntityExtractionService()
         return _entity_service_instance
+
+
+_PAGE_MARKER_RE = re.compile(r"\[Page \d+\]")
+_NEEDS_TEXT = frozenset({DocumentType.PDF, DocumentType.IMAGE})
+_NO_TEXT_ERROR = "No text could be extracted from this document"
+# Step outputs that can carry a PDF's or image's text (step name -> key).
+_TEXT_OUTPUTS = (
+    ("pdf_processing", "text_content"),
+    ("ocr_extraction", "ocr_text"),
+    ("image_ocr", "extracted_text"),
+)
+
+
+def _usable_text(text: Optional[str]) -> bool:
+    """True when ``text`` has content beyond ``[Page N]`` markers."""
+    return bool(text) and bool(_PAGE_MARKER_RE.sub("", text or "").strip())
+
+
+def _extracted_text(results: Dict[str, Any]) -> Optional[str]:
+    for step, key in _TEXT_OUTPUTS:
+        text = (results.get(step) or {}).get(key)
+        if isinstance(text, str) and _usable_text(text):
+            return text
+    return None
+
+
+def _record_warnings(document: Document, warnings: List[str], partial: bool) -> None:
+    """Write this run's warnings, replacing any earlier run's. ``partial`` is
+    set only for a document that completed with warnings."""
+    warnings = list(warnings)
+    document.add_metadata("processing_warnings", warnings)
+    document.add_metadata("processing_partial", bool(partial and warnings))
 
 
 def _entity_span(properties: Optional[Dict[str, Any]]) -> Dict[str, int]:
@@ -206,7 +239,10 @@ class MultimodalProcessingService:
                     step.error_message = str(e)
                     step.end_time = time.time()
 
-                    error_msg = f"Processing step '{step.name}' failed: {str(e)}"
+                    # Stable text only: these strings reach processing_error,
+                    # processing_warnings and the document API. The exception
+                    # detail goes to the log (exc_info), never to the client.
+                    error_msg = f"Processing step '{step.name}' failed"
 
                     if not step.required:
                         # Optional means optional: the document still
@@ -218,10 +254,15 @@ class MultimodalProcessingService:
                             getattr(document, "id", "?"),
                             exc_info=True,
                         )
-                        processing_results["warnings"].append(error_msg)
+                        processing_results["warnings"].append(f"{step.name} failed")
                         continue
 
-                    logger.error(error_msg)
+                    logger.error(
+                        "Required processing step '%s' failed for document %s",
+                        step.name,
+                        getattr(document, "id", "?"),
+                        exc_info=True,
+                    )
                     processing_results["errors"].append(error_msg)
 
                     if step.required:
@@ -247,6 +288,11 @@ class MultimodalProcessingService:
                             )
                             document.processing_status = ProcessingStatus.FAILED
                             document.processing_error = error_msg
+                        # This path skips update_document_with_results: replace
+                        # a previous run's flags so they don't outlive it.
+                        _record_warnings(
+                            document, processing_results["warnings"], partial=False
+                        )
                         self.db.commit()
                         return processing_results
 
@@ -264,11 +310,20 @@ class MultimodalProcessingService:
 
             return processing_results
 
-        except Exception as e:
-            error_msg = f"Document processing failed: {str(e)}"
-            logger.error(error_msg)
+        except Exception:
+            error_msg = "Document processing failed"
+            logger.exception(
+                "Document processing failed for document %s",
+                getattr(document, "id", "?"),
+            )
 
             job.fail_job(error_msg)
+            try:
+                _record_warnings(
+                    document, processing_results["warnings"], partial=False
+                )
+            except Exception:
+                logger.warning("could not reset processing flags", exc_info=True)
             self.db.commit()
 
             processing_results["errors"].append(error_msg)
@@ -1417,6 +1472,18 @@ class MultimodalProcessingService:
                     document.content_text, captions
                 )
 
+            # A PDF or image is only worth indexing with text. Optional OCR
+            # failing used to fail the document by accident; now that optional
+            # failures are warnings, check for usable text explicitly.
+            if results["success"] and document.document_type in _NEEDS_TEXT:
+                if not _usable_text(document.content_text):
+                    recovered = _extracted_text(results)
+                    if recovered:
+                        document.content_text = recovered
+                    else:
+                        results["success"] = False
+                        results["errors"].append(_NO_TEXT_ERROR)
+
             # Update processing status
             if results["success"]:
                 document.processing_status = ProcessingStatus.COMPLETED
@@ -1431,9 +1498,9 @@ class MultimodalProcessingService:
             # kept visible: processing_partial marks a document that completed
             # without some optional output (GOO-658). Written every run, so a
             # clean retry clears them.
-            warnings = list(results.get("warnings") or [])
-            document.add_metadata("processing_warnings", warnings)
-            document.add_metadata("processing_partial", bool(warnings))
+            _record_warnings(
+                document, results.get("warnings") or [], partial=results["success"]
+            )
             document.add_metadata("processing_results", results)
             document.add_metadata("processed_at", datetime.utcnow().isoformat())
 
