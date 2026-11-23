@@ -195,7 +195,9 @@ export async function fetchAnalyticsDashboard(
         searches24h: overview ? overview.totalSearches : null,
         // null from a loaded overview = no search was timed, not an outage.
         avgSearchTimeMs24h: overview
-          ? (overview.avgSearchTimeMs ?? NOT_MEASURED)
+          ? overview.avgSearchTimeMs === null
+            ? NOT_MEASURED
+            : overview.avgSearchTimeMs
           : null,
         activeUsers24h: adminFigure(overview?.engagement?.activeUsers),
         searchSessions24h: adminFigure(overview?.engagement?.searchSessions),
