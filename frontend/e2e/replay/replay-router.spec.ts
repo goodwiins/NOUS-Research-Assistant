@@ -13,6 +13,7 @@ import { decodeEnvelope, type Captured } from './envelopes';
 const TOKEN = 'TOKENSECRETrouter8';
 const SESSION = 'SESSIONSECRETrouter3';
 const QUERY = 'QUERYSECRETrouter5';
+const HASH_TOKEN = 'HASHSECRETrouter2';
 
 async function capture(page: Page): Promise<Captured> {
   const captured: Captured = { text: [], recordings: [] };
@@ -162,6 +163,32 @@ test('back/forward into a sensitive history entry sends no replay of it', async 
   await expect.poll(() => new URL(page.url()).pathname).toBe('/register');
   await throwAndWait(page, captured, true);
   expect(captured.text.join('\n')).not.toContain(SESSION);
+});
+
+test('back into a native #access_token entry sends no replay of it', async ({ page }) => {
+  // GOO-746 (GOO-734 follow-up). A fragment navigation the browser makes on
+  // its own (a link to `#access_token=…`, `location.hash`, an auth
+  // redirect) leaves an entry with no history state. Next ignores a Back
+  // into such an entry (`handlePopState` returns on a null state), so it
+  // never writes the URL with replaceState: only the guard's own listeners
+  // see it. The test the router-managed entries above cannot be.
+  const captured = await capture(page);
+  await gotoHydrated(page, '/login');
+  await page.evaluate((token) => {
+    window.location.hash = `access_token=${token}&type=recovery`;
+  }, HASH_TOKEN);
+  await expect.poll(() => page.url()).toContain(HASH_TOKEN);
+  await router(page, 'push', '/register');
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/register');
+  // Clean page: replay records again.
+  await throwAndWait(page, captured, true);
+  const sent = captured.recordings.length;
+
+  await page.goBack();
+  await expect.poll(() => page.url()).toContain(HASH_TOKEN);
+  await throwAndWait(page, captured, false);
+  expect(captured.recordings.length).toBe(sent);
+  expect(captured.text.join('\n')).not.toContain(HASH_TOKEN);
 });
 
 test('a page load with search text in the URL sends no replay of it', async ({ page }) => {

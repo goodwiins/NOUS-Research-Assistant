@@ -14,6 +14,9 @@ const TOKEN = 'TOKENSECRET4b1d';
 const SESSION = 'SESSIONSECRET77';
 const QUERY = 'QUERYSECRETlithium';
 const LINK = 'LINKSECRETq9';
+const ARTIFACT = 'ARTIFACTSECRETsrcdoc';
+const DOC_URL = 'DOCURLSECRETsig';
+const DOC_BODY = 'DOCBODYSECRETpdf';
 
 let harnessJs = '';
 
@@ -46,7 +49,7 @@ test.beforeAll(async () => {
   harnessJs = chunk.code;
 });
 
-async function openPage(page: Page, path: string): Promise<Captured> {
+async function openPage(page: Page, path: string, extraBody = ''): Promise<Captured> {
   const captured: Captured = { text: [], recordings: [] };
   await page.route('https://sentry.replay.test/**', async (route) => {
     const body = route.request().postDataBuffer();
@@ -58,12 +61,16 @@ async function openPage(page: Page, path: string): Promise<Captured> {
     if (url.pathname === '/harness.js') {
       return route.fulfill({ contentType: 'text/javascript', body: harnessJs });
     }
+    if (url.pathname === '/doc.pdf') {
+      return route.fulfill({ contentType: 'text/html', body: `<p>${DOC_BODY}</p>` });
+    }
     return route.fulfill({
       contentType: 'text/html',
       body: `<!doctype html><html><head><title>probe</title>
         <script src="/harness.js"></script></head>
         <body><main><h1>Verify your email</h1>
         <a id="deep" href="/search?q=${LINK}">Open search</a>
+        ${extraBody}
         </main></body></html>`,
     });
   });
@@ -73,7 +80,7 @@ async function openPage(page: Page, path: string): Promise<Captured> {
 }
 
 type Harness = {
-  init(useGuard: boolean): void;
+  init(useGuard: boolean, unblock?: string): void;
   strip(keys: string[]): void;
   navigate(path: string): void;
   mode(): string | undefined;
@@ -164,4 +171,64 @@ test('search text stays in the URL; replay is off until the URL is clean', async
   await failAndCollect(page, captured);
   await expect.poll(() => captured.recordings.length, { timeout: 15_000 }).toBeGreaterThan(0);
   expect(captured.text.join('\n')).not.toContain(QUERY);
+});
+
+
+/**
+ * GOO-746: an artifact preview (`srcdoc`, model-written HTML) and a document
+ * viewer are iframes. SDK 10.78 already blocks `iframe[srcdoc]:not([src])`
+ * by default, and drops an iframe's `src` when it can read the frame. A
+ * frame it cannot read (cross-origin, such as a signed storage link) keeps
+ * its full URL as `rr_src`, query string and fragment included. Blocking
+ * every iframe covers both, whatever the SDK's defaults become.
+ */
+const FILES = 'https://files.replay.test';
+const IFRAMES = `
+  <iframe id="artifact" title="Interactive HTML preview" sandbox="allow-scripts"
+    srcdoc="<p>${ARTIFACT}</p>"></iframe>
+  <iframe id="viewer" title="Preview of paper"
+    src="${FILES}/doc.pdf?X-Amz-Signature=${DOC_URL}#page=2"></iframe>`;
+
+async function openFramedPage(page: Page): Promise<Captured> {
+  await page.route(`${FILES}/**`, (route) =>
+    route.fulfill({ contentType: 'text/html', body: `<p>${DOC_BODY}</p>` })
+  );
+  return openPage(page, '/chat', IFRAMES);
+}
+
+test('control: without the iframe block, a cross-origin viewer URL is recorded', async ({
+  page,
+}) => {
+  const captured = await openFramedPage(page);
+  await call(page, (h) => h.init(true, 'iframe'));
+  expect(await call(page, (h) => h.mode())).toBe('buffer');
+  await failAndCollect(page, captured);
+  await expect.poll(() => captured.recordings.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  const recording = captured.recordings.join('\n');
+  expect(recording).toContain(`"rr_src":"${FILES}/doc.pdf?X-Amz-Signature=${DOC_URL}`);
+  // The SDK's own default still blocks the srcdoc frame.
+  expect(recording).not.toContain(ARTIFACT);
+});
+
+test('iframes are blocked: no artifact HTML, viewer URL or framed content is sent', async ({
+  page,
+}) => {
+  const captured = await openFramedPage(page);
+  await call(page, (h) => h.init(true));
+  expect(await call(page, (h) => h.mode())).toBe('buffer');
+  await failAndCollect(page, captured);
+  await expect.poll(() => captured.recordings.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  const all = captured.text.join('\n');
+  expect(all).not.toContain(ARTIFACT);
+  expect(all).not.toContain(DOC_URL);
+  expect(all).not.toContain(DOC_BODY);
+  // Every recorded iframe is a sized placeholder with no other attribute.
+  const recording = captured.recordings.join('\n');
+  const frames = recording.match(/"tagName":"iframe","attributes":\{[^}]*\}/g) ?? [];
+  expect(frames.length).toBeGreaterThanOrEqual(2);
+  for (const frame of frames) {
+    expect(frame).toMatch(
+      /^"tagName":"iframe","attributes":\{"rr_width":"[^"]+","rr_height":"[^"]+"\}$/
+    );
+  }
 });

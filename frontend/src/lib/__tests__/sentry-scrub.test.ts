@@ -577,6 +577,8 @@ describe('tuning: secrets that used to pass', () => {
       'keyId', 'key_id', 'apiKeyID', 'signing_key_ids',
       'monKeyId', 'monkeyId', 'commonKeyId', 'adHocKeyId', 'turKeyId',
       'user.monKeyId', 'hockeyIds',
+      // Snake case too: ordinary words ending in key_id (GOO-746 review).
+      'monkey_id', 'commonkey_id',
     ]) {
       expect(isSensitiveKey(key), key).toBe(true);
     }
