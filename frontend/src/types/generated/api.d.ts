@@ -16412,6 +16412,12 @@ export interface components {
             /** @description Overall consensus level */
             consensus_level: components["schemas"]["ConsensusLevel"];
             /**
+             * Failed Sources
+             * @description Number of sources whose stance could not be classified (provider error, timeout or ungrounded answer). A meter with failed sources is partial and is never cached.
+             * @default 0
+             */
+            failed_sources: number;
+            /**
              * Neutral
              * @description Number of neutral sources
              */

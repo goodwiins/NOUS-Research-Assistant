@@ -52,6 +52,7 @@ from src.services.research.extraction_forms_service import (
     _flush_or_conflict,
     current_version,
     document_pins,
+    load_document_pins,
 )
 from src.services.research_decisions import (
     DecisionIdempotencyConflict,
@@ -1297,14 +1298,17 @@ async def export_package(
     document_ids = {row.document_id for row in links if row.document_id}
     document_ids |= {a.document_id for a in accepted}
     documents = []
-    for document in (
-        await db.execute(select(Document).where(Document.id.in_(document_ids)))
-    ).scalars():
-        source_hash, text_hash = document_pins(document)
+    pins = await load_document_pins(db, document_ids)
+    for document_id, title in (
+        await db.execute(
+            select(Document.id, Document.title).where(Document.id.in_(document_ids))
+        )
+    ).all():
+        source_hash, text_hash = pins[document_id]
         documents.append(
             {
-                "id": str(document.id),
-                "title": document.title,
+                "id": str(document_id),
+                "title": title,
                 "source_hash": source_hash,
                 "current_text_sha256": text_hash,
             }

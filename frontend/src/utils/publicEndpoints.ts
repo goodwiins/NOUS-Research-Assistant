@@ -111,6 +111,18 @@ const getConfiguredOrigin = (
   return '';
 };
 
+/**
+ * Local backend origins the development CSP's connect-src must allow, since
+ * getPublicApiOrigin falls back to http://localhost:8000 in dev (used by
+ * src/lib/csp.ts; never emitted outside NODE_ENV=development).
+ */
+export const DEV_BACKEND_CSP_ORIGINS = [
+  'http://localhost:8000',
+  'ws://localhost:8000',
+  'http://127.0.0.1:8000',
+  'ws://127.0.0.1:8000',
+] as const;
+
 export const getPublicApiOrigin = (): string => {
   const configured = getConfiguredOrigin([
     process.env.NEXT_PUBLIC_API_URL,

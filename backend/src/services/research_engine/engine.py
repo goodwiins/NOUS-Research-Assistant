@@ -24,6 +24,38 @@ MAX_RUN_WALL_TIME_SECONDS = 15 * 60
 logger = logging.getLogger(__name__)
 
 
+def _failure_diagnostics(exc: BaseException) -> Dict[str, Any]:
+    """Content-free description of a failure for server logs.
+
+    Exception messages can carry research questions, prompts or provider
+    payloads, so they never reach logs. Type names of the whole cause chain and
+    the code location that raised the root cause are enough to tell a bad key
+    from a 429 from a contract violation.
+    """
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(chain) < 8 and current not in chain:
+        chain.append(current)
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    root = chain[-1]
+    origin = "unknown"
+    tb = root.__traceback__
+    if tb is not None:
+        while tb.tb_next is not None:
+            tb = tb.tb_next
+        code = tb.tb_frame.f_code
+        module = tb.tb_frame.f_globals.get("__name__", "unknown")
+        origin = f"{module}:{code.co_name}:{tb.tb_lineno}"
+    return {
+        "error_type": type(exc).__name__,
+        "cause_chain": [type(item).__name__ for item in chain[1:]],
+        "root_cause_type": type(root).__name__,
+        "root_cause_origin": origin,
+    }
+
+
 class WorkflowEngine:
     """Runs a research blueprint, yielding events for each step."""
 
@@ -233,6 +265,16 @@ class WorkflowEngine:
                     }
                     return
                 except StepExecutionError as exc:
+                    logger.warning(
+                        "Research step execution failed",
+                        extra={
+                            "run_id": str(run_id),
+                            "step_index": idx,
+                            "step_id": step_id,
+                            "error_category": "step_execution_error",
+                            **_failure_diagnostics(exc),
+                        },
+                    )
                     consumed_tokens = max(0, int(exc.consumed_tokens))
                     total_tokens += consumed_tokens
                     safely_observe(
@@ -281,13 +323,15 @@ class WorkflowEngine:
                         status="failed",
                     )
                     return
-                except Exception:
+                except Exception as exc:
                     logger.error(
                         "Research step execution failed",
                         extra={
                             "run_id": str(run_id),
                             "step_index": idx,
+                            "step_id": step_id,
                             "error_category": "unexpected_step_error",
+                            **_failure_diagnostics(exc),
                         },
                     )
                     safely_observe(
@@ -488,10 +532,14 @@ class WorkflowEngine:
             )
             yield {"event": "run_complete", "run_id": str(run_id), "context": context}
 
-        except Exception:
+        except Exception as exc:
             logger.error(
                 "Research workflow failed",
-                extra={"run_id": str(run_id), "error_category": "workflow_error"},
+                extra={
+                    "run_id": str(run_id),
+                    "error_category": "workflow_error",
+                    **_failure_diagnostics(exc),
+                },
             )
             safely_observe(
                 self.observer,
