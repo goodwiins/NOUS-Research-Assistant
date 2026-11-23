@@ -72,6 +72,16 @@ export const STREAM_INTERRUPTED_NOTE =
  * Trigger.dev run statuses that end a run without a successful completion.
  * A run in any of these never changes again, so a durable-run poll must stop.
  */
+/**
+ * Consecutive failed status polls a durable loop tolerates before it gives
+ * up. One dropped request used to end a ten-minute poll as an error even
+ * though the run was still going (GOO-666 FL2D-2).
+ */
+export const MAX_DURABLE_POLL_FAILURES = 3;
+
+/** Thrown inside confirmAction to route a durable confirmation past SSE. */
+class SkipStreamConfirm extends Error {}
+
 const DURABLE_RUN_FAILURE_STATUSES = new Set([
   'CANCELED',
   'FAILED',
@@ -787,13 +797,27 @@ export const useAgentChatStore = create<AgentChatStore>()(
         // trace 019ff314-c29c).
         const MAX_TOKENLESS_TICKS = 2;
         let tokenlessTicks = 0;
+        let pollFailures = 0;
 
         for (let i = 0; i < MAX_POLLS; i++) {
           if (abortController.signal.aborted) return;
           await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
           if (abortController.signal.aborted) return;
 
-          const run = await agentChatService.getDurableRunStatus(runId);
+          let run: Awaited<
+            ReturnType<typeof agentChatService.getDurableRunStatus>
+          >;
+          try {
+            run = await agentChatService.getDurableRunStatus(runId);
+            pollFailures = 0;
+          } catch {
+            if (abortController.signal.aborted) return;
+            pollFailures += 1;
+            // Give up into the loop-end "may still be running" handling;
+            // the run itself may well be fine.
+            if (pollFailures >= MAX_DURABLE_POLL_FAILURES) break;
+            continue;
+          }
           if (abortController.signal.aborted) return;
           const meta = run.metadata ?? {};
 
@@ -1032,12 +1056,20 @@ export const useAgentChatStore = create<AgentChatStore>()(
           await import('@/services/agentChatService');
         if (abortController.signal.aborted) return;
 
-        // Try SSE streaming confirm first
+        // Try SSE streaming confirm first — except for a durable
+        // (Trigger.dev) confirmation. Its jobId is a Trigger run id, which
+        // the backend's /stream/confirm rejects with 422 (thread_id must be a
+        // UUID); streamConfirm reports HTTP errors through onError rather
+        // than throwing, so the catch below never ran and the durable branch
+        // was unreachable (GOO-666 FL2D-1). Durable runs resume through
+        // their Trigger wait token only.
         let streamedContent = '';
         let didMutateProjectData = false;
         let mutatedProjectId: string | undefined;
+        const isDurable = pendingConfirmation.origin === 'durable';
 
         try {
+          if (isDurable) throw new SkipStreamConfirm();
           await agentChatService.streamConfirm(
             {
               thread_id: jobId,
@@ -1319,11 +1351,26 @@ export const useAgentChatStore = create<AgentChatStore>()(
 
           const MAX_POLLS = 200;
           const POLL_INTERVAL_MS = 3000;
+          let pollFailures = 0;
           for (let i = 0; i < MAX_POLLS; i++) {
             if (abortController.signal.aborted) return;
             await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
             if (abortController.signal.aborted) return;
-            const run = await agentChatService.getDurableRunStatus(jobId);
+            let run: Awaited<
+              ReturnType<typeof agentChatService.getDurableRunStatus>
+            >;
+            try {
+              run = await agentChatService.getDurableRunStatus(jobId);
+              pollFailures = 0;
+            } catch {
+              if (abortController.signal.aborted) return;
+              pollFailures += 1;
+              // The decision already consumed the wait token, so do not
+              // restore the card: fall to the loop-end "may still be
+              // running" settle, as the poll budget running out does.
+              if (pollFailures >= MAX_DURABLE_POLL_FAILURES) break;
+              continue;
+            }
             // Re-check AFTER the network await: selectThread/newThread can
             // abort + swap the transcript while the poll was in flight, and
             // the branches below resolve "last assistant message" from
@@ -1417,6 +1464,11 @@ export const useAgentChatStore = create<AgentChatStore>()(
             throw new Error(
               'Confirmation stream failed and this confirmation has no durable job to fall back to'
             );
+          }
+          // A durable confirmation without a wait token cannot be resumed,
+          // and /agent/confirm/{job_id} does not know Trigger run ids.
+          if (isDurable) {
+            throw new Error('Durable confirmation is missing its wait token');
           }
           await agentChatService.confirmAction(
             jobId,
