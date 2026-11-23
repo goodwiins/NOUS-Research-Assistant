@@ -2,33 +2,37 @@
 Script to clean up garbage entities and relationships from the knowledge graph.
 Removes low-quality entities that shouldn't have been extracted (OCR errors, fragments, etc.)
 
-Usage:
-    # Dry run - see what would be deleted
-    python cleanup_garbage_entities.py --dry-run
+DESTRUCTIVE with --yes: deletes matching entities across every organization.
+Without --yes the script only reports what it would delete.
 
-    # Delete garbage entities and their relationships
+Usage:
+    # Dry run (default) - see what would be deleted
     python cleanup_garbage_entities.py
 
+    # Delete garbage entities and their relationships
+    python cleanup_garbage_entities.py --yes
+
     # Be more aggressive (remove more entities)
-    python cleanup_garbage_entities.py --aggressive
+    python cleanup_garbage_entities.py --aggressive --yes
 
     # Only show statistics
     python cleanup_garbage_entities.py --stats-only
 """
 
-import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import argparse
-import re
-from typing import List, Dict, Any
-from src.services.knowledge_graph.knowledge_graph_service import knowledge_graph_service
 import logging
+import re
+from typing import Any, Dict, List
+
+from src.services.knowledge_graph.knowledge_graph_service import knowledge_graph_service
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -39,30 +43,93 @@ def is_garbage_entity(name: str, entity_type: str, aggressive: bool = False) -> 
     # Whitelist of legitimate short names (universities, companies, acronyms)
     legitimate_short_names = {
         # Universities
-        'MIT', 'UCLA', 'USC', 'NYU', 'UCL', 'ETH', 'EPFL', 'CMU', 'RIT',
-        'Yale', 'Duke', 'Rice', 'Case', 'Drew',
-        'GTech', 'GaTech', 'Caltech', 'Pitt',
+        "MIT",
+        "UCLA",
+        "USC",
+        "NYU",
+        "UCL",
+        "ETH",
+        "EPFL",
+        "CMU",
+        "RIT",
+        "Yale",
+        "Duke",
+        "Rice",
+        "Case",
+        "Drew",
+        "GTech",
+        "GaTech",
+        "Caltech",
+        "Pitt",
         # Tech companies
-        'IBM', 'SAP', 'AMD', 'ARM', 'AWS', 'GCP', 'API',
-        'Meta', 'Uber', 'Lyft', 'Snap', 'Zoom',
+        "IBM",
+        "SAP",
+        "AMD",
+        "ARM",
+        "AWS",
+        "GCP",
+        "API",
+        "Meta",
+        "Uber",
+        "Lyft",
+        "Snap",
+        "Zoom",
         # Research/Standards
-        'IEEE', 'ACM', 'ISO', 'NIST', 'DARPA', 'NASA', 'ESA',
-        'WHO', 'FDA', 'CDC', 'NIH', 'NSF',
+        "IEEE",
+        "ACM",
+        "ISO",
+        "NIST",
+        "DARPA",
+        "NASA",
+        "ESA",
+        "WHO",
+        "FDA",
+        "CDC",
+        "NIH",
+        "NSF",
         # Common abbreviations
-        'USA', 'UK', 'EU', 'UN', 'NATO', 'ASEAN',
-        'CEO', 'CTO', 'CFO', 'COO', 'VP', 'SVP', 'EVP',
-        'AI', 'ML', 'NLP', 'CV', 'IoT', 'API', 'GPU', 'CPU',
-        'PhD', 'MSc', 'BSc', 'MBA', 'MD',
+        "USA",
+        "UK",
+        "EU",
+        "UN",
+        "NATO",
+        "ASEAN",
+        "CEO",
+        "CTO",
+        "CFO",
+        "COO",
+        "VP",
+        "SVP",
+        "EVP",
+        "AI",
+        "ML",
+        "NLP",
+        "CV",
+        "IoT",
+        "API",
+        "GPU",
+        "CPU",
+        "PhD",
+        "MSc",
+        "BSc",
+        "MBA",
+        "MD",
         # Cities with short names
-        'LA', 'NY', 'SF', 'DC', 'LA',
+        "LA",
+        "NY",
+        "SF",
+        "DC",
+        "LA",
     }
+    # Compare case-insensitively: entries above are mixed case ('Yale', 'Meta').
+    legitimate_short_names = {n.upper() for n in legitimate_short_names}
 
     # Check if it's a known legitimate short name (case-insensitive)
     if name.upper() in legitimate_short_names:
         return False
 
     # Check if it looks like a university abbreviation (all uppercase, 2-5 chars)
-    if entity_type == 'ORGANIZATION' and 2 <= len(name) <= 5:
+    if entity_type == "ORGANIZATION" and 2 <= len(name) <= 5:
         if name.isupper() and name.isalpha():
             # Likely a legitimate abbreviation
             return False
@@ -80,19 +147,19 @@ def is_garbage_entity(name: str, entity_type: str, aggressive: bool = False) -> 
         return True
 
     # Just punctuation or symbols
-    if re.match(r'^[\W_]+$', name):
+    if re.match(r"^[\W_]+$", name):
         return True
 
     # OCR errors like "l20", "l4", "I20"
-    if re.match(r'^[lI][0-9]+$', name):
+    if re.match(r"^[lI][0-9]+$", name):
         return True
 
     # Numbers with punctuation only
-    if re.match(r'^[\d\W]+$', name):
+    if re.match(r"^[\d\W]+$", name):
         return True
 
     # Very short ORG entities - BUT check for legitimate patterns first
-    if entity_type == 'ORGANIZATION' and len(name) <= 3:
+    if entity_type == "ORGANIZATION" and len(name) <= 3:
         # Allow if it's all uppercase letters (likely acronym)
         if name.isupper() and name.isalpha():
             return False
@@ -100,21 +167,21 @@ def is_garbage_entity(name: str, entity_type: str, aggressive: bool = False) -> 
         return True
 
     # Single-character "locations" or "concepts"
-    if entity_type in ['LOCATION', 'CONCEPT'] and len(name) <= 2:
+    if entity_type in ["LOCATION", "CONCEPT"] and len(name) <= 2:
         return True
 
     # Meaningless fragments
-    meaningless = ['l', 'i', 'ii', 'iii', 'iv', 'v', 'x', 'xi', 'xx', 'xxx']
+    meaningless = ["l", "i", "ii", "iii", "iv", "v", "x", "xi", "xx", "xxx"]
     if name.lower() in meaningless:
         return True
 
     # Common OCR mistakes
     ocr_patterns = [
-        r'^l+$',  # Just lowercase L's
-        r'^I+$',  # Just uppercase i's
-        r'^[lI]{1,2}\d$',  # l2, I3, ll4, etc.
-        r'^\d+\)$',  # Numbers with closing paren: 2), 3)
-        r'^\d+\.$',  # Numbers with period: 2., 3.
+        r"^l+$",  # Just lowercase L's
+        r"^I+$",  # Just uppercase i's
+        r"^[lI]{1,2}\d$",  # l2, I3, ll4, etc.
+        r"^\d+\)$",  # Numbers with closing paren: 2), 3)
+        r"^\d+\.$",  # Numbers with period: 2., 3.
     ]
 
     for pattern in ocr_patterns:
@@ -129,7 +196,7 @@ def is_garbage_entity(name: str, entity_type: str, aggressive: bool = False) -> 
             return False
 
         # Short ORG names (likely fragments) - but allow acronyms
-        if entity_type == 'ORGANIZATION' and len(name) <= 5:
+        if entity_type == "ORGANIZATION" and len(name) <= 5:
             if name.isupper() and name.isalpha():
                 return False
             return True
@@ -198,9 +265,9 @@ def delete_entity(entity_id: str, dry_run: bool = False) -> int:
 
 def show_statistics():
     """Show statistics about entities in the graph"""
-    logger.info("\n" + "="*80)
+    logger.info("\n" + "=" * 80)
     logger.info("KNOWLEDGE GRAPH STATISTICS")
-    logger.info("="*80)
+    logger.info("=" * 80)
 
     # Total entities
     query = "MATCH (e:Entity) RETURN count(e) as total"
@@ -239,7 +306,7 @@ def show_statistics():
         result = session.run(query)
         logger.info("\nEntities by name length:")
         for record in result:
-            if record['len'] <= 10:  # Only show short ones
+            if record["len"] <= 10:  # Only show short ones
                 logger.info(f"  Length {record['len']}: {record['count']} entities")
 
     # Sample short entities
@@ -256,22 +323,43 @@ def show_statistics():
         for record in records:
             # Access by index instead of key
             name = record[0]
-            entity_type = record[1] if len(record) > 1 else 'N/A'
+            entity_type = record[1] if len(record) > 1 else "N/A"
             logger.info(f"  '{name}' ({entity_type})")
 
 
 def main():
     """Main cleanup function"""
-    parser = argparse.ArgumentParser(description='Clean up garbage entities from knowledge graph')
-    parser.add_argument('--dry-run', action='store_true', help='Show what would be deleted without actually deleting')
-    parser.add_argument('--aggressive', action='store_true', help='Be more aggressive in filtering (remove more entities)')
-    parser.add_argument('--stats-only', action='store_true', help='Only show statistics, do not delete anything')
+    parser = argparse.ArgumentParser(
+        description="Clean up garbage entities from knowledge graph"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without deleting (the default)",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually delete. Without it the run is a dry run.",
+    )
+    parser.add_argument(
+        "--aggressive",
+        action="store_true",
+        help="Be more aggressive in filtering (remove more entities)",
+    )
+    parser.add_argument(
+        "--stats-only",
+        action="store_true",
+        help="Only show statistics, do not delete anything",
+    )
 
     args = parser.parse_args()
+    if not args.yes:
+        args.dry_run = True
 
-    logger.info("="*80)
+    logger.info("=" * 80)
     logger.info("GARBAGE ENTITY CLEANUP")
-    logger.info("="*80)
+    logger.info("=" * 80)
 
     if args.dry_run:
         logger.info("DRY RUN MODE - No changes will be made")
@@ -287,9 +375,9 @@ def main():
         return
 
     # Get all entities
-    logger.info("\n" + "="*80)
+    logger.info("\n" + "=" * 80)
     logger.info("ANALYZING ENTITIES")
-    logger.info("="*80)
+    logger.info("=" * 80)
 
     entities = get_all_entities()
     logger.info(f"Analyzing {len(entities)} entities...")
@@ -297,7 +385,7 @@ def main():
     # Identify garbage entities
     garbage_entities = []
     for entity in entities:
-        if is_garbage_entity(entity['name'], entity['type'], args.aggressive):
+        if is_garbage_entity(entity["name"], entity["type"], args.aggressive):
             garbage_entities.append(entity)
 
     logger.info(f"\nFound {len(garbage_entities)} garbage entities to remove:")
@@ -305,10 +393,10 @@ def main():
     # Group by type
     by_type = {}
     for entity in garbage_entities:
-        entity_type = entity['type']
+        entity_type = entity["type"]
         if entity_type not in by_type:
             by_type[entity_type] = []
-        by_type[entity_type].append(entity['name'])
+        by_type[entity_type].append(entity["name"])
 
     for entity_type, names in sorted(by_type.items()):
         logger.info(f"\n{entity_type} ({len(names)}):")
@@ -319,29 +407,33 @@ def main():
             logger.info(f"  ... and {len(names) - 10} more")
 
     # Delete entities
-    logger.info("\n" + "="*80)
+    logger.info("\n" + "=" * 80)
     logger.info("DELETING GARBAGE ENTITIES")
-    logger.info("="*80)
+    logger.info("=" * 80)
 
     total_relationships_deleted = 0
 
     for i, entity in enumerate(garbage_entities, 1):
-        entity_id = entity['id']
-        entity_name = entity['name']
-        entity_type = entity['type']
+        entity_id = entity["id"]
+        entity_name = entity["name"]
+        entity_type = entity["type"]
 
         rel_count = delete_entity(entity_id, dry_run=args.dry_run)
         total_relationships_deleted += rel_count
 
         if args.dry_run:
-            logger.info(f"[DRY RUN] Would delete: '{entity_name}' ({entity_type}) with {rel_count} relationships")
+            logger.info(
+                f"[DRY RUN] Would delete: '{entity_name}' ({entity_type}) with {rel_count} relationships"
+            )
         else:
-            logger.info(f"✓ Deleted: '{entity_name}' ({entity_type}) with {rel_count} relationships ({i}/{len(garbage_entities)})")
+            logger.info(
+                f"✓ Deleted: '{entity_name}' ({entity_type}) with {rel_count} relationships ({i}/{len(garbage_entities)})"
+            )
 
     # Show final statistics
-    logger.info("\n" + "="*80)
+    logger.info("\n" + "=" * 80)
     logger.info("CLEANUP COMPLETE")
-    logger.info("="*80)
+    logger.info("=" * 80)
 
     logger.info(f"Entities removed: {len(garbage_entities)}")
     logger.info(f"Relationships removed: {total_relationships_deleted}")
@@ -351,7 +443,7 @@ def main():
         show_statistics()
     else:
         logger.info("\n⚠️  DRY RUN - No changes were made")
-        logger.info("Run without --dry-run to actually delete garbage entities")
+        logger.info("Re-run with --yes to actually delete garbage entities")
 
 
 if __name__ == "__main__":

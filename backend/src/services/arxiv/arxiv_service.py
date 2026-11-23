@@ -8,8 +8,11 @@ for testing and evaluating the multimodal RAG system.
 import asyncio
 import json
 import logging
+import multiprocessing
 import re
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -21,6 +24,7 @@ import aiohttp
 import httpx
 from defusedxml import ElementTree as ET
 from pypdf import PdfReader
+from pypdf.generic import NullObject
 
 from src.models.document import DocumentType, ProcessingStatus
 from src.services.infrastructure.azure_openai_service import azure_openai_service
@@ -214,6 +218,131 @@ _MAX_CONCURRENT_PDF_DOWNLOADS = 3
 # built from a model-supplied id, with redirects followed — one bad id could
 # pull an arbitrary-size body into memory. Real arXiv PDFs are well under this.
 _MAX_PDF_BYTES = 50 * 1024 * 1024
+
+
+def _extract_pdf_content_sync(pdf_content: bytes) -> Dict[str, Any]:
+    """Parse a PDF with pypdf. Sync and top-level so a worker process can run it."""
+    pdf_reader = PdfReader(BytesIO(pdf_content))
+
+    full_text = ""
+    page_texts = []
+    for page_num, page in enumerate(pdf_reader.pages):
+        try:
+            page_text = page.extract_text() or ""
+            page_texts.append({"page": page_num + 1, "text": page_text})
+            if page_text.strip():
+                full_text += f"[Page {page_num + 1}]\n{page_text}\n\n"
+        except Exception as e:
+            logger.warning(f"Failed to extract text from page {page_num + 1}: {e}")
+
+    metadata = {}
+    info = pdf_reader.metadata
+    if info:
+
+        def _field(name: str) -> str:
+            # Values can be IndirectObjects (or other pypdf objects) that hold
+            # a reference back to the reader; pickling one back from the
+            # worker process recurses until RecursionError. Resolve and
+            # coerce to plain str.
+            value = info.get(name)
+            if value is None:
+                return ""
+            try:
+                value = value.get_object()
+            except AttributeError:
+                pass
+            # A PDF null (pypdf NullObject) is an absent value, not the text
+            # "NullObject": treat it like a missing field.
+            if value is None or isinstance(value, NullObject):
+                return ""
+            return str(value)
+
+        metadata = {
+            "title": _field("/Title"),
+            "author": _field("/Author"),
+            "subject": _field("/Subject"),
+            "creator": _field("/Creator"),
+            "producer": _field("/Producer"),
+            "creation_date": _field("/CreationDate"),
+            "modification_date": _field("/ModDate"),
+        }
+
+    return {
+        "full_text": full_text,
+        "page_texts": page_texts,
+        "num_pages": len(pdf_reader.pages),
+        "metadata": metadata,
+    }
+
+
+# Upper bound for one pypdf parse of an arXiv PDF (at most _MAX_PDF_BYTES).
+_PDF_PARSE_TIMEOUT_SECONDS = 120.0
+
+# Parse threads one process may have running in the thread fallback, counting
+# ones whose caller already timed out (GOO-695). A thread cannot be killed, so
+# a timeout there only abandons the await; the slot is released by the thread
+# itself when the parse really ends, which bounds how many abandoned parses
+# can pile up. The parses get their own executor, one thread per slot, so
+# they never queue behind unrelated work in the loop's default executor.
+_MAX_THREAD_PARSES = 2
+_thread_parse_slots = threading.BoundedSemaphore(_MAX_THREAD_PARSES)
+_pdf_parse_executor = ThreadPoolExecutor(
+    max_workers=_MAX_THREAD_PARSES, thread_name_prefix="pdf-parse"
+)
+
+
+class _ParseSlotsBusy(Exception):
+    """Every thread-fallback parse slot is held by a parse still running."""
+
+
+def _parse_in_thread_slot(slots: threading.BoundedSemaphore, pdf_content: bytes):
+    try:
+        return _extract_pdf_content_sync(pdf_content)
+    finally:
+        slots.release()
+
+
+def _release_if_never_ran(
+    slots: threading.BoundedSemaphore, job: "Future[Any]"
+) -> None:
+    # A concurrent.futures job can only be cancelled before it starts, so a
+    # cancelled job never reached _parse_in_thread_slot's release: this is
+    # then the only release. A job that ran is never "cancelled" (GOO-701).
+    if job.cancelled():
+        slots.release()
+
+
+async def _parse_pdf_off_loop(pdf_content: bytes) -> Dict[str, Any]:
+    """Run ``_extract_pdf_content_sync`` without blocking the event loop.
+
+    pypdf is pure Python, so a thread still holds the GIL; a worker process
+    (the bounded, per-call one ``arxiv_fulltext`` uses) keeps the API loop
+    free, and is killed if the call times out or is cancelled. A daemonic
+    process (a Celery prefork worker) may not start children, so there the
+    parse falls back to a thread, which a timeout cannot stop: at most
+    ``_MAX_THREAD_PARSES`` such threads run per process, and a parse that
+    finds them all busy fails at once instead of starting another.
+    """
+    if multiprocessing.current_process().daemon:
+        slots = _thread_parse_slots
+        if not slots.acquire(blocking=False):
+            raise _ParseSlotsBusy(
+                f"{_MAX_THREAD_PARSES} earlier PDF parses are still running"
+            )
+        try:
+            job = _pdf_parse_executor.submit(_parse_in_thread_slot, slots, pdf_content)
+        except BaseException:
+            slots.release()
+            raise
+        # Exactly one release per slot: the thread releases a job that ran;
+        # a job cancelled while still queued (this await was cancelled before
+        # a worker picked it up) is released by this callback instead.
+        job.add_done_callback(lambda done: _release_if_never_ran(slots, done))
+        return await asyncio.wrap_future(job)
+    from src.services.integrations.arxiv_fulltext import run_in_subprocess
+
+    return await run_in_subprocess(_extract_pdf_content_sync, pdf_content)
+
 
 _pdf_semaphore: Optional[asyncio.Semaphore] = None
 _pdf_semaphore_loop: Any = None
@@ -805,6 +934,10 @@ class ArXivIngestionService:
         """
         Extract text content from PDF
 
+        The pypdf parse is CPU-bound and a PDF may be up to _MAX_PDF_BYTES, so
+        it runs off the event loop (GOO-642/IS-6): in a worker process of its
+        own where possible, else in a thread.
+
         Args:
             pdf_content: PDF file content as bytes
 
@@ -812,44 +945,24 @@ class ArXivIngestionService:
             Dictionary with extracted content
         """
         try:
-            pdf_file = BytesIO(pdf_content)
-            pdf_reader = PdfReader(pdf_file)
-
-            # Extract text from all pages
-            full_text = ""
-            page_texts = []
-
-            for page_num, page in enumerate(pdf_reader.pages):
-                try:
-                    page_text = page.extract_text() or ""
-                    page_texts.append({"page": page_num + 1, "text": page_text})
-                    if page_text.strip():
-                        full_text += f"[Page {page_num + 1}]\n{page_text}\n\n"
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to extract text from page {page_num + 1}: {e}"
-                    )
-
-            # Extract metadata
-            metadata = {}
-            if pdf_reader.metadata:
-                metadata = {
-                    "title": pdf_reader.metadata.get("/Title", ""),
-                    "author": pdf_reader.metadata.get("/Author", ""),
-                    "subject": pdf_reader.metadata.get("/Subject", ""),
-                    "creator": pdf_reader.metadata.get("/Creator", ""),
-                    "producer": pdf_reader.metadata.get("/Producer", ""),
-                    "creation_date": str(pdf_reader.metadata.get("/CreationDate", "")),
-                    "modification_date": str(pdf_reader.metadata.get("/ModDate", "")),
-                }
-
-            return {
-                "full_text": full_text,
-                "page_texts": page_texts,
-                "num_pages": len(pdf_reader.pages),
-                "metadata": metadata,
-            }
-
+            # A stuck parse must not hold its caller forever. In a worker
+            # process (arxiv_fulltext.run_in_subprocess) the timeout kills
+            # the process and frees its slot. In the thread fallback (Celery
+            # prefork) it only stops waiting: the thread runs on, holding one
+            # of the bounded thread slots until it ends (_parse_pdf_off_loop).
+            return await asyncio.wait_for(
+                _parse_pdf_off_loop(pdf_content), _PDF_PARSE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "PDF extraction timed out after %.0fs", _PDF_PARSE_TIMEOUT_SECONDS
+            )
+            raise IngestionError(
+                f"PDF extraction timed out after {_PDF_PARSE_TIMEOUT_SECONDS:.0f}s"
+            )
+        except _ParseSlotsBusy as e:
+            logger.error(f"PDF extraction refused: {e}")
+            raise IngestionError(f"PDF extraction refused: {e}")
         except Exception as e:
             logger.error(f"Failed to extract PDF content: {e}")
             raise IngestionError(f"PDF extraction failed: {e}")

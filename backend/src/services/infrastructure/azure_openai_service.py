@@ -168,6 +168,23 @@ class AzureOpenAIService:
             )
         return self.async_client
 
+    _EMBEDDING_BATCH_SIZE = 16
+
+    def _embed_batches_sync(
+        self, texts: List[str], deployment_name: str
+    ) -> List[List[float]]:
+        """Embed ``texts`` in batches (blocking). Keeps input order."""
+        embeddings: List[List[float]] = []
+        for start in range(0, len(texts), self._EMBEDDING_BATCH_SIZE):
+            batch = texts[start : start + self._EMBEDDING_BATCH_SIZE]
+            response = self.embedding_client.embeddings.create(
+                input=batch,
+                model=deployment_name,  # In Azure OpenAI, this is the deployment name
+            )
+            ordered = sorted(response.data, key=lambda item: item.index)
+            embeddings.extend(item.embedding for item in ordered)
+        return embeddings
+
     async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         Get embeddings for a list of texts using Azure OpenAI
@@ -186,15 +203,12 @@ class AzureOpenAIService:
             raise ValueError("Azure OpenAI embedding deployment name not configured")
 
         try:
-            embeddings = []
-            for text in texts:
-                response = self.embedding_client.embeddings.create(
-                    input=[text],
-                    model=deployment_name,  # In Azure OpenAI, this is the deployment name
-                )
-                embeddings.append(response.data[0].embedding)
-
-            return embeddings
+            # The embedding client is synchronous: run it in a worker thread so
+            # the event loop keeps serving, and send texts in batches instead of
+            # one round-trip per text (GOO-643/PL-6).
+            return await asyncio.to_thread(
+                self._embed_batches_sync, list(texts), deployment_name
+            )
 
         except Exception as e:
             logger.error(f"Error getting embeddings from Azure OpenAI: {str(e)}")

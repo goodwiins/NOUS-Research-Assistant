@@ -2,20 +2,21 @@
 Celery tasks for evaluation processing and RAG Triad metrics calculation
 """
 
-import asyncio
 import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, NoReturn
 
 from celery import Task
+from celery.exceptions import Ignore, SoftTimeLimitExceeded
 
 # Add src directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from celery import Celery, current_app
+from sqlalchemy import text
 
 from src.core.config import settings
 from src.core.database import SessionLocal, get_db
@@ -32,6 +33,7 @@ from src.services.evaluation.rag_evaluation_service import (
     RAGEvaluationInput,
     rag_evaluation_service,
 )
+from src.tasks._async_utils import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,180 @@ _TERMINAL_EVAL_STATUSES = frozenset(
         EvaluationStatus.CANCELLED.value,
     }
 )
+
+
+class EvaluationFailure(ValueError):
+    """A failure whose message is written for the user and safe to store."""
+
+
+# EvaluationJob.error_message is returned by the API, so an unexpected
+# exception is never stored verbatim (it can carry hosts, SQL or credentials);
+# the handlers log the detail server-side instead (GOO-696).
+_UNEXPECTED_FAILURE_MESSAGE = (
+    "Evaluation failed because of an internal error "
+    "(error code EVALUATION_INTERNAL_ERROR); details are in the server logs"
+)
+
+
+def _failure_message(exc: BaseException) -> str:
+    """Job error text: fixed messages only, never raw exception text."""
+    if isinstance(exc, SoftTimeLimitExceeded):
+        return (
+            "Evaluation stopped at the task time limit; metrics already saved "
+            "for processed items are kept"
+        )
+    if isinstance(exc, EvaluationFailure):
+        return str(exc)
+    return _UNEXPECTED_FAILURE_MESSAGE
+
+
+# Stamped into EvaluationJob.parameters when a delivery takes the job to
+# RUNNING. celery_app sets task_acks_late + task_reject_on_worker_lost, so a
+# worker that dies mid-run (OOM, SIGKILL, eviction) has the SAME message (same
+# task id) redelivered. A RUNNING job stamped with this delivery's own task id
+# therefore means the previous attempt of this message died part-way.
+_CLAIM_KEY = "claimed_by_task_id"
+_WORKER_LOST_MESSAGE = (
+    "Evaluation worker was lost mid-run; it was not restarted, to avoid repeating "
+    "paid LLM calls and duplicating metrics. Metrics already saved for processed "
+    "items are kept; start a new evaluation to finish the dataset"
+)
+
+# Task limits, from settings: the global 300s soft limit is far too short for a
+# dataset of paid LLM evaluations.
+_EVAL_TIME_LIMITS = {
+    "soft_time_limit": settings.EVALUATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+    "time_limit": settings.EVALUATION_TASK_TIME_LIMIT_SECONDS,
+}
+
+
+def _running_age_seconds(job: Any) -> float | None:
+    started = job.started_at
+    if started is None:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - started).total_seconds()
+
+
+def _claim_evaluation_job(
+    db: Any, job_id: str, task_id: str | None
+) -> tuple[Any, Dict[str, Any] | None]:
+    """Lock the job row and decide whether this delivery may run it.
+
+    Returns ``(job, None)`` when the caller owns a fresh job: it must then call
+    ``_start_claimed_job`` before committing (the row lock is still held).
+    Returns ``(job, response)`` when the delivery must not run:
+
+    * terminal job -> ``duplicate_delivery`` (work already finished);
+    * RUNNING and claimed by this same task id -> the earlier attempt of this
+      message died; the job is marked FAILED instead of starting over;
+    * RUNNING with no claim (pre-claim rows) older than the hard time limit ->
+      treated the same way, since no live attempt can still be running;
+    * any other RUNNING job -> ``running_elsewhere``, left untouched.
+    """
+    job = (
+        db.query(EvaluationJob)
+        .filter(EvaluationJob.id == job_id)
+        .with_for_update()
+        .first()
+    )
+    if not job:
+        raise EvaluationFailure(f"Evaluation job {job_id} not found")
+
+    if job.status in _TERMINAL_EVAL_STATUSES:
+        db.rollback()
+        logger.info(
+            "Evaluation job %s already %s; skipping redelivered run",
+            job_id,
+            job.status,
+        )
+        return job, {
+            "status": job.status,
+            "job_id": job_id,
+            "skipped": "duplicate_delivery",
+        }
+
+    if job.status == EvaluationStatus.RUNNING.value:
+        claimed_by = (job.parameters or {}).get(_CLAIM_KEY)
+        age = _running_age_seconds(job)
+        orphaned = claimed_by is None and (
+            age is None or age >= settings.EVALUATION_TASK_TIME_LIMIT_SECONDS
+        )
+        if (task_id is not None and claimed_by == task_id) or orphaned:
+            job.fail_job(_WORKER_LOST_MESSAGE)
+            db.commit()
+            logger.warning(
+                "Evaluation job %s was RUNNING when its task was redelivered; "
+                "marked failed instead of re-running",
+                job_id,
+            )
+            return job, {
+                "status": job.status,
+                "job_id": job_id,
+                "skipped": "worker_lost",
+            }
+        db.rollback()
+        logger.info(
+            "Evaluation job %s is running under another delivery; skipping",
+            job_id,
+        )
+        return job, {
+            "status": job.status,
+            "job_id": job_id,
+            "skipped": "running_elsewhere",
+        }
+
+    return job, None
+
+
+def _skip_delivery(task: Any, response: Dict[str, Any]) -> NoReturn:
+    """End a delivery that must not run, without reporting Celery SUCCESS.
+
+    ``Ignore`` acks the message (so it is not redelivered again) and skips
+    ``on_success``/``on_failure``. On a real worker the result backend gets a
+    custom ``SKIPPED`` state carrying the reason; failing to record that state
+    must not turn the skip into a run or a retry, so it is only logged.
+    """
+    logger.info("Evaluation delivery skipped: %s", response)
+    if not getattr(task.request, "is_eager", False):
+        try:
+            task.update_state(state="SKIPPED", meta=response)
+        except Exception:
+            logger.warning(
+                "Could not record SKIPPED state for an evaluation delivery",
+                exc_info=True,
+            )
+    raise Ignore()
+
+
+def _lock_real_time_delivery(db: Any, task_id: str) -> None:
+    """Take a transaction-scoped Postgres advisory lock on a real-time task id.
+
+    ``run_real_time_evaluation`` creates its own job, so there is no row to
+    ``SELECT … FOR UPDATE`` before the job exists. The advisory lock gives the
+    same guarantee: a second delivery of the same task id waits here until
+    the first commits its job, then finds it. The key is the 64-bit
+    ``hashtextextended``, as in ``tool_operations``, so unrelated task ids
+    rarely share a lock (GOO-696). A unique index on
+    ``parameters->>'celery_task_id'`` would need a migration that fails on
+    any duplicate rows earlier redeliveries already wrote. Other databases
+    (SQLite in tests) have no advisory locks and skip this.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"evaluation:real_time:{task_id}"},
+    )
+
+
+def _start_claimed_job(job: Any, task_id: str | None) -> None:
+    """Move a claimed job to RUNNING and stamp the owning delivery."""
+    job.start_job()
+    job.update_progress(0)
+    # Reassign (not mutate) so the JSON column change is tracked.
+    job.parameters = {**(job.parameters or {}), _CLAIM_KEY: task_id}
 
 
 class EvaluationTask(Task):
@@ -64,8 +240,10 @@ class EvaluationTask(Task):
             try:
                 job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
 
-                if job:
-                    job.fail_job(str(exc))
+                # The task's own handler usually already failed the job; keep
+                # its terminal state and message instead of overwriting them.
+                if job and job.status not in _TERMINAL_EVAL_STATUSES:
+                    job.fail_job(_failure_message(exc))
                     db.commit()
             except Exception as e:
                 logger.error(f"Failed to update evaluation job status: {str(e)}")
@@ -73,37 +251,23 @@ class EvaluationTask(Task):
                 db.close()
 
 
-@current_app.task(base=EvaluationTask, bind=True)
+@current_app.task(base=EvaluationTask, bind=True, **_EVAL_TIME_LIMITS)
 def run_rag_triad_evaluation(self, job_id: str):
     """
     Run complete RAG Triad evaluation for a job
     """
     db = SessionLocal()
+    job = None
     try:
-        # Get evaluation job
-        job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
-
-        if not job:
-            raise ValueError(f"Evaluation job {job_id} not found")
-
-        # Idempotency guard for acks_late redelivery (mirrors
-        # processing_tasks.process_document_ingestion): a worker recycled after
-        # this job reached a terminal state but before the broker ack causes the
-        # message to be redelivered — re-running would re-incur paid LLM
-        # evaluation and append a duplicate set of EvaluationMetric rows.
+        # Idempotency guard for acks_late redelivery: a terminal job is skipped
+        # and a RUNNING one is never restarted (see _claim_evaluation_job).
         # Placed BEFORE the dataset fetch so a dataset deleted after completion
         # can't raise on redelivery and flip a terminal job to FAILED via
         # on_failure.
-        if job.status in _TERMINAL_EVAL_STATUSES:
-            logger.info(
-                f"Evaluation job {job_id} already {job.status}; "
-                "skipping redelivered run"
-            )
-            return {
-                "status": job.status,
-                "job_id": job_id,
-                "skipped": "duplicate_delivery",
-            }
+        task_id = getattr(self.request, "id", None)
+        job, skip = _claim_evaluation_job(db, job_id, task_id)
+        if skip is not None:
+            _skip_delivery(self, skip)
 
         # Get evaluation dataset. R5-H6: the writer path is now single (the
         # API builds the dataset it wants and the service persists exactly
@@ -118,11 +282,10 @@ def run_rag_triad_evaluation(self, job_id: str):
         )
 
         if not dataset:
-            raise ValueError(f"Evaluation dataset for job {job_id} not found")
+            raise EvaluationFailure(f"Evaluation dataset for job {job_id} not found")
 
-        # Start job
-        job.start_job()
-        job.update_progress(0)
+        # Start job (still under the claim's row lock)
+        _start_claimed_job(job, task_id)
         db.commit()
 
         logger.info(f"Starting RAG Triad evaluation for job {job_id}")
@@ -136,76 +299,84 @@ def run_rag_triad_evaluation(self, job_id: str):
         processed_items = 0
         metrics_results = []
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        for i, question in enumerate(questions):
+            try:
+                # Create evaluation input
+                evaluation_input = RAGEvaluationInput(
+                    query=question,
+                    generated_answer="",  # Will be generated during evaluation
+                    retrieved_context=contexts[i] if i < len(contexts) else [],
+                    reference_answer=(
+                        reference_answers[i] if i < len(reference_answers) else None
+                    ),
+                    metadata={"item_index": i, "total_items": total_items},
+                )
 
-        try:
-            for i, question in enumerate(questions):
-                try:
-                    # Create evaluation input
-                    evaluation_input = RAGEvaluationInput(
-                        query=question,
-                        generated_answer="",  # Will be generated during evaluation
-                        retrieved_context=contexts[i] if i < len(contexts) else [],
-                        reference_answer=(
-                            reference_answers[i] if i < len(reference_answers) else None
-                        ),
-                        metadata={"item_index": i, "total_items": total_items},
+                # Every metric row for this item is flushed into ``db`` and
+                # committed below with the progress update, or rolled back
+                # with it (GOO-696).
+                metrics = None
+                if not evaluation_input.retrieved_context:
+                    # No context: the search pipeline retrieves, answers and
+                    # judges the item, and saves its rows for this job. It used
+                    # to be judged again here, which cost four more LLM calls
+                    # per item (GOO-696).
+                    search_results = run_async(
+                        rag_evaluation_service.evaluate_search_pipeline(
+                            [question],
+                            str(job.organization_id),
+                            str(job.user_id) if job.user_id else "anonymous",
+                            search_type=job.parameters.get("search_type", "hybrid"),
+                            limit=job.parameters.get("search_limit", 5),
+                            job_id=job_id,
+                            db=db,
+                            reference_answers=[evaluation_input.reference_answer],
+                        )
+                    )
+                    if search_results:
+                        metrics = search_results[0]
+                else:
+                    # Generate simple answer from context
+                    evaluation_input.generated_answer = (
+                        rag_evaluation_service._generate_simple_answer(
+                            question, evaluation_input.retrieved_context
+                        )
                     )
 
-                    # If no provided context, perform search
-                    if not evaluation_input.retrieved_context:
-                        search_results = loop.run_until_complete(
-                            rag_evaluation_service.evaluate_search_pipeline(
-                                [question],
-                                str(job.organization_id),
-                                str(job.user_id) if job.user_id else "anonymous",
-                                search_type=job.parameters.get("search_type", "hybrid"),
-                                limit=job.parameters.get("search_limit", 5),
-                            )
-                        )
-
-                        if search_results:
-                            evaluation_input.generated_answer = search_results[
-                                0
-                            ].metadata.get("generated_answer", "")
-                            evaluation_input.retrieved_context = search_results[
-                                0
-                            ].metadata.get("retrieved_context", [])
-                    else:
-                        # Generate simple answer from context
-                        evaluation_input.generated_answer = (
-                            rag_evaluation_service._generate_simple_answer(
-                                question, evaluation_input.retrieved_context
-                            )
-                        )
-
-                    # Calculate RAG Triad metrics
-                    metrics = loop.run_until_complete(
+                if metrics is None:
+                    # Context supplied, or the pipeline dropped the query.
+                    metrics = run_async(
                         rag_evaluation_service.run_rag_triad_evaluation(
-                            evaluation_input, job_id, str(job.organization_id), db
+                            evaluation_input,
+                            job_id,
+                            str(job.organization_id),
+                            db,
+                            commit=False,
                         )
                     )
 
-                    metrics_results.append(metrics)
-                    processed_items += 1
+                # Count the item only once its rows are committed.
+                job.update_progress(processed_items + 1)
+                db.commit()
+                metrics_results.append(metrics)
+                processed_items += 1
 
-                    # Update progress
-                    progress = int((processed_items / total_items) * 100)
-                    job.update_progress(processed_items)
-                    db.commit()
+                logger.info(f"Processed item {i+1}/{total_items} for job {job_id}")
 
-                    logger.info(f"Processed item {i+1}/{total_items} for job {job_id}")
-
-                except Exception as item_error:
-                    logger.error(
-                        f"Error processing item {i} for job {job_id}: {str(item_error)}"
-                    )
-                    continue
-
-        finally:
-            loop.close()
+            except SoftTimeLimitExceeded:
+                # Never swallow the soft limit: the hard kill follows, and with
+                # acks_late the redelivered message would re-run every paid item
+                # of a job still in RUNNING. Propagate so the handler below marks
+                # the job terminal (the idempotency guard then skips redelivery).
+                raise
+            except Exception as item_error:
+                # Drop this item's uncommitted rows and un-poison the session
+                # for the remaining items.
+                db.rollback()
+                logger.error(
+                    f"Error processing item {i} for job {job_id}: {str(item_error)}"
+                )
+                continue
 
         # Calculate overall metrics
         if metrics_results:
@@ -274,7 +445,10 @@ def run_rag_triad_evaluation(self, job_id: str):
         else:
             job.fail_job("No items were successfully processed")
             db.commit()
-            raise ValueError("No items were successfully processed")
+            raise EvaluationFailure("No items were successfully processed")
+
+    except Ignore:
+        raise  # a skipped delivery (_skip_delivery): nothing to fail
 
     except Exception as e:
         logger.error(f"RAG Triad evaluation failed for job {job_id}: {str(e)}")
@@ -287,7 +461,7 @@ def run_rag_triad_evaluation(self, job_id: str):
         # Update job status
         try:
             if job:
-                job.fail_job(str(e))
+                job.fail_job(_failure_message(e))
                 db.commit()
         except Exception as update_error:
             logger.error(f"Failed to update job failure status: {str(update_error)}")
@@ -298,127 +472,128 @@ def run_rag_triad_evaluation(self, job_id: str):
         db.close()
 
 
-@current_app.task(base=EvaluationTask, bind=True)
+@current_app.task(base=EvaluationTask, bind=True, **_EVAL_TIME_LIMITS)
 def run_batch_evaluation(self, job_id: str, queries: List[str]):
     """
     Run batch evaluation for a list of queries
     """
     db = SessionLocal()
+    job = None
     try:
-        # Get evaluation job
-        job = db.query(EvaluationJob).filter(EvaluationJob.id == job_id).first()
-
-        if not job:
-            raise ValueError(f"Evaluation job {job_id} not found")
-
         # Idempotency guard for acks_late redelivery — see run_rag_triad_evaluation.
-        if job.status in _TERMINAL_EVAL_STATUSES:
-            logger.info(
-                f"Evaluation job {job_id} already {job.status}; "
-                "skipping redelivered run"
-            )
-            return {
-                "status": job.status,
-                "job_id": job_id,
-                "skipped": "duplicate_delivery",
-            }
+        task_id = getattr(self.request, "id", None)
+        job, skip = _claim_evaluation_job(db, job_id, task_id)
+        if skip is not None:
+            _skip_delivery(self, skip)
 
         # Start job
-        job.start_job()
-        job.update_progress(0)
+        _start_claimed_job(job, task_id)
         db.commit()
 
         logger.info(
             f"Starting batch evaluation for job {job_id} with {len(queries)} queries"
         )
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            # Run evaluation for all queries
-            metrics_results = loop.run_until_complete(
+        # Evaluate and save one query at a time. The pipeline drops a query
+        # that errors, so a single call over every query (the old shape) saved
+        # nothing until the end, lost all finished metrics on a soft time
+        # limit, and paired the surviving metrics with the wrong query text.
+        # Committing per query keeps what finished, which is what
+        # _failure_message tells the user.
+        metrics_results = []
+        for i, query in enumerate(queries):
+            results = run_async(
                 rag_evaluation_service.evaluate_search_pipeline(
-                    queries,
+                    [query],
                     str(job.organization_id),
                     str(job.user_id) if job.user_id else "anonymous",
                     search_type=job.parameters.get("search_type", "hybrid"),
                     limit=job.parameters.get("search_limit", 5),
+                    # The pipeline's per-query metric rows need the job:
+                    # evaluation_metrics.job_id is NOT NULL, and without it
+                    # every query failed its commit on Postgres and was dropped.
+                    job_id=job_id,
+                    # ... and are written in this session, so they commit or
+                    # roll back with the summary row below (GOO-696).
+                    db=db,
                 )
             )
+            if not results:
+                continue
+            metrics = results[0]
+            try:
+                # R5-M25: metrics.metadata now carries generated_answer/
+                # retrieved_context (the writer side, rag_evaluation_
+                # service.evaluate_search_pipeline, was fixed to populate
+                # them) instead of always reading back "" / []. Column is
+                # Text, so the context list needs json.dumps like every
+                # other retrieved_context write in this codebase.
+                metric = EvaluationMetric(
+                    job_id=job_id,
+                    metric_type="rag_triad_overall",
+                    metric_name="Overall RAG Triad Score",
+                    value=metrics.overall_score,
+                    query=query,
+                    generated_answer=metrics.metadata.get("generated_answer", ""),
+                    retrieved_context=json.dumps(
+                        metrics.metadata.get("retrieved_context", [])
+                    ),
+                    metric_metadata={
+                        "answer_relevancy": metrics.answer_relevancy,
+                        "faithfulness": metrics.faithfulness,
+                        "contextual_relevancy": metrics.contextual_relevancy,
+                        "hallucination_rate": metrics.hallucination_rate,
+                        "response_time_ms": metrics.response_time_ms,
+                    },
+                )
 
-            # Save metrics to database
-            for i, metrics in enumerate(metrics_results):
-                try:
-                    # R5-M25: metrics.metadata now carries generated_answer/
-                    # retrieved_context (the writer side, rag_evaluation_
-                    # service.evaluate_search_pipeline, was fixed to populate
-                    # them) instead of always reading back "" / []. Column is
-                    # Text, so the context list needs json.dumps like every
-                    # other retrieved_context write in this codebase.
-                    metric = EvaluationMetric(
-                        job_id=job_id,
-                        metric_type="rag_triad_overall",
-                        metric_name="Overall RAG Triad Score",
-                        value=metrics.overall_score,
-                        query=queries[i],
-                        generated_answer=metrics.metadata.get("generated_answer", ""),
-                        retrieved_context=json.dumps(
-                            metrics.metadata.get("retrieved_context", [])
-                        ),
-                        metric_metadata={
-                            "answer_relevancy": metrics.answer_relevancy,
-                            "faithfulness": metrics.faithfulness,
-                            "contextual_relevancy": metrics.contextual_relevancy,
-                            "hallucination_rate": metrics.hallucination_rate,
-                            "response_time_ms": metrics.response_time_ms,
-                        },
-                    )
+                db.add(metric)
+                # processed_count counts evaluated (and saved) queries only,
+                # like the rag-triad task.
+                job.update_progress(len(metrics_results) + 1)
+                db.commit()
+                metrics_results.append(metrics)
 
-                    db.add(metric)
+            except Exception as metric_error:
+                # Roll back so the failed write doesn't poison the session
+                # for the remaining queries. This also drops the pipeline's
+                # four rows for the query, which is then not counted either.
+                db.rollback()
+                logger.error(f"Error saving metric for query {i}: {str(metric_error)}")
 
-                except Exception as metric_error:
-                    logger.error(
-                        f"Error saving metric for query {i}: {str(metric_error)}"
-                    )
-                    continue
+        # Calculate overall metrics
+        if metrics_results:
+            overall_score = sum(m.overall_score for m in metrics_results) / len(
+                metrics_results
+            )
+            success_rate = (
+                sum(1 for m in metrics_results if m.overall_score > 0.5)
+                / len(metrics_results)
+                * 100
+            )
 
+            job.complete_job(overall_score=overall_score, success_rate=success_rate)
             db.commit()
 
-            # Calculate overall metrics
-            if metrics_results:
-                overall_score = sum(m.overall_score for m in metrics_results) / len(
-                    metrics_results
-                )
-                success_rate = (
-                    sum(1 for m in metrics_results if m.overall_score > 0.5)
-                    / len(metrics_results)
-                    * 100
-                )
+            return {
+                "status": "completed",
+                "job_id": job_id,
+                "processed_queries": len(metrics_results),
+                "total_queries": len(queries),
+                "overall_score": overall_score,
+                "success_rate": success_rate,
+            }
+        else:
+            # No query produced a metric (every item errored). Without this
+            # branch the job — already start_job()'d to RUNNING — was never
+            # completed or failed, leaving it stuck in RUNNING forever.
+            # Mirrors run_rag_triad_evaluation's empty-results handling.
+            job.fail_job("No queries were successfully evaluated")
+            db.commit()
+            raise EvaluationFailure("No queries were successfully evaluated")
 
-                job.complete_job(overall_score=overall_score, success_rate=success_rate)
-                db.commit()
-
-                return {
-                    "status": "completed",
-                    "job_id": job_id,
-                    "processed_queries": len(metrics_results),
-                    "total_queries": len(queries),
-                    "overall_score": overall_score,
-                    "success_rate": success_rate,
-                }
-            else:
-                # No query produced a metric (every item errored). Without this
-                # branch the job — already start_job()'d to RUNNING — was never
-                # completed or failed, leaving it stuck in RUNNING forever.
-                # Mirrors run_rag_triad_evaluation's empty-results handling.
-                job.fail_job("No queries were successfully evaluated")
-                db.commit()
-                raise ValueError("No queries were successfully evaluated")
-
-        finally:
-            loop.close()
+    except Ignore:
+        raise  # a skipped delivery (_skip_delivery): nothing to fail
 
     except Exception as e:
         logger.error(f"Batch evaluation failed for job {job_id}: {str(e)}")
@@ -430,7 +605,7 @@ def run_batch_evaluation(self, job_id: str, queries: List[str]):
         # Update job status
         try:
             if job:
-                job.fail_job(str(e))
+                job.fail_job(_failure_message(e))
                 db.commit()
         except Exception as update_error:
             logger.error(f"Failed to update job failure status: {str(update_error)}")
@@ -441,7 +616,7 @@ def run_batch_evaluation(self, job_id: str, queries: List[str]):
         db.close()
 
 
-@current_app.task(base=EvaluationTask, bind=True)
+@current_app.task(base=EvaluationTask, bind=True, **_EVAL_TIME_LIMITS)
 def run_real_time_evaluation(
     self,
     query: str,
@@ -454,6 +629,7 @@ def run_real_time_evaluation(
     Run real-time evaluation for a single query-answer pair
     """
     db = SessionLocal()
+    job = None
     try:
         # Idempotency guard for acks_late redelivery: unlike the job_id-based
         # tasks above, this task CREATES its job — a redelivered message would
@@ -463,6 +639,10 @@ def run_real_time_evaluation(
         # delivery already exists.
         task_id = getattr(self.request, "id", None)
         if task_id:
+            # Serialize deliveries of this task id: held until the commit that
+            # creates (or fails) the job, so two concurrent deliveries can't
+            # both find no job and both create one.
+            _lock_real_time_delivery(db, task_id)
             existing = (
                 db.query(EvaluationJob)
                 .filter(
@@ -472,17 +652,29 @@ def run_real_time_evaluation(
                 )
                 .first()
             )
-            if existing:
-                logger.info(
-                    f"Real-time evaluation for task {task_id} already exists "
-                    f"as job {existing.id} ({existing.status}); "
-                    "skipping redelivered run"
+            if existing and existing.status not in _TERMINAL_EVAL_STATUSES:
+                # Same delivery and the job never finished: the earlier
+                # attempt died. RUNNING since the job is started on creation;
+                # PENDING for rows written before that.
+                existing.fail_job(_WORKER_LOST_MESSAGE)
+                db.commit()
+                _skip_delivery(
+                    self,
+                    {
+                        "status": existing.status,
+                        "job_id": str(existing.id),
+                        "skipped": "worker_lost",
+                    },
                 )
-                return {
-                    "status": existing.status,
-                    "job_id": str(existing.id),
-                    "skipped": "duplicate_delivery",
-                }
+            if existing:
+                _skip_delivery(
+                    self,
+                    {
+                        "status": existing.status,
+                        "job_id": str(existing.id),
+                        "skipped": "duplicate_delivery",
+                    },
+                )
 
         # Create a temporary evaluation job for real-time evaluation
         job = EvaluationJob(
@@ -496,6 +688,10 @@ def run_real_time_evaluation(
             dataset_size=1,
             organization_id=organization_id,
         )
+        # RUNNING from the first commit, so a redelivery after a lost worker
+        # finds an unfinished job (see the guard above) instead of a PENDING
+        # row that nothing ever moves on.
+        job.start_job()
 
         db.add(job)
         db.commit()
@@ -512,40 +708,35 @@ def run_real_time_evaluation(
             metadata={"real_time_evaluation": True},
         )
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            # Calculate metrics
-            metrics = loop.run_until_complete(
-                rag_evaluation_service.run_rag_triad_evaluation(
-                    evaluation_input, job.id, organization_id, db
-                )
+        # Calculate metrics
+        metrics = run_async(
+            rag_evaluation_service.run_rag_triad_evaluation(
+                evaluation_input, job.id, organization_id, db
             )
+        )
 
-            # Complete job
-            job.complete_job(
-                overall_score=metrics.overall_score,
-                success_rate=100.0 if metrics.overall_score > 0.5 else 0.0,
-            )
-            db.commit()
+        # Complete job
+        job.complete_job(
+            overall_score=metrics.overall_score,
+            success_rate=100.0 if metrics.overall_score > 0.5 else 0.0,
+        )
+        db.commit()
 
-            return {
-                "status": "completed",
-                "job_id": str(job.id),
-                "metrics": {
-                    "answer_relevancy": metrics.answer_relevancy,
-                    "faithfulness": metrics.faithfulness,
-                    "contextual_relevancy": metrics.contextual_relevancy,
-                    "overall_score": metrics.overall_score,
-                    "hallucination_rate": metrics.hallucination_rate,
-                    "response_time_ms": metrics.response_time_ms,
-                },
-            }
+        return {
+            "status": "completed",
+            "job_id": str(job.id),
+            "metrics": {
+                "answer_relevancy": metrics.answer_relevancy,
+                "faithfulness": metrics.faithfulness,
+                "contextual_relevancy": metrics.contextual_relevancy,
+                "overall_score": metrics.overall_score,
+                "hallucination_rate": metrics.hallucination_rate,
+                "response_time_ms": metrics.response_time_ms,
+            },
+        }
 
-        finally:
-            loop.close()
+    except Ignore:
+        raise  # a skipped delivery (_skip_delivery): nothing to fail
 
     except Exception as e:
         logger.error(f"Real-time evaluation failed: {str(e)}")
@@ -557,7 +748,7 @@ def run_real_time_evaluation(
         # Update job status
         try:
             if job:
-                job.fail_job(str(e))
+                job.fail_job(_failure_message(e))
                 db.commit()
         except Exception as update_error:
             logger.error(f"Failed to update job failure status: {str(update_error)}")
@@ -568,7 +759,7 @@ def run_real_time_evaluation(
         db.close()
 
 
-@current_app.task(base=EvaluationTask, bind=True)
+@current_app.task(base=EvaluationTask, bind=True, **_EVAL_TIME_LIMITS)
 def run_comparison_evaluation(
     self,
     comparison_name: str,
@@ -584,37 +775,29 @@ def run_comparison_evaluation(
     try:
         logger.info(f"Starting comparison evaluation: {comparison_name}")
 
-        # Create event loop for async operations
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            # Perform comparison
-            comparison = loop.run_until_complete(
-                rag_evaluation_service.compare_evaluations(
-                    baseline_job_id,
-                    comparison_job_id,
-                    comparison_name,
-                    user_id,
-                    organization_id,
-                    db,
-                )
+        # Perform comparison
+        comparison = run_async(
+            rag_evaluation_service.compare_evaluations(
+                baseline_job_id,
+                comparison_job_id,
+                comparison_name,
+                user_id,
+                organization_id,
+                db,
             )
+        )
 
-            logger.info(f"Comparison evaluation completed: {comparison_name}")
-            logger.info(f"Improvement: {comparison.improvement_percentage:.2f}%")
+        logger.info(f"Comparison evaluation completed: {comparison_name}")
+        logger.info(f"Improvement: {comparison.improvement_percentage:.2f}%")
 
-            return {
-                "status": "completed",
-                "comparison_id": str(comparison.id),
-                "improvement_percentage": comparison.improvement_percentage,
-                "statistical_significance": comparison.statistical_significance,
-                "baseline_score": comparison.baseline_score,
-                "comparison_score": comparison.comparison_score,
-            }
-
-        finally:
-            loop.close()
+        return {
+            "status": "completed",
+            "comparison_id": str(comparison.id),
+            "improvement_percentage": comparison.improvement_percentage,
+            "statistical_significance": comparison.statistical_significance,
+            "baseline_score": comparison.baseline_score,
+            "comparison_score": comparison.comparison_score,
+        }
 
     except Exception as e:
         logger.error(f"Comparison evaluation failed: {str(e)}")

@@ -201,15 +201,15 @@ async def create_thread(
                 context_note="Auto-linked when creating thread with project_id",
             )
             logger.info(
-                "thread_auto_linked_to_project",
-                thread_id=str(thread.id),
-                project_id=str(data.project_id),
+                "thread_auto_linked_to_project thread_id=%s project_id=%s",
+                thread.id,
+                data.project_id,
             )
         else:
             logger.warning(
-                "project_not_found_for_auto_link",
-                project_id=str(data.project_id),
-                thread_id=str(thread.id),
+                "project_not_found_for_auto_link project_id=%s thread_id=%s",
+                data.project_id,
+                thread.id,
             )
 
     await db.commit()

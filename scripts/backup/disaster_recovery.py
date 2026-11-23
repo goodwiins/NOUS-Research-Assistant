@@ -1,37 +1,67 @@
 #!/usr/bin/env python3
 """
-Disaster Recovery Script for Multimodal RAG System
-This script handles automated disaster recovery procedures
+Disaster Recovery Script for Multimodal RAG System.
+
+Manual, destructive operator tool for the docker-compose / systemd layout. It
+restores the PostgreSQL database and the uploads directory from local backups
+written by ``scripts/backup/backup_database.sh``.
+
+Safety contract:
+
+* ``--components`` is required; there is no "recover everything" default.
+* Nothing destructive runs until the backup has been validated
+  (``pg_restore --list`` must read it and list at least one public table).
+* A step that did not happen is reported as FAILED, never as SUCCESS. The
+  database is only reported restored when it has at least as many public
+  tables as the backup's table of contents.
+* Neo4j restore is not implemented. ``knowledge_graph`` recovery always fails
+  and leaves the graph untouched; restore it by hand with ``neo4j-admin``.
 """
 
-import os
-import re
-import sys
+import argparse
+import asyncio
+import gzip
 import json
 import logging
-import argparse
+import os
+import re
+import shutil
 import subprocess
-import asyncio
-from datetime import datetime, timedelta
+import sys
+import tempfile
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
-from enum import Enum
 
 import asyncpg
-from neo4j import GraphDatabase
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/var/log/disaster_recovery.log"),
-        logging.StreamHandler(),
-    ],
-)
 logger = logging.getLogger(__name__)
 
+COMPONENTS = ("database", "knowledge_graph", "uploads", "services")
+
 _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
+# One `pg_restore --list` entry for a table in the public schema, e.g.
+# "215; 1259 16386 TABLE public users postgres".
+_TOC_PUBLIC_TABLE = re.compile(r"^\d+;\s+\d+\s+\d+\s+TABLE\s+public\s+\S+", re.M)
+
+
+class RecoveryAbort(Exception):
+    """Stop recovery. The message says what state was left behind."""
+
+
+def configure_logging() -> None:
+    """Log to stderr, plus $DR_LOG_FILE when set. Never configured at import."""
+    handlers: List[logging.Handler] = [logging.StreamHandler()]
+    log_file = os.getenv("DR_LOG_FILE")
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=handlers,
+    )
 
 
 def safe_identifier(name: str) -> str:
@@ -55,9 +85,19 @@ async def _run_subprocess(
     return subprocess.CompletedProcess(
         args=list(cmd),
         returncode=proc.returncode if proc.returncode is not None else -1,
-        stdout=stdout.decode() if stdout else "",
-        stderr=stderr.decode() if stderr else "",
+        stdout=stdout.decode(errors="replace") if stdout else "",
+        stderr=stderr.decode(errors="replace") if stderr else "",
     )
+
+
+def _decompress(source: Path, dest_dir: Path) -> Path:
+    """Return a pg_restore-readable archive path; gunzip ``*.gz`` into dest_dir."""
+    if source.suffix != ".gz":
+        return source
+    target = dest_dir / source.with_suffix("").name
+    with gzip.open(source, "rb") as src, open(target, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return target
 
 
 class RecoveryStatus(Enum):
@@ -67,603 +107,401 @@ class RecoveryStatus(Enum):
     SKIPPED = "skipped"
 
 
+def _failed(error: str) -> Dict[str, Any]:
+    return {"status": RecoveryStatus.FAILED.value, "error": error}
+
+
 class DisasterRecovery:
     """Disaster recovery coordinator for the multimodal RAG system."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.recovery_log = []
+        self.recovery_log: List[Dict[str, Any]] = []
         self.start_time = datetime.now()
 
-    async def run_recovery(
-        self, components: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        """
-        Run disaster recovery for specified components.
-        If no components specified, recover all components.
-        """
-        logger.info("Starting disaster recovery process...")
-
+    async def run_recovery(self, components: Sequence[str]) -> Dict[str, Any]:
+        """Run disaster recovery for the explicitly named components, in order."""
         if not components:
-            components = ["database", "knowledge_graph", "uploads"]
+            raise ValueError("components must be named explicitly")
+        unknown = [c for c in components if c not in COMPONENTS]
+        if unknown:
+            raise ValueError(f"unknown components: {unknown}")
 
-        recovery_results = {}
+        logger.info("Starting disaster recovery for: %s", ", ".join(components))
 
-        # Recovery order matters - database first
-        recovery_order = {
+        handlers = {
             "database": self.recover_database,
             "knowledge_graph": self.recover_knowledge_graph,
             "uploads": self.recover_uploads,
             "services": self.recover_services,
         }
+        recovery_results: Dict[str, Any] = {}
+        for component in COMPONENTS:  # database first, services last
+            if component not in components:
+                continue
+            logger.info("Starting recovery for %s", component)
+            try:
+                result = await handlers[component]()
+            except Exception as e:
+                logger.error("Recovery failed for %s: %s", component, e)
+                result = _failed(str(e))
+            recovery_results[component] = result
+            self._log_recovery_step(component, result)
 
-        for component in components:
-            if component in recovery_order:
-                logger.info(f"Starting recovery for {component}")
-                try:
-                    result = await recovery_order[component]()
-                    recovery_results[component] = result
-                    self._log_recovery_step(component, result)
-                except Exception as e:
-                    logger.error(f"Recovery failed for {component}: {e}")
-                    recovery_results[component] = {
-                        "status": RecoveryStatus.FAILED.value,
-                        "error": str(e),
-                    }
-                    self._log_recovery_step(component, recovery_results[component])
-            else:
-                logger.warning(f"Unknown component: {component}")
-
-        # Generate recovery report
         report = self._generate_recovery_report(recovery_results)
-        await self._send_recovery_notification(report)
-
+        self._report_notification_status()
         return report
 
     async def recover_database(self) -> Dict[str, Any]:
-        """Recover PostgreSQL database from backup."""
+        """Recover PostgreSQL from the latest backup, validating it first."""
         logger.info("Starting database recovery...")
 
+        backup_file = await self._find_latest_backup("postgresql")
+        if not backup_file:
+            return _failed("No database backup found; database untouched")
+        logger.info("Using backup: %s", backup_file)
+
         try:
-            # Find latest backup
-            backup_file = await self._find_latest_backup("postgresql")
-            if not backup_file:
-                return {
-                    "status": RecoveryStatus.FAILED.value,
-                    "error": "No database backup found",
-                }
+            with tempfile.TemporaryDirectory(prefix="dr_restore_") as tmp:
+                archive = await asyncio.to_thread(_decompress, backup_file, Path(tmp))
+                expected_tables = await self._validate_pg_archive(archive)
 
-            logger.info(f"Using backup: {backup_file}")
+                stopped = await self._stop_services(
+                    ["backend", "celery-worker", "celery-beat"]
+                )
+                if not stopped:
+                    raise RecoveryAbort(
+                        "Could not stop application services; database untouched"
+                    )
 
-            # Stop application services
-            await self._stop_services(["backend", "celery-worker", "celery-beat"])
+                # From here on the live database is gone; failures are reported
+                # as such so the operator knows it needs a manual restore.
+                await self._drop_database()
+                await self._create_database()
+                if not await self._restore_database(archive):
+                    raise RecoveryAbort(
+                        "pg_restore failed after the database was dropped; "
+                        "restore manually from " + str(backup_file)
+                    )
 
-            # Drop existing database (if exists)
-            await self._drop_database()
-
-            # Create new database
-            await self._create_database()
-
-            # Restore from backup
-            success = await self._restore_database(backup_file)
-
-            if success:
-                # Verify database integrity
-                integrity_ok = await self._verify_database_integrity()
-
-                if integrity_ok:
-                    logger.info("Database recovery completed successfully")
-                    return {
-                        "status": RecoveryStatus.SUCCESS.value,
-                        "backup_file": str(backup_file),
-                        "restored_at": datetime.now().isoformat(),
-                    }
-                else:
-                    logger.error("Database integrity check failed")
-                    return {
-                        "status": RecoveryStatus.FAILED.value,
-                        "error": "Database integrity check failed",
-                    }
-            else:
-                return {
-                    "status": RecoveryStatus.FAILED.value,
-                    "error": "Database restore failed",
-                }
-
+            restored_tables = await self._count_restored_tables()
+        except RecoveryAbort as e:
+            logger.error("Database recovery aborted: %s", e)
+            return _failed(str(e))
         except Exception as e:
-            logger.error(f"Database recovery failed: {e}")
-            return {"status": RecoveryStatus.FAILED.value, "error": str(e)}
+            logger.error("Database recovery failed: %s", e)
+            return _failed(str(e))
+
+        if restored_tables < expected_tables:
+            error = (
+                f"Restored database has {restored_tables} public tables, "
+                f"backup lists {expected_tables}"
+            )
+            logger.error(error)
+            return _failed(error)
+
+        logger.info("Database recovery completed: %d tables", restored_tables)
+        return {
+            "status": RecoveryStatus.SUCCESS.value,
+            "backup_file": str(backup_file),
+            "tables": restored_tables,
+            "restored_at": datetime.now().isoformat(),
+        }
 
     async def recover_knowledge_graph(self) -> Dict[str, Any]:
-        """Recover Neo4j knowledge graph from backup."""
-        logger.info("Starting knowledge graph recovery...")
-
-        try:
-            # Find latest Neo4j backup
-            backup_file = await self._find_latest_backup("neo4j")
-            if not backup_file:
-                logger.warning(
-                    "No Neo4j backup found, skipping knowledge graph recovery"
-                )
-                return {
-                    "status": RecoveryStatus.SKIPPED.value,
-                    "reason": "No backup found",
-                }
-
-            logger.info(f"Using backup: {backup_file}")
-
-            # Stop Neo4j service
-            await self._stop_service("neo4j")
-
-            # Clear existing data
-            await self._clear_neo4j_data()
-
-            # Restore from backup
-            success = await self._restore_neo4j(backup_file)
-
-            if success:
-                # Verify graph integrity
-                integrity_ok = await self._verify_neo4j_integrity()
-
-                if integrity_ok:
-                    logger.info("Knowledge graph recovery completed successfully")
-                    return {
-                        "status": RecoveryStatus.SUCCESS.value,
-                        "backup_file": str(backup_file),
-                        "restored_at": datetime.now().isoformat(),
-                    }
-                else:
-                    logger.error("Knowledge graph integrity check failed")
-                    return {
-                        "status": RecoveryStatus.PARTIAL.value,
-                        "warning": "Integrity check failed",
-                    }
-            else:
-                return {
-                    "status": RecoveryStatus.FAILED.value,
-                    "error": "Neo4j restore failed",
-                }
-
-        except Exception as e:
-            logger.error(f"Knowledge graph recovery failed: {e}")
-            return {"status": RecoveryStatus.FAILED.value, "error": str(e)}
+        """Neo4j restore is not implemented; never touch the live graph."""
+        error = (
+            "Neo4j restore is not implemented by this script; the graph was "
+            "left untouched. Restore it manually with neo4j-admin."
+        )
+        logger.error(error)
+        return _failed(error)
 
     async def recover_uploads(self) -> Dict[str, Any]:
         """Recover uploaded files from backup."""
         logger.info("Starting uploads recovery...")
 
-        try:
-            # Find latest uploads backup
-            backup_file = await self._find_latest_backup("uploads")
-            if not backup_file:
-                logger.warning("No uploads backup found, skipping files recovery")
-                return {
-                    "status": RecoveryStatus.SKIPPED.value,
-                    "reason": "No backup found",
-                }
+        backup_file = await self._find_latest_backup("uploads")
+        if not backup_file:
+            logger.warning("No uploads backup found, skipping files recovery")
+            return {
+                "status": RecoveryStatus.SKIPPED.value,
+                "reason": "No backup found",
+            }
+        logger.info("Using backup: %s", backup_file)
 
-            logger.info(f"Using backup: {backup_file}")
+        listing = await _run_subprocess(["tar", "tzf", str(backup_file)])
+        if listing.returncode != 0:
+            return _failed(f"Uploads backup is unreadable: {listing.stderr.strip()}")
 
-            # Restore files
-            success = await self._restore_uploads(backup_file)
+        upload_dir = Path(self.config.get("upload_dir", "/app/uploads"))
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        result = await _run_subprocess(
+            ["tar", "xzf", str(backup_file), "-C", str(upload_dir.parent)]
+        )
+        if result.returncode != 0:
+            return _failed(f"Uploads extract failed: {result.stderr.strip()}")
 
-            if success:
-                # Set correct permissions
-                await self._fix_upload_permissions()
-
-                logger.info("Uploads recovery completed successfully")
-                return {
-                    "status": RecoveryStatus.SUCCESS.value,
-                    "backup_file": str(backup_file),
-                    "restored_at": datetime.now().isoformat(),
-                }
-            else:
-                return {
-                    "status": RecoveryStatus.FAILED.value,
-                    "error": "Uploads restore failed",
-                }
-
-        except Exception as e:
-            logger.error(f"Uploads recovery failed: {e}")
-            return {"status": RecoveryStatus.FAILED.value, "error": str(e)}
+        permissions_ok = await self._fix_upload_permissions(upload_dir)
+        logger.info("Restored uploads from %s", backup_file)
+        return {
+            "status": (
+                RecoveryStatus.SUCCESS if permissions_ok else RecoveryStatus.PARTIAL
+            ).value,
+            "backup_file": str(backup_file),
+            "restored_at": datetime.now().isoformat(),
+        }
 
     async def recover_services(self) -> Dict[str, Any]:
-        """Recover application services."""
+        """Start application services. Health is not checked by this script."""
         logger.info("Starting services recovery...")
 
-        try:
-            services_to_start = [
-                "postgres",
-                "redis",
-                "neo4j",
-                "backend",
-                "celery-worker",
-                "celery-beat",
-                "frontend",
-            ]
-            started_services = []
-            failed_services = []
+        services_to_start = [
+            "postgres",
+            "redis",
+            "neo4j",
+            "backend",
+            "celery-worker",
+            "celery-beat",
+            "frontend",
+        ]
+        started_services = []
+        failed_services = []
+        for service in services_to_start:
+            if await self._start_service(service):
+                started_services.append(service)
+                logger.info("Started service: %s", service)
+            else:
+                failed_services.append(service)
+                logger.error("Failed to start service: %s", service)
 
-            for service in services_to_start:
-                try:
-                    success = await self._start_service(service)
-                    if success:
-                        started_services.append(service)
-                        logger.info(f"Started service: {service}")
-                    else:
-                        failed_services.append(service)
-                        logger.error(f"Failed to start service: {service}")
-                except Exception as e:
-                    failed_services.append(service)
-                    logger.error(f"Error starting service {service}: {e}")
+        await asyncio.sleep(30)
 
-            # Wait for services to be ready
-            await asyncio.sleep(30)
-
-            # Health check
-            health_results = await self._run_health_checks()
-
+        if not started_services:
+            status = RecoveryStatus.FAILED
+        elif failed_services:
+            status = RecoveryStatus.PARTIAL
+        else:
             status = RecoveryStatus.SUCCESS
-            if failed_services:
-                status = RecoveryStatus.PARTIAL
 
-            logger.info(
-                f"Services recovery completed. Started: {len(started_services)}, Failed: {len(failed_services)}"
-            )
-
-            return {
-                "status": status.value,
-                "started_services": started_services,
-                "failed_services": failed_services,
-                "health_checks": health_results,
-                "recovered_at": datetime.now().isoformat(),
-            }
-
-        except Exception as e:
-            logger.error(f"Services recovery failed: {e}")
-            return {"status": RecoveryStatus.FAILED.value, "error": str(e)}
+        return {
+            "status": status.value,
+            "started_services": started_services,
+            "failed_services": failed_services,
+            "health_checks": {
+                "status": "not_run",
+                "note": "Health checks are not implemented; verify services manually.",
+            },
+            "recovered_at": datetime.now().isoformat(),
+        }
 
     async def _find_latest_backup(self, component: str) -> Optional[Path]:
         """Find the latest backup for a component."""
+        patterns = {
+            "postgresql": "multimodal_rag_backup_*.sql.gz",
+            "neo4j": "neo4j_backup_*.tar.gz",
+            "uploads": "uploads_backup_*.tar.gz",
+        }
+        pattern = patterns.get(component)
+        if pattern is None:
+            return None
+
         backup_dirs = [
             Path(self.config.get("backup_dir", "/backups")),
             Path("/backups"),
             Path("./backups"),
         ]
-
         for backup_dir in backup_dirs:
             if not backup_dir.exists():
                 continue
-
-            if component == "postgresql":
-                pattern = "multimodal_rag_backup_*.sql.gz"
-            elif component == "neo4j":
-                pattern = "neo4j_backup_*.tar.gz"
-            elif component == "uploads":
-                pattern = "uploads_backup_*.tar.gz"
-            else:
-                continue
-
             backups = list(backup_dir.glob(pattern))
             if backups:
-                # Sort by modification time and return the latest
                 latest = max(backups, key=lambda x: x.stat().st_mtime)
-                logger.info(f"Found latest backup for {component}: {latest}")
+                logger.info("Found latest backup for %s: %s", component, latest)
                 return latest
-
         return None
 
-    async def _stop_services(self, services: List[str]) -> None:
-        """Stop specified services."""
-        for service in services:
-            await self._stop_service(service)
+    async def _validate_pg_archive(self, archive: Path) -> int:
+        """Return the number of public tables in the archive, or abort."""
+        result = await _run_subprocess(["pg_restore", "--list", str(archive)])
+        if result.returncode != 0:
+            raise RecoveryAbort(
+                f"Backup {archive.name} is not a readable pg_restore archive "
+                f"({result.stderr.strip()}); database untouched"
+            )
+        tables = len(_TOC_PUBLIC_TABLE.findall(result.stdout))
+        if tables == 0:
+            raise RecoveryAbort(
+                f"Backup {archive.name} lists no public tables; database untouched"
+            )
+        logger.info("Backup validated: %d public tables", tables)
+        return tables
 
-    async def _stop_service(self, service: str) -> None:
-        """Stop a specific service."""
-        try:
-            if self.config.get("use_docker", True):
-                await _run_subprocess(["docker", "stop", service])
-            else:
-                await _run_subprocess(["systemctl", "stop", service])
-            logger.info(f"Stopped service: {service}")
-        except Exception as e:
-            logger.warning(f"Failed to stop service {service}: {e}")
+    async def _stop_services(self, services: List[str]) -> bool:
+        """Stop the services; True only if every stop succeeded."""
+        results = [await self._stop_service(service) for service in services]
+        return all(results)
+
+    def _service_cmd(self, action: str, service: str) -> List[str]:
+        if self.config.get("use_docker", True):
+            return ["docker", action, service]
+        return ["systemctl", action, service]
+
+    async def _stop_service(self, service: str) -> bool:
+        result = await _run_subprocess(self._service_cmd("stop", service))
+        if result.returncode != 0:
+            logger.error("Failed to stop %s: %s", service, result.stderr.strip())
+            return False
+        logger.info("Stopped service: %s", service)
+        return True
 
     async def _start_service(self, service: str) -> bool:
-        """Start a specific service."""
-        try:
-            if self.config.get("use_docker", True):
-                await _run_subprocess(["docker", "start", service])
-            else:
-                await _run_subprocess(["systemctl", "start", service])
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start service {service}: {e}")
+        result = await _run_subprocess(self._service_cmd("start", service))
+        if result.returncode != 0:
+            logger.error("Failed to start %s: %s", service, result.stderr.strip())
             return False
+        return True
+
+    async def _admin_connection(self) -> Any:
+        return await asyncpg.connect(
+            host=self.config.get("db_host", "localhost"),
+            port=self.config.get("db_port", 5432),
+            user=self.config.get("db_user", "postgres"),
+            password=self.config.get("db_password"),
+            database="postgres",
+        )
 
     async def _drop_database(self) -> None:
-        """Drop existing database."""
-        conn = None
+        """Drop the target database. Raises on failure."""
+        db_name = safe_identifier(self.config.get("db_name", "multimodal_rag"))
+        conn = await self._admin_connection()
         try:
-            conn = await asyncpg.connect(
-                host=self.config.get("db_host", "localhost"),
-                port=self.config.get("db_port", 5432),
-                user=self.config.get("db_user", "postgres"),
-                password=self.config.get("db_password"),
-                database="postgres",
-            )
-
-            db_name = safe_identifier(self.config.get("db_name", "multimodal_rag"))
-
-            # Terminate connections to the target database
             await conn.execute(
                 """
                 SELECT pg_terminate_backend(pid)
                 FROM pg_stat_activity
                 WHERE datname = $1
-            """,
+                """,
                 db_name,
             )
-
-            # Drop the database (identifier validated above; asyncpg cannot parameterize DDL)
+            # Identifier validated above; asyncpg cannot parameterize DDL.
             await conn.execute(f"DROP DATABASE IF EXISTS {db_name}")
             logger.info("Dropped existing database")
-        except Exception as e:
-            logger.warning(f"Failed to drop database (may not exist): {e}")
         finally:
-            if conn is not None:
-                await conn.close()
+            await conn.close()
 
     async def _create_database(self) -> None:
-        """Create new database."""
-        conn = None
+        """Create the target database. Raises on failure."""
+        db_name = safe_identifier(self.config.get("db_name", "multimodal_rag"))
+        conn = await self._admin_connection()
         try:
-            conn = await asyncpg.connect(
-                host=self.config.get("db_host", "localhost"),
-                port=self.config.get("db_port", 5432),
-                user=self.config.get("db_user", "postgres"),
-                password=self.config.get("db_password"),
-                database="postgres",
-            )
-
-            db_name = safe_identifier(self.config.get("db_name", "multimodal_rag"))
             await conn.execute(f"CREATE DATABASE {db_name}")
             logger.info("Created new database")
         finally:
-            if conn is not None:
-                await conn.close()
-
-    async def _restore_database(self, backup_file: Path) -> bool:
-        """Restore database from backup file."""
-        try:
-            cmd = [
-                "pg_restore",
-                "--host",
-                self.config.get("db_host", "localhost"),
-                "--port",
-                str(self.config.get("db_port", 5432)),
-                "--username",
-                self.config.get("db_user", "postgres"),
-                "--dbname",
-                self.config.get("db_name", "multimodal_rag"),
-                "--verbose",
-                "--no-owner",
-                "--no-privileges",
-                str(backup_file),
-            ]
-
-            # Set password environment variable (guard against None)
-            env = os.environ.copy()
-            db_password = self.config.get("db_password")
-            if db_password:
-                env["PGPASSWORD"] = db_password
-
-            result = await _run_subprocess(cmd, env=env)
-
-            if result.returncode == 0:
-                logger.info("Database restore completed successfully")
-                return True
-            else:
-                logger.error(f"Database restore failed: {result.stderr}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Database restore error: {e}")
-            return False
-
-    async def _verify_database_integrity(self) -> bool:
-        """Verify database integrity after restore."""
-        try:
-            conn = await asyncpg.connect(
-                host=self.config.get("db_host", "localhost"),
-                port=self.config.get("db_port", 5432),
-                user=self.config.get("db_user", "postgres"),
-                password=self.config.get("db_password"),
-                database=self.config.get("db_name", "multimodal_rag"),
-            )
-
-            # Check basic connectivity
-            result = await conn.fetchval("SELECT 1")
-            if result != 1:
-                return False
-
-            # Check if tables exist
-            tables = await conn.fetch("""
-                SELECT tablename FROM pg_tables
-                WHERE schemaname = 'public'
-            """)
-
-            if not tables:
-                logger.warning("No tables found in restored database")
-                return False
-
-            logger.info(f"Found {len(tables)} tables in restored database")
             await conn.close()
-            return True
 
-        except Exception as e:
-            logger.error(f"Database integrity check failed: {e}")
+    async def _restore_database(self, archive: Path) -> bool:
+        """Restore the database from a pg_restore archive."""
+        cmd = [
+            "pg_restore",
+            "--host",
+            self.config.get("db_host", "localhost"),
+            "--port",
+            str(self.config.get("db_port", 5432)),
+            "--username",
+            self.config.get("db_user", "postgres"),
+            "--dbname",
+            self.config.get("db_name", "multimodal_rag"),
+            "--exit-on-error",
+            "--no-owner",
+            "--no-privileges",
+            str(archive),
+        ]
+        env = os.environ.copy()
+        db_password = self.config.get("db_password")
+        if db_password:
+            env["PGPASSWORD"] = db_password
+
+        result = await _run_subprocess(cmd, env=env)
+        if result.returncode != 0:
+            logger.error("Database restore failed: %s", result.stderr.strip())
             return False
+        logger.info("Database restore completed")
+        return True
 
-    async def _clear_neo4j_data(self):
-        """Clear all data from Neo4j."""
+    async def _count_restored_tables(self) -> int:
+        """Count public tables in the restored database."""
+        conn = await asyncpg.connect(
+            host=self.config.get("db_host", "localhost"),
+            port=self.config.get("db_port", 5432),
+            user=self.config.get("db_user", "postgres"),
+            password=self.config.get("db_password"),
+            database=self.config.get("db_name", "multimodal_rag"),
+        )
         try:
-            driver = GraphDatabase.driver(
-                self.config.get("neo4j_uri", "bolt://localhost:7687"),
-                auth=(
-                    self.config.get("neo4j_user", "neo4j"),
-                    self.config.get("neo4j_password"),
-                ),
+            count = await conn.fetchval(
+                "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'"
             )
+            return int(count or 0)
+        finally:
+            await conn.close()
 
-            with driver.session() as session:
-                # Delete all nodes and relationships
-                session.run("MATCH (n) DETACH DELETE n")
+    async def _fix_upload_permissions(self, upload_dir: Path) -> bool:
+        """Fix permissions for uploaded files; True when both commands succeed."""
+        ok = True
+        for cmd in (
+            ["chown", "-R", "www-data:www-data", str(upload_dir)],
+            ["chmod", "-R", "755", str(upload_dir)],
+        ):
+            result = await _run_subprocess(cmd)
+            if result.returncode != 0:
+                logger.error("%s failed: %s", cmd[0], result.stderr.strip())
+                ok = False
+        return ok
 
-            driver.close()
-            logger.info("Cleared Neo4j data")
-        except Exception as e:
-            logger.warning(f"Failed to clear Neo4j data: {e}")
-
-    async def _restore_neo4j(self, backup_file: Path) -> bool:
-        """Restore Neo4j from backup."""
-        try:
-            # This would depend on your Neo4j backup method
-            # For now, we'll simulate a restore
-            logger.info(f"Neo4j restore from {backup_file} (simulated)")
-            return True
-        except Exception as e:
-            logger.error(f"Neo4j restore failed: {e}")
-            return False
-
-    async def _verify_neo4j_integrity(self) -> bool:
-        """Verify Neo4j integrity after restore."""
-        try:
-            driver = GraphDatabase.driver(
-                self.config.get("neo4j_uri", "bolt://localhost:7687"),
-                auth=(
-                    self.config.get("neo4j_user", "neo4j"),
-                    self.config.get("neo4j_password"),
-                ),
-            )
-
-            with driver.session() as session:
-                result = session.run("MATCH (n) RETURN count(n) as count")
-                count = result.single()["count"]
-
-            driver.close()
-            logger.info(f"Neo4j integrity check passed: {count} nodes found")
-            return True
-
-        except Exception as e:
-            logger.error(f"Neo4j integrity check failed: {e}")
-            return False
-
-    async def _restore_uploads(self, backup_file: Path) -> bool:
-        """Restore uploaded files from backup."""
-        try:
-            upload_dir = Path(self.config.get("upload_dir", "/app/uploads"))
-            upload_dir.mkdir(parents=True, exist_ok=True)
-
-            # Extract backup
-            await _run_subprocess(
-                ["tar", "xzf", str(backup_file), "-C", upload_dir.parent]
-            )
-            logger.info(f"Restored uploads from {backup_file}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Uploads restore failed: {e}")
-            return False
-
-    async def _fix_upload_permissions(self):
-        """Fix permissions for uploaded files."""
-        try:
-            upload_dir = Path(self.config.get("upload_dir", "/app/uploads"))
-            await _run_subprocess(["chown", "-R", "www-data:www-data", str(upload_dir)])
-            await _run_subprocess(["chmod", "-R", "755", str(upload_dir)])
-            logger.info("Fixed upload permissions")
-        except Exception as e:
-            logger.warning(f"Failed to fix upload permissions: {e}")
-
-    async def _run_health_checks(self) -> Dict[str, Any]:
-        """Run health checks on all components."""
-        try:
-            # This would use the health checker module
-            return {"status": "healthy", "components": {}}
-        except Exception as e:
-            logger.error(f"Health checks failed: {e}")
-            return {"status": "unhealthy", "error": str(e)}
-
-    def _log_recovery_step(self, component: str, result: Dict[str, Any]):
-        """Log a recovery step."""
-        step = {
-            "component": component,
-            "status": result.get("status", "unknown"),
-            "timestamp": datetime.now().isoformat(),
-            "details": result,
-        }
-        self.recovery_log.append(step)
+    def _log_recovery_step(self, component: str, result: Dict[str, Any]) -> None:
+        self.recovery_log.append(
+            {
+                "component": component,
+                "status": result.get("status", "unknown"),
+                "timestamp": datetime.now().isoformat(),
+                "details": result,
+            }
+        )
 
     def _generate_recovery_report(
         self, recovery_results: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Generate a comprehensive recovery report."""
+        """Generate a recovery report. Any failed component fails the run."""
         end_time = datetime.now()
-        duration = end_time - self.start_time
-
-        total_components = len(recovery_results)
-        successful = sum(
-            1
-            for r in recovery_results.values()
-            if r.get("status") == RecoveryStatus.SUCCESS.value
-        )
-        failed = sum(
-            1
-            for r in recovery_results.values()
-            if r.get("status") == RecoveryStatus.FAILED.value
-        )
-        partial = sum(
-            1
-            for r in recovery_results.values()
-            if r.get("status") == RecoveryStatus.PARTIAL.value
-        )
-        skipped = sum(
-            1
-            for r in recovery_results.values()
-            if r.get("status") == RecoveryStatus.SKIPPED.value
-        )
+        statuses = [r.get("status") for r in recovery_results.values()]
+        counts = {s.value: statuses.count(s.value) for s in RecoveryStatus}
 
         overall_status = RecoveryStatus.SUCCESS
-        if failed > 0:
+        if counts[RecoveryStatus.FAILED.value] or not statuses:
             overall_status = RecoveryStatus.FAILED
-        elif partial > 0:
+        elif counts[RecoveryStatus.PARTIAL.value]:
             overall_status = RecoveryStatus.PARTIAL
 
         return {
             "recovery_id": f"recovery_{self.start_time.strftime('%Y%m%d_%H%M%S')}",
             "start_time": self.start_time.isoformat(),
             "end_time": end_time.isoformat(),
-            "duration_seconds": duration.total_seconds(),
+            "duration_seconds": (end_time - self.start_time).total_seconds(),
             "overall_status": overall_status.value,
             "summary": {
-                "total_components": total_components,
-                "successful": successful,
-                "failed": failed,
-                "partial": partial,
-                "skipped": skipped,
+                "total_components": len(statuses),
+                "successful": counts[RecoveryStatus.SUCCESS.value],
+                "failed": counts[RecoveryStatus.FAILED.value],
+                "partial": counts[RecoveryStatus.PARTIAL.value],
+                "skipped": counts[RecoveryStatus.SKIPPED.value],
             },
             "component_results": recovery_results,
             "recovery_log": self.recovery_log,
         }
 
-    async def _send_recovery_notification(self, report: Dict[str, Any]):
-        """Send recovery notification."""
-        try:
-            # This would implement Slack/email notifications
-            logger.info("Recovery notification sent (simulated)")
-        except Exception as e:
-            logger.error(f"Failed to send recovery notification: {e}")
+    def _report_notification_status(self) -> None:
+        logger.warning("No recovery notification channel is configured; none sent")
 
 
 def load_config() -> Dict[str, Any]:
@@ -676,69 +514,72 @@ def load_config() -> Dict[str, Any]:
         "db_user": os.getenv("DB_USER", "postgres"),
         "db_password": os.getenv("DB_PASSWORD"),
         "db_name": os.getenv("DB_NAME", "multimodal_rag"),
-        "neo4j_uri": os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-        "neo4j_user": os.getenv("NEO4J_USER", "neo4j"),
-        "neo4j_password": os.getenv("NEO4J_PASSWORD"),
         "upload_dir": os.getenv("UPLOAD_DIR", "/app/uploads"),
+        "report_dir": os.getenv("DR_REPORT_DIR", "."),
     }
 
 
-async def main():
-    """Main disaster recovery function."""
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Disaster recovery for Multimodal RAG system"
+        description=(
+            "Disaster recovery for Multimodal RAG system. DESTRUCTIVE: "
+            "'database' drops and recreates the target database."
+        )
     )
     parser.add_argument(
         "--components",
         nargs="+",
-        help="Components to recover (database, knowledge_graph, uploads, services)",
+        required=True,
+        choices=COMPONENTS,
+        help="Components to recover. Required; there is no default.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Perform a dry run without making changes",
+        help="Show what would be recovered and exit",
     )
     parser.add_argument(
-        "--force", action="store_true", help="Force recovery without confirmation"
+        "--yes",
+        "--force",
+        dest="yes",
+        action="store_true",
+        help="Skip the interactive confirmation",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+async def main() -> None:
+    configure_logging()
+    args = parse_args()
     config = load_config()
-    recovery = DisasterRecovery(config)
 
-    try:
-        if not args.force and not args.dry_run:
-            response = input(
-                "This will perform disaster recovery. Are you sure? (yes/no): "
-            )
-            if response.lower() != "yes":
-                print("Recovery cancelled")
-                return
+    if args.dry_run:
+        print("DRY RUN: would recover components:", ", ".join(args.components))
+        return
 
-        if args.dry_run:
-            print(
-                "DRY RUN: Would perform disaster recovery for components:",
-                args.components or "all",
-            )
+    if not args.yes:
+        response = input(
+            f"This will DROP and restore: {', '.join(args.components)}. "
+            "Type 'yes' to continue: "
+        )
+        if response.strip().lower() != "yes":
+            print("Recovery cancelled")
             return
 
-        report = await recovery.run_recovery(args.components)
-
-        # Save recovery report
-        report_file = (
-            f"/var/log/recovery_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        )
-        with open(report_file, "w") as f:
-            json.dump(report, f, indent=2)
-
-        print(f"Recovery completed. Report saved to: {report_file}")
-        print(f"Overall status: {report['overall_status']}")
-
-        if report["overall_status"] == RecoveryStatus.FAILED.value:
-            sys.exit(1)
-
+    try:
+        report = await DisasterRecovery(config).run_recovery(args.components)
     except Exception as e:
-        logger.error(f"Disaster recovery failed: {e}")
+        logger.error("Disaster recovery failed: %s", e)
+        sys.exit(1)
+
+    report_file = Path(config["report_dir"]) / (
+        f"recovery_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
+    report_file.write_text(json.dumps(report, indent=2))
+    print(f"Recovery finished. Report saved to: {report_file}")
+    print(f"Overall status: {report['overall_status']}")
+
+    if report["overall_status"] != RecoveryStatus.SUCCESS.value:
         sys.exit(1)
 
 

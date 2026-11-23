@@ -61,14 +61,6 @@ check_existing_backend() {
 update_docker_compose() {
     print_header "Updating Docker Compose configuration..."
 
-    # Update backend service environment
-    sed -i.bak '/container_name: rag-backend/,/container_name: rag-backend\
-    /image: rag-system\/backend:latest,/\
-    /environment:/,/environment:' >>' backend/Dockerfile.tmp && \
-        cat backend/Dockerfile.tmp >> backend/Dockerfile && \
-        mv backend/Dockerfile backend/Dockerfile.new && \
-        rm backend/Dockerfile.tmp backend/Dockerfile.bak 2>/dev/null || true
-
     # Add or update backend service in docker-compose.yml
     if ! grep -q "rag-backend:" docker-compose.yml; then
         print_status "Adding backend service to docker-compose.yml..."

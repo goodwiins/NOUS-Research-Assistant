@@ -53,3 +53,31 @@ def test_verification_binaries_are_ignored(path: str) -> None:
         check=False,
     )
     assert result.returncode == 0, path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".env.prod",
+        ".env.production",
+        ".env.staging",
+        "scripts/seed-secrets.env",
+        "backups/pre-deploy-20261121_000000/.env.production",
+    ],
+)
+def test_generated_secret_and_backup_files_are_ignored(path: str) -> None:
+    result = subprocess.run(
+        ["git", "check-ignore", "--quiet", "--no-index", path],
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    assert result.returncode == 0, path
+
+
+def test_root_env_example_stays_trackable() -> None:
+    result = subprocess.run(
+        ["git", "check-ignore", "--quiet", "--no-index", ".env.example"],
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    assert result.returncode == 1

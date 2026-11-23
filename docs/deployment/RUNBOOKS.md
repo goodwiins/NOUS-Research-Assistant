@@ -1,6 +1,6 @@
 # Runbooks
 
-> **Status: superseded (reconciled 2026-10-17).** These runbooks target an earlier deployment generation. Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). The text below is kept unedited as a record; do not run its commands without checking them against the current repo.
+> **Status: superseded (reconciled 2026-10-17).** These runbooks target an earlier deployment generation. Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). Parts of the text below were updated on 2026-11-22 (env-file names, backup and restore, schema setup); the rest is a historical record. Check any other command against the current repo before running it.
 ## Knowledge Graph Analytics Dashboard
 
 ### Table of Contents
@@ -107,10 +107,83 @@ kubectl delete pod -l app=postgres -n knowledge-graph-analytics
 # Check for corruption
 kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser -d ragdb -c "SELECT datname FROM pg_database WHERE datistemplate = false;"
 
-# If corruption detected, restore from backup
-cd scripts
-./backup-and-restore.sh restore <backup_id>
+# If corruption detected, restore from backup. This is for in-cluster
+# Postgres only; the block below stops on RDS before touching anything.
+# The whole recovery is one subshell, so the shell reads all of it before
+# running any of it: a paste that is cut short or lands in another shell runs
+# nothing. `fail` leaves only the subshell, not your terminal. set -e stops at
+# the first failed step and leaves the writers scaled down; finish by hand.
+# Run it from the repo root after turning off Argo CD auto-sync for the app
+# (Argo CD UI, or `argocd app set <app> --sync-policy none`); otherwise
+# self-heal scales everything back and re-runs the migrate Job.
+(
+  set -eu
+  NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
+  BACKUP_ID=                 # REQUIRED: the backup to restore, e.g. 20261121_120000
+  fail() { echo "STOPPED, nothing changed: $*" >&2; exit 1; }
+
+  # 0. Preconditions. Any kubectl error (context, credentials, RBAC) stops
+  #    here too. On AWS the database is RDS: there is no deployment/postgres
+  #    and the chart's aws-database-credentials ExternalSecret exists, so
+  #    restore RDS from a snapshot or point-in-time restore instead.
+  [ -n "$NS" ] || fail "NS is empty"
+  [ -n "$BACKUP_ID" ] || fail "set BACKUP_ID"
+  [ -x scripts/backup-and-restore.sh ] || fail "run this from the repo root"
+  kubectl get deployment postgres -n "$NS" >/dev/null \
+    || fail "no in-cluster deployment/postgres in $NS, or kubectl failed"
+  eso_crd=$(kubectl get crd externalsecrets.external-secrets.io \
+    --ignore-not-found -o name) || fail "kubectl failed"
+  if [ -n "$eso_crd" ]; then
+    rds=$(kubectl get externalsecret aws-database-credentials -n "$NS" \
+      --ignore-not-found -o name) || fail "kubectl failed"
+    [ -z "$rds" ] || fail "PostgreSQL in $NS is RDS: use an RDS snapshot or PITR"
+  fi
+
+  # 1. Stop every writer, or the boot migrations (the migrate Job and the
+  #    backend's run-migrations init container) repopulate ragdb before the
+  #    restore. If KEDA is installed (it is off on AWS), pause it so it does
+  #    not scale the workers back up.
+  if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+    kubectl annotate scaledobject --all -n "$NS" \
+      autoscaling.keda.sh/paused-replicas="0" --overwrite
+  fi
+  kubectl scale deployment -n "$NS" --replicas=0 \
+    -l 'app.kubernetes.io/component in (backend,celery-worker,celery-beat)'
+  kubectl delete job -n "$NS" -l app.kubernetes.io/component=migrations \
+    --ignore-not-found
+
+  # 2. Drop and recreate ragdb from the maintenance database. WITH (FORCE)
+  #    needs PostgreSQL 13+, and raguser must own ragdb and have CREATEDB.
+  kubectl exec -n "$NS" deployment/postgres -- psql -U raguser -d postgres \
+    -v ON_ERROR_STOP=1 \
+    -c 'DROP DATABASE IF EXISTS ragdb WITH (FORCE)' \
+    -c 'CREATE DATABASE ragdb OWNER raguser'
+
+  # 3. Restore. The restore loads only into an EMPTY ragdb: the dump has no
+  #    DROP statements.
+  NAMESPACE="$NS" scripts/backup-and-restore.sh restore "$BACKUP_ID"
+
+  # 4. Bring the writers back: remove the KEDA pause (if KEDA is installed),
+  #    then re-enable auto-sync. Argo CD restores the replicas and re-runs the
+  #    migrate Job, which applies only the revisions newer than the backup.
+  if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+    kubectl annotate scaledobject --all -n "$NS" autoscaling.keda.sh/paused-replicas-
+  fi
+)
 ```
+
+If a step fails after PostgreSQL was loaded, the script says
+`PostgreSQL WAS ALREADY RESTORED`. Do not re-run the restore against that
+database. Finish the remaining component by hand.
+
+After a Velero restore, Secrets are missing because backups exclude them.
+Re-create `infisical-universal-auth` with the "Bootstrap commands" in
+`infrastructure/kubernetes/infisical-bootstrap.md`. Then check
+`kubectl get infisicalsecrets -n "$NS"` once the operator resyncs (about 60s).
+External Secrets Operator rebuilds only `aws-database-credentials`. Helm
+release records are Secrets too, so run `helm upgrade --install` with the
+chart and values from git to re-create the release. See "Full Cluster
+Recovery" in `PRODUCTION_DEPLOYMENT_GUIDE.md`.
 
 #### Redis Cache Recovery
 ```bash

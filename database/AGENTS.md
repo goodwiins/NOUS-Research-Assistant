@@ -14,8 +14,8 @@ define the live-schema and tenant boundaries.
 Do not confuse these assets with the live migration systems:
 `backend/alembic/versions/` is the backend Alembic history and
 `supabase/migrations/` is the Supabase CLI history. A file under
-`database/`, including `database/migrations/`, may be standalone, generated,
-historical, example, or an unresolved consumer. Its name or documentation is
+`database/` may be standalone, generated, historical, example, or an
+unresolved consumer. Its name or documentation is
 not proof that a deployment runs it.
 
 ## Invalid patterns

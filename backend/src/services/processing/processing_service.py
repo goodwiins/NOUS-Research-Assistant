@@ -7,6 +7,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -97,10 +98,27 @@ class ProcessingPipeline:
 
         self.db = db
         self.file_service = FileService(db)
-        self.entity_extractor = EntityExtractionService()
-        self.image_processor = ImageProcessingService()
-        self.audio_processor = AudioProcessingService()
-        self.video_processor = VideoProcessingService()
+
+    # The extractors are built on first use, not in __init__. Building
+    # EntityExtractionService loads spaCy and AudioProcessingService tries to
+    # load Whisper; the API routes (process/status/retry, via
+    # get_processing_service) never call an extractor, so eager construction
+    # loaded both models on the event loop for every request (GOO-642/IS2B-1).
+    @cached_property
+    def entity_extractor(self) -> EntityExtractionService:
+        return EntityExtractionService()
+
+    @cached_property
+    def image_processor(self) -> ImageProcessingService:
+        return ImageProcessingService()
+
+    @cached_property
+    def audio_processor(self) -> AudioProcessingService:
+        return AudioProcessingService()
+
+    @cached_property
+    def video_processor(self) -> VideoProcessingService:
+        return VideoProcessingService()
 
     async def process_document(
         self,
@@ -376,44 +394,64 @@ class ProcessingPipeline:
             import pytesseract
             from PIL import Image
 
+            from src.services.processing import pdf_lock
+
+            # PyMuPDF is not thread-safe: every fitz call holds the
+            # process-wide lock (GOO-695). OCR runs outside it, so a slow
+            # page does not stall every other PDF path.
+            def _ocr(img_data: bytes) -> str:
+                return pytesseract.image_to_string(Image.open(io.BytesIO(img_data)))
+
             # First attempt: Extract text directly
             text = []
             try:
-                doc = fitz.open(file_path)
-                for page_num in range(len(doc)):
-                    page = doc.load_page(page_num)
-                    page_text = page.get_text()
+                with pdf_lock.PYMUPDF_LOCK:
+                    doc = fitz.open(file_path)
+                    page_count = len(doc)
+                try:
+                    for page_num in range(page_count):
+                        with pdf_lock.PYMUPDF_LOCK:
+                            page = doc.load_page(page_num)
+                            page_text = page.get_text()
+                            # If no text found, render the page for OCR
+                            img_data = (
+                                None
+                                if page_text.strip()
+                                else page.get_pixmap().tobytes("png")
+                            )
 
-                    if page_text.strip():
-                        cleaned = self._clean_extracted_text(page_text)
-                        text.append(f"[Page {page_num + 1}]\n{cleaned}")
-                    else:
-                        # If no text found, try OCR
-                        pix = page.get_pixmap()
-                        img_data = pix.tobytes("png")
-                        img = Image.open(io.BytesIO(img_data))
-                        ocr_text = pytesseract.image_to_string(img)
-                        if ocr_text.strip():
-                            cleaned = self._clean_extracted_text(ocr_text)
+                        if img_data is None:
+                            cleaned = self._clean_extracted_text(page_text)
                             text.append(f"[Page {page_num + 1}]\n{cleaned}")
-
-                doc.close()
+                        else:
+                            ocr_text = _ocr(img_data)
+                            if ocr_text.strip():
+                                cleaned = self._clean_extracted_text(ocr_text)
+                                text.append(f"[Page {page_num + 1}]\n{cleaned}")
+                finally:
+                    with pdf_lock.PYMUPDF_LOCK:
+                        doc.close()
 
             except Exception as pdf_error:
                 logger.warning(
                     f"Direct PDF extraction failed, trying OCR: {str(pdf_error)}"
                 )
                 # Fallback: Convert all pages to images and OCR them
-                with fitz.open(file_path) as doc:
-                    for page_num in range(len(doc)):
-                        page = doc.load_page(page_num)
-                        pix = page.get_pixmap()
-                        img_data = pix.tobytes("png")
-                        img = Image.open(io.BytesIO(img_data))
-                        ocr_text = pytesseract.image_to_string(img)
+                with pdf_lock.PYMUPDF_LOCK:
+                    doc = fitz.open(file_path)
+                    page_count = len(doc)
+                try:
+                    for page_num in range(page_count):
+                        with pdf_lock.PYMUPDF_LOCK:
+                            page = doc.load_page(page_num)
+                            img_data = page.get_pixmap().tobytes("png")
+                        ocr_text = _ocr(img_data)
                         if ocr_text.strip():
                             cleaned = self._clean_extracted_text(ocr_text)
                             text.append(f"[Page {page_num + 1}]\n{cleaned}")
+                finally:
+                    with pdf_lock.PYMUPDF_LOCK:
+                        doc.close()
 
             extracted_text = "\n\n".join(text)
 
@@ -696,14 +734,20 @@ class ProcessingPipeline:
 
     async def process_entity_extraction(
         self, document: Document, text: str
-    ) -> List[Entity]:
-        """Extract entities from text using enhanced entity extraction service"""
+    ) -> Optional[List[Entity]]:
+        """Extract entities from text using enhanced entity extraction service.
+
+        Returns ``None`` when extraction errored, so the caller keeps the
+        document's existing entities instead of replacing them with nothing.
+        A failure to build the extractor (spaCy load) is not caught: it fails
+        the task, as it did when the extractor was built in ``__init__``.
+        """
+        extractor = self.entity_extractor
         try:
-            # Use the enhanced entity extraction service
-            entities = self.entity_extractor.extract_entities_from_text(document, text)
+            entities = extractor.extract_entities_from_text(document, text)
 
             # Get statistics about extracted entities
-            stats = self.entity_extractor.get_entity_statistics(entities)
+            stats = extractor.get_entity_statistics(entities)
             logger.info(f"Entity extraction stats for document {document.id}: {stats}")
 
             return entities
@@ -712,7 +756,7 @@ class ProcessingPipeline:
             logger.error(
                 f"Entity extraction failed for document {document.id}: {str(e)}"
             )
-            return []
+            return None
 
     async def process_embedding_generation(self, document: Document, text: str) -> str:
         """Generate embeddings for document text using Azure OpenAI"""

@@ -18,7 +18,7 @@
   ],
   "eslint": {
     "errors": 85,
-    "warnings": 1775,
+    "warnings": 1774,
     "byFile": {
       "app/(auth)/layout.tsx": {
         "errors": 0,
@@ -205,10 +205,6 @@
         "warnings": 1
       },
       "app/api/trigger/documents/batch/route.ts": {
-        "errors": 0,
-        "warnings": 1
-      },
-      "app/api/webhooks/github/route.ts": {
         "errors": 0,
         "warnings": 1
       },

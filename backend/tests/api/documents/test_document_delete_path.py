@@ -84,6 +84,24 @@ def test_commit_happens_before_physical_delete():
     assert order == ["commit", "physical"]
 
 
+def test_physical_delete_runs_off_the_event_loop_thread():
+    """GOO-643 API-4: boto3 deletes must not run on the loop thread."""
+    import threading
+
+    document = _doc()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(document))
+    file_service = MagicMock()
+    file_service.soft_delete_documents = AsyncMock(return_value=[document])
+    threads = []
+    file_service.delete_physical_file = MagicMock(
+        side_effect=lambda d: threads.append(threading.current_thread())
+    )
+
+    asyncio.run(_delete(document, db, file_service))
+    assert threads and threads[0] is not threading.current_thread()
+
+
 def test_commit_failure_leaves_object_untouched():
     document = _doc()
     db = MagicMock()

@@ -85,7 +85,7 @@ async def test_rebuild_rejects_org_less_admin(monkeypatch: pytest.MonkeyPatch) -
         _forbid("get_rebuild_documents"),
     )
     with pytest.raises(HTTPException) as exc:
-        await search_api.rebuild_search_indexes(
+        search_api.rebuild_search_indexes(
             current_user=_user(None, role=UserRole.ADMIN), db=MagicMock()
         )
     assert exc.value.status_code == 403

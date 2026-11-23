@@ -2,6 +2,7 @@
 Evidence Agreement Meter API endpoints
 """
 
+import asyncio
 import logging
 import time
 from typing import Annotated, Dict, List, Optional
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ...core.database import get_db_sync
 from ...core.dependencies import get_current_user
+from ...core.thread_offload import to_thread_finish_on_cancel
 from ...middleware.rate_limiting import ApiRateLimiter
 from ...models.document import Document, ProcessingStatus
 from ...models.evidence import StanceClassificationModel
@@ -94,6 +96,33 @@ async def rate_limit_dependency(request: Request):
 
 
 router = APIRouter()
+
+
+# GOO-643 / API-5: these routes use a sync Session. Its queries and commits run
+# in a worker thread via the two helpers below so they never block the event
+# loop; the session is used by one thread at a time, never concurrently.
+
+
+def _load_sources_and_release(db: Session, **kwargs):
+    """Load the claim's sources, build classifier inputs, release the
+    connection (blocking; run with ``asyncio.to_thread``)."""
+    loaded = _load_sources_or_http_error(db, **kwargs)
+    classifier_sources = [source.classifier_input() for source in loaded.sources]
+    db.rollback()
+    return loaded, classifier_sources
+
+
+def _save_and_commit(db: Session, **kwargs) -> int:
+    """Upsert stance classifications and commit; roll back on failure
+    (blocking; run with ``asyncio.to_thread``)."""
+    try:
+        saved_count = _save_stance_classifications(db=db, **kwargs)
+        db.commit()
+        return saved_count
+    except Exception:
+        db.rollback()
+        raise
+
 
 # Initialize services
 cache_service = EvidenceCacheService()
@@ -317,16 +346,15 @@ async def get_evidence_meter(
                 status_code=400, detail=_batch_classification_limit_detail()
             ) from e
 
-        loaded = _load_sources_or_http_error(
+        loaded, classifier_sources = await to_thread_finish_on_cancel(
+            _load_sources_and_release,
             db,
             organization_id=current_user.organization_id,
             source_ids=parsed_source_ids,
             claim=claim,
         )
-        classifier_sources = [source.classifier_input() for source in loaded.sources]
         source_revisions = loaded.revisions
         retracted_source_ids = list(loaded.withdrawn_source_ids)
-        db.rollback()
         claim_hash = consensus_calculator._generate_claim_hash(claim)
         classifier_version = _classifier_version()
 
@@ -381,20 +409,18 @@ async def get_evidence_meter(
         )
 
         # Store in database (upsert to avoid duplicates/races)
-        saved_count = _save_stance_classifications(
-            db=db,
-            classifications=classifications,
-            claim_hash=claim_hash,
-            claim_text=claim,
-            classifier_version=classifier_version,
-            organization_id=current_user.organization_id,
-        )
-
         try:
-            db.commit()
+            saved_count = await to_thread_finish_on_cancel(
+                _save_and_commit,
+                db,
+                classifications=classifications,
+                claim_hash=claim_hash,
+                claim_text=claim,
+                classifier_version=classifier_version,
+                organization_id=current_user.organization_id,
+            )
             logger.info("Saved/upserted stance classifications count=%d", saved_count)
         except Exception as exc:
-            db.rollback()
             logger.error("Failed to save stance classifications")
             raise HTTPException(
                 status_code=500, detail="Failed to generate evidence meter"
@@ -428,7 +454,7 @@ async def get_evidence_meter(
 
 
 @router.get("/breakdown", response_model=EvidenceBreakdown)
-async def get_evidence_breakdown(
+def get_evidence_breakdown(
     claim_hash: str = Query(..., description="SHA256 hash of claim"),
     stance_filter: Optional[Stance] = Query(
         None, description="Filter by specific stance"
@@ -592,14 +618,13 @@ async def classify_sources_for_claim(
                 status_code=400, detail=_batch_classification_limit_detail()
             ) from e
 
-        loaded = _load_sources_or_http_error(
+        _loaded, classifier_sources = await to_thread_finish_on_cancel(
+            _load_sources_and_release,
             db,
             organization_id=current_user.organization_id,
             source_ids=source_ids,
             claim=claim,
         )
-        classifier_sources = [source.classifier_input() for source in loaded.sources]
-        db.rollback()
         claim_hash = consensus_calculator._generate_claim_hash(claim)
         classifier_version = _classifier_version()
 
@@ -622,16 +647,15 @@ async def classify_sources_for_claim(
             )
 
         # Store results in database (upsert to avoid duplicates/races)
-        saved_count = _save_stance_classifications(
-            db=db,
+        saved_count = await to_thread_finish_on_cancel(
+            _save_and_commit,
+            db,
             classifications=classifications,
             claim_hash=claim_hash,
             claim_text=claim,
             classifier_version=classifier_version,
             organization_id=current_user.organization_id,
         )
-
-        db.commit()
 
         return {
             "status": "completed",
@@ -644,7 +668,7 @@ async def classify_sources_for_claim(
     except HTTPException:
         raise
     except Exception:
-        db.rollback()
+        await to_thread_finish_on_cancel(db.rollback)
         logger.error("Failed to classify sources")
         raise HTTPException(status_code=500, detail="Classification failed")
 
@@ -656,7 +680,7 @@ async def health_check(_current_user=Depends(get_current_user)):
 
     try:
         # Check cache service
-        cache_connected = cache_service._ensure_connected()
+        cache_connected = await cache_service._ensure_connected()
 
         return {
             "status": "healthy",

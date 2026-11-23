@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { Eye, Pencil, Save } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { SafeMarkdownImage } from '@/components/markdown/SafeMarkdownImage';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -325,6 +326,7 @@ export function NoteEditor({
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{
+                    img: SafeMarkdownImage,
                     a: ({ href, children }) => (
                       <a href={href} target="_blank" rel="noopener noreferrer">
                         {children}

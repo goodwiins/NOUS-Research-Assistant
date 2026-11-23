@@ -12,6 +12,7 @@ from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 
 from src.core.config import settings
+from src.core.url_redaction import redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +339,10 @@ def create_rate_limiter(max_attempts: int, window_minutes: int) -> RateLimiterIn
         # We assume Redis is available if URL is set.
         # RedisRateLimiter degrades to a per-process in-memory limiter when
         # Redis is unreachable (R7-M7) rather than allowing every request.
-        logger.info(f"Initializing RedisRateLimiter with URL: {settings.REDIS_URL}")
+        logger.info(
+            "Initializing RedisRateLimiter with URL: %s",
+            redact_url(settings.REDIS_URL),
+        )
         return RedisRateLimiter(max_attempts, window_minutes)
 
     logger.warning(

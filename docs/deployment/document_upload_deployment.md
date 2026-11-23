@@ -1,6 +1,6 @@
 # Document Upload Feature Deployment Guide
 
-> **Status: historical (reconciled 2026-10-17).** This guide was written for earlier deployment generations (Docker Compose, single-host or DigitalOcean/DOKS setups). Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Qdrant is removed; live retrieval is PostgreSQL full-text. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). The text below is kept unedited as a record; do not run its commands without checking them against the current repo.
+> **Status: historical (reconciled 2026-10-17).** This guide was written for earlier deployment generations (Docker Compose, single-host or DigitalOcean/DOKS setups). Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Qdrant is removed; live retrieval is PostgreSQL full-text. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). Parts of the text below were updated on 2026-11-22 (env-file names, backup and restore, schema setup); the rest is a historical record. Check any other command against the current repo before running it.
 
 ## Overview
 
@@ -138,12 +138,12 @@ class Settings:
 
 #### PostgreSQL
 ```bash
-# Apply database migrations
+# Apply database migrations (from backend/). This creates the whole schema,
+# including the document upload tables.
 python -m alembic upgrade head
-
-# Apply document upload schema
-psql -h localhost -U postgres -d rag_system -f database/migrations/006_document_upload_schema.sql
 ```
+
+The standalone `006_document_upload_schema.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
 
 #### Neo4j
 ```bash
@@ -235,7 +235,8 @@ services:
       - POSTGRES_PASSWORD=postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/migrations:/docker-entrypoint-initdb.d
+      # No init scripts: create the schema with `alembic upgrade head`
+      # once the database is up.
     ports:
       - "5432:5432"
 

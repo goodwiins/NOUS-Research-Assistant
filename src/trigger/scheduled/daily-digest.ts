@@ -1,6 +1,9 @@
 import { logger, schedules } from "@trigger.dev/sdk";
 import { backendClient, BackendApiError } from "../_lib/backend-client";
-import { HealthCheckResponseSchema } from "../_lib/schemas";
+import {
+  HealthCheckResponseSchema,
+  WorkerStatsResponseSchema,
+} from "../_lib/schemas";
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_DIGEST_WEBHOOK_URL;
 
@@ -45,12 +48,13 @@ export const dailyDigest = schedules.task({
     let workerCount = 0;
     let pendingTasks = 0;
     try {
-      const workers = await backendClient.get<{
-        workers?: Array<Record<string, unknown>>;
-        pending_tasks?: number;
-      }>("/api/v1/infrastructure/workers/health");
-      workerCount = workers.workers?.length ?? 0;
-      pendingTasks = workers.pending_tasks ?? 0;
+      // Counts live on /workers/status; /workers/health has no counts.
+      const workers = await backendClient.get(
+        "/api/v1/workers/status",
+        WorkerStatsResponseSchema,
+      );
+      workerCount = workers.active_workers;
+      pendingTasks = workers.pending_tasks;
     } catch {
       logger.warn("Worker health unavailable for digest");
     }

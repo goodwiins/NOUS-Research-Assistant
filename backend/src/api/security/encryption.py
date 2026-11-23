@@ -217,7 +217,7 @@ def _require_platform_operator(current_user: User, action: str) -> None:
 
 
 @router.post("/profiles/user", response_model=Dict[str, Any])
-async def encrypt_user_profile(
+def encrypt_user_profile(
     request: UserProfileEncryptionRequest,
     current_user: User = Depends(is_active_user),
     db: Session = Depends(get_db_sync),
@@ -271,7 +271,7 @@ async def encrypt_user_profile(
 
 
 @router.post("/profiles/organization", response_model=Dict[str, Any])
-async def encrypt_organization_profile(
+def encrypt_organization_profile(
     request: OrganizationProfileEncryptionRequest,
     current_user: User = Depends(is_active_user),
     db: Session = Depends(get_db_sync),
@@ -315,7 +315,7 @@ async def encrypt_organization_profile(
 
 
 @router.post("/decrypt", response_model=Dict[str, Any])
-async def decrypt_data(
+def decrypt_data(
     request: DecryptionRequest,
     current_user: User = Depends(is_active_user),
     db: Session = Depends(get_db_sync),
@@ -392,7 +392,7 @@ async def decrypt_data(
 
 
 @router.post("/keys/rotate", response_model=KeyRotationResponse)
-async def rotate_encryption_key(
+def rotate_encryption_key(
     request: KeyRotationRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(is_active_user),
@@ -445,7 +445,7 @@ async def rotate_encryption_key(
 
 
 @router.get("/status", response_model=EncryptionStatusResponse)
-async def get_encryption_status(
+def get_encryption_status(
     organization_id: Optional[UUID] = Query(
         None, description="Organization scope (admin only)"
     ),
@@ -479,7 +479,7 @@ async def get_encryption_status(
 
 
 @router.post("/validate", response_model=EncryptionValidationResponse)
-async def validate_encryption_integrity(
+def validate_encryption_integrity(
     sample_size: int = Query(10, ge=1, le=100, description="Number of records to test"),
     current_user: User = Depends(is_active_user),
     db: Session = Depends(get_db_sync),
@@ -511,7 +511,7 @@ async def validate_encryption_integrity(
 
 
 @router.get("/audit/logs", response_model=List[Dict[str, Any]])
-async def get_encryption_audit_logs(
+def get_encryption_audit_logs(
     limit: int = Query(50, ge=1, le=500, description="Number of logs to return"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
     operation_type: Optional[str] = Query(None, description="Filter by operation type"),

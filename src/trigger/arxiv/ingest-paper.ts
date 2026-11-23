@@ -19,24 +19,23 @@ export const ingestPaper = task({
 
     logger.info("Ingesting ArXiv paper", { paperId });
 
-    let result: Record<string, unknown>;
-    try {
-      result = await backendClient.post<Record<string, unknown>>(
-        "/api/v1/arxiv/ingest",
-        { paper_ids: [paperId] },
-      );
-    } catch (err) {
-      if (err instanceof BackendApiError && err.status === 429) {
-        logger.warn("Rate limited by ArXiv, will retry", { paperId });
-        throw err;
-      }
-      throw err;
-    }
+    // POSTed once per attempt (the client does not retry writes). The task
+    // retry is the only retry layer; it is safe because the backend reuses an
+    // existing document for the same (organization, arXiv id).
+    const result = await backendClient.post<Record<string, unknown>>(
+      "/api/v1/arxiv/ingest",
+      { paper_ids: [paperId] },
+    );
 
-    const documentIds = (result.document_ids as string[]) ?? [];
+    const documentIds = Array.isArray(result.document_ids)
+      ? (result.document_ids as string[])
+      : [];
     if (documentIds.length === 0) {
-      logger.info("Paper already ingested or skipped", { paperId });
-      return { status: "skipped", paperId };
+      // The endpoint queues a background job and does not report document
+      // ids, so the outcome is not observable here. Report it as accepted,
+      // never as ingested.
+      logger.info("Paper ingest accepted; outcome not observable", { paperId });
+      return { status: "accepted", paperId };
     }
 
     logger.info("Paper ingested, polling for processing", {

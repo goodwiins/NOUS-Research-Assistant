@@ -59,6 +59,13 @@ Thumbs.db
 .env.development.local
 .env.test.local
 .env.production.local
+# Root-level per-environment files (scripts/deploy.sh loads .env.$ENVIRONMENT)
+/.env.*
+!/.env.example
+
+# Generated secrets and local backups (scripts/setup-secrets.sh, scripts/deploy.sh)
+/scripts/seed-secrets.env
+/backups/
 
 # Terraform and IaC secret material
 *.tfstate

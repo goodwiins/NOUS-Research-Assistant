@@ -19,16 +19,55 @@ COST WARNING: Processing 500k papers with LLM extraction is expensive!
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TypedDict
+from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, TypedDict
 
 from src.core.neo4j_auth import get_neo4j_auth
 
 logger = logging.getLogger(__name__)
+
+# Neo4j labels and relationship types cannot be query parameters, so the
+# writes below interpolate them. They come from LLM output over third-party
+# abstracts, which a crafted abstract can steer into Cypher (GOO-639), so only
+# these fixed values ever reach a query. They mirror the prompts' type lists
+# plus this module's own defaults (CONCEPT, RELATED_TO).
+ALLOWED_ENTITY_LABELS = frozenset(
+    {
+        "METHODOLOGY",
+        "MODEL",
+        "METRIC",
+        "TASK",
+        "DATASET",
+        "FRAMEWORK",
+        "THEORY",
+        "DOMAIN",
+        "ARCHITECTURE",
+        "LOSS_FUNCTION",
+        "OPTIMIZATION",
+        "INSTITUTION",
+        "CONCEPT",
+    }
+)
+ALLOWED_RELATIONSHIP_TYPES = frozenset(
+    {"USES", "EVALUATED_ON", "ACHIEVED", "COMPARED_WITH", "EXTENDS", "RELATED_TO"}
+)
+
+
+def _allowlisted(value: Any, allowed: frozenset[str]) -> Optional[str]:
+    """Normalize an LLM-provided label and return it only if allowlisted.
+
+    ``"loss function"`` / ``"loss-function"`` map to ``LOSS_FUNCTION``;
+    anything not on the list (including injected Cypher) returns ``None``.
+    """
+    if not isinstance(value, str):
+        return None
+    normalized = "_".join(value.strip().upper().replace("-", " ").split())
+    return normalized if normalized in allowed else None
 
 
 class LLMIngestionProgress(TypedDict):
@@ -366,10 +405,18 @@ Response (JSON array only):"""
 
                 # Store entities in Neo4j
                 for entity in entities:
-                    entity_type = entity.get("type", "CONCEPT").upper()
+                    entity_type = _allowlisted(
+                        entity.get("type") or "CONCEPT", ALLOWED_ENTITY_LABELS
+                    )
                     entity_name = entity.get("name", "")
                     confidence = entity.get("confidence", 0.8)
 
+                    if entity_type is None:
+                        logger.warning(
+                            "Dropping entity with non-allowlisted type for paper %s",
+                            paper_id,
+                        )
+                        continue
                     if entity_name:
                         await session.run(
                             f"""
@@ -398,9 +445,19 @@ Response (JSON array only):"""
                 for rel in relationships:
                     source = rel.get("source", "")
                     target = rel.get("target", "")
-                    rel_type = rel.get("relationship", "RELATED_TO").upper()
+                    rel_type = _allowlisted(
+                        rel.get("relationship") or "RELATED_TO",
+                        ALLOWED_RELATIONSHIP_TYPES,
+                    )
                     confidence = rel.get("confidence", 0.7)
 
+                    if rel_type is None:
+                        logger.warning(
+                            "Dropping relationship with non-allowlisted type "
+                            "for paper %s",
+                            paper_id,
+                        )
+                        continue
                     if source and target:
                         await session.run(
                             f"""
@@ -499,10 +556,13 @@ Response (JSON array only):"""
         # Load Kaggle dataset
         import kagglehub
 
-        dataset_path = kagglehub.dataset_download("Cornell-University/arxiv")
+        # Blocking download (multi-GB on first run): worker thread (GOO-643).
+        dataset_path = await asyncio.to_thread(
+            kagglehub.dataset_download, "Cornell-University/arxiv"
+        )
         json_file = Path(dataset_path) / "arxiv-metadata-oai-snapshot.json"
 
-        if not json_file.exists():
+        if not await asyncio.to_thread(json_file.exists):
             raise FileNotFoundError(f"Dataset not found at {json_file}")
 
         # Connect to Neo4j
@@ -524,84 +584,78 @@ Response (JSON array only):"""
                     "CREATE INDEX IF NOT EXISTS FOR (e:Entity) ON (e.name)"
                 )
 
-                with open(json_file, "r") as f:
-                    for line in f:
-                        if total_stats["processed"] >= self.max_papers:
-                            break
-
-                        paper = json.loads(line)
-
-                        # Filter by category if specified
-                        if categories:
-                            paper_cats = paper.get("categories", "").split()
-                            if not any(cat in paper_cats for cat in categories):
-                                continue
-
-                        papers_buffer.append(paper)
+                # The snapshot is a multi-GB JSONL file: reading, json.loads and
+                # the category filter run in a worker thread, one batch at a
+                # time, so the event loop only awaits (GOO-643 IS2A-2).
+                papers_iter = _iter_papers(json_file, categories)
+                try:
+                    while total_stats["processed"] < self.max_papers:
+                        papers_buffer = await asyncio.to_thread(
+                            _take, papers_iter, self.batch_size
+                        )
+                        if len(papers_buffer) < self.batch_size:
+                            break  # end of file; the remainder is handled below
 
                         # Process batch
-                        if len(papers_buffer) >= self.batch_size:
-                            batch_count += 1
+                        batch_count += 1
 
-                            # Skip already processed batches
-                            if batch_count <= start_batch:
-                                papers_buffer = []
-                                continue
+                        # Skip already processed batches
+                        if batch_count <= start_batch:
+                            papers_buffer = []
+                            continue
 
-                            batch_stats = await self._process_batch_with_llm(
-                                session, papers_buffer, batch_count
+                        batch_stats = await self._process_batch_with_llm(
+                            session, papers_buffer, batch_count
+                        )
+
+                        total_stats["processed"] += len(papers_buffer)
+                        total_stats["ingested"] += batch_stats["ingested"]
+                        total_stats["failed"] += batch_stats["failed"]
+                        total_stats["skipped"] += batch_stats["skipped"]
+
+                        # Save state
+                        self.state["last_batch"] = batch_count
+                        self.state["total_processed"] = total_stats["processed"]
+                        self._save_state(self.state)
+
+                        # Progress callback
+                        if progress_callback:
+                            elapsed = time.time() - start_time
+                            pps = (
+                                total_stats["processed"] / elapsed if elapsed > 0 else 0
+                            )
+                            eta = (
+                                (self.max_papers - total_stats["processed"]) / pps
+                                if pps > 0
+                                else 0
                             )
 
-                            total_stats["processed"] += len(papers_buffer)
-                            total_stats["ingested"] += batch_stats["ingested"]
-                            total_stats["failed"] += batch_stats["failed"]
-                            total_stats["skipped"] += batch_stats["skipped"]
-
-                            # Save state
-                            self.state["last_batch"] = batch_count
-                            self.state["total_processed"] = total_stats["processed"]
-                            self._save_state(self.state)
-
-                            # Progress callback
-                            if progress_callback:
-                                elapsed = time.time() - start_time
-                                pps = (
-                                    total_stats["processed"] / elapsed
-                                    if elapsed > 0
-                                    else 0
+                            progress = LLMIngestionProgress(
+                                current_batch=batch_count,
+                                total_batches=total_batches,
+                                processed=total_stats["processed"],
+                                total_papers=self.max_papers,
+                                ingested=total_stats["ingested"],
+                                failed=total_stats["failed"],
+                                skipped=total_stats["skipped"],
+                                entities_extracted=self.stats["entities_extracted"],
+                                relationships_extracted=self.stats[
+                                    "relationships_extracted"
+                                ],
+                                embeddings_generated=self.stats["embeddings_generated"],
+                                progress_percent=(
+                                    total_stats["processed"] / self.max_papers
                                 )
-                                eta = (
-                                    (self.max_papers - total_stats["processed"]) / pps
-                                    if pps > 0
-                                    else 0
-                                )
+                                * 100,
+                                papers_per_second=pps,
+                                eta_seconds=eta,
+                                llm_cost_estimate=self.stats["llm_cost_estimate"],
+                            )
+                            progress_callback(progress)
 
-                                progress = LLMIngestionProgress(
-                                    current_batch=batch_count,
-                                    total_batches=total_batches,
-                                    processed=total_stats["processed"],
-                                    total_papers=self.max_papers,
-                                    ingested=total_stats["ingested"],
-                                    failed=total_stats["failed"],
-                                    skipped=total_stats["skipped"],
-                                    entities_extracted=self.stats["entities_extracted"],
-                                    relationships_extracted=self.stats[
-                                        "relationships_extracted"
-                                    ],
-                                    embeddings_generated=self.stats[
-                                        "embeddings_generated"
-                                    ],
-                                    progress_percent=(
-                                        total_stats["processed"] / self.max_papers
-                                    )
-                                    * 100,
-                                    papers_per_second=pps,
-                                    eta_seconds=eta,
-                                    llm_cost_estimate=self.stats["llm_cost_estimate"],
-                                )
-                                progress_callback(progress)
-
-                            papers_buffer = []
+                        papers_buffer = []
+                finally:
+                    _close_papers_iter(papers_iter)
 
                 # Process remaining papers
                 if papers_buffer and total_stats["processed"] < self.max_papers:
@@ -636,3 +690,37 @@ Response (JSON array only):"""
                 total_stats["processed"] / elapsed_time if elapsed_time > 0 else 0
             ),
         }
+
+
+def _iter_papers(
+    json_file: Path, categories: Optional[List[str]]
+) -> Generator[Dict[str, Any], None, None]:
+    """Yield snapshot papers, filtered by category. Blocking: drive it from a
+    worker thread (``_take``), never from the event loop."""
+    with open(json_file, "r") as f:
+        for line in f:
+            paper = json.loads(line)
+            if categories:
+                paper_cats = paper.get("categories", "").split()
+                if not any(cat in paper_cats for cat in categories):
+                    continue
+            yield paper
+
+
+def _close_papers_iter(papers: Generator[Dict[str, Any], None, None]) -> None:
+    """Close the snapshot reader, even if a cancelled batch is still running.
+
+    After a cancellation the worker thread can still be inside the generator,
+    and ``close()`` then raises ValueError ("generator already executing"),
+    masking the CancelledError. Once that thread finishes nothing references
+    the generator, so it is collected and its file closed.
+    """
+    try:
+        papers.close()
+    except ValueError:
+        logger.debug("snapshot reader still busy in a worker thread; left to GC")
+
+
+def _take(papers: Iterator[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
+    """Pull up to ``count`` papers from ``papers`` (blocking)."""
+    return list(itertools.islice(papers, count))

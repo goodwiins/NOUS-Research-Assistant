@@ -310,18 +310,31 @@ deploy_blue_green() {
 rollback() {
     log_info "Performing rollback..."
 
-    # Get last known good deployment
-    if kubectl get deployment backend-rollback -n "$NAMESPACE" &> /dev/null; then
-        log_info "Rolling back to previous version..."
-        kubectl rollout undo deployment/backend -n "$NAMESPACE"
-        kubectl rollout undo deployment/frontend -n "$NAMESPACE"
-    else
-        log_info "No backup deployment found. Scaling down services..."
-        kubectl scale deployment/backend --replicas=0 -n "$NAMESPACE"
-        kubectl scale deployment/frontend --replicas=0 -n "$NAMESPACE"
-    fi
+    # Roll each deployment back to its previous ReplicaSet revision. Never
+    # scale to zero: an outage is not a rollback.
+    local deployment failed=0
+    for deployment in backend frontend; do
+        local revisions
+        revisions=$(kubectl rollout history "deployment/$deployment" -n "$NAMESPACE" 2>/dev/null \
+            | awk '$1 ~ /^[0-9]+$/' | wc -l | tr -d ' ')
+        if [[ "${revisions:-0}" -lt 2 ]]; then
+            log_error "deployment/$deployment has no previous revision to roll back to; left unchanged."
+            failed=1
+            continue
+        fi
+        log_info "Rolling back deployment/$deployment to its previous revision..."
+        if ! kubectl rollout undo "deployment/$deployment" -n "$NAMESPACE" \
+            || ! kubectl rollout status "deployment/$deployment" -n "$NAMESPACE" --timeout=300s; then
+            log_error "Rollback of deployment/$deployment failed."
+            failed=1
+        fi
+    done
 
-    log_success "Rollback completed successfully."
+    if [[ "$failed" -ne 0 ]]; then
+        log_error "Rollback incomplete; see errors above."
+        exit 1
+    fi
+    log_success "Rollback completed: backend and frontend are on their previous revisions."
 }
 
 # Show deployment status
@@ -330,7 +343,7 @@ show_status() {
 
     # Show pod status
     echo -e "\n${BLUE}Pod Status:${NC}"
-    kubectl get pods -n "$NAMESPACE" -l app in (backend, frontend)
+    kubectl get pods -n "$NAMESPACE" -l 'app in (backend,frontend)'
 
     # Show service status
     echo -e "\n${BLUE}Service Status:${NC}"

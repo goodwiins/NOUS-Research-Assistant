@@ -71,18 +71,20 @@ export const ArxivIngestPaperPayloadSchema = z.object({
   userId: z.string(),
 });
 
-export const ArxivSearchResponseSchema = z.object({
-  papers: z.array(
-    z.object({
-      id: z.string(),
-      title: z.string(),
-      authors: z.array(z.string()).optional(),
-      categories: z.array(z.string()).optional(),
-      published: z.string().optional(),
-    }),
-  ),
-  total: z.number().optional(),
-});
+/**
+ * POST /api/v1/arxiv/search returns a bare JSON array
+ * (`response_model=List[ArXivPaperResponse]`), not an object with `papers`.
+ * Contract: tests/trigger/arxiv-search-contract.test.mjs.
+ */
+export const ArxivSearchResponseSchema = z.array(
+  z.object({
+    id: z.string(),
+    title: z.string(),
+    authors: z.array(z.string()).optional(),
+    categories: z.array(z.string()).optional(),
+    published: z.string().optional(),
+  }),
+);
 
 export const BatchProcessPayloadSchema = z.object({
   documentIds: z.array(z.string()).min(1).max(100),
@@ -109,3 +111,20 @@ export type ArxivIngestPaperPayload = z.infer<
 >;
 export type BatchProcessPayload = z.infer<typeof BatchProcessPayloadSchema>;
 export type CacheWarmPayload = z.infer<typeof CacheWarmPayloadSchema>;
+
+/** GET /api/v1/workers/status (`WorkerStatsResponse` in backend/openapi.json). */
+export const WorkerStatsResponseSchema = z.object({
+  active_workers: z.number(),
+  total_workers: z.number(),
+  active_tasks: z.number(),
+  pending_tasks: z.number(),
+  registered_tasks: z.number(),
+});
+export type WorkerStatsResponse = z.infer<typeof WorkerStatsResponseSchema>;
+
+/** GET /api/v1/workers/health (backend/src/api/infrastructure/workers.py). */
+export const WorkerHealthResponseSchema = z.object({
+  healthy: z.boolean(),
+  workers_online: z.number(),
+  issues: z.array(z.string()),
+});

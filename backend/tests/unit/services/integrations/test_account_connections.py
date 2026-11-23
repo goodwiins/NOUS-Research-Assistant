@@ -226,7 +226,9 @@ async def _seed_account(db: AsyncSession) -> None:
     await db.commit()
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture(
+    params=["sqlite", pytest.param("postgres", marks=pytest.mark.requires_postgres)]
+)
 async def db(request: pytest.FixtureRequest) -> AsyncIterator[AsyncSession]:
     if request.param == "sqlite":
         dsn, schema = "sqlite+aiosqlite:///:memory:", None

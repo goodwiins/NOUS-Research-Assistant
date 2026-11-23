@@ -1,6 +1,6 @@
 # Production Deployment Guide
 
-> **Status: historical (reconciled 2026-10-17).** This guide was written for earlier deployment generations (Docker Compose, single-host or DigitalOcean/DOKS setups). Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Qdrant is removed; live retrieval is PostgreSQL full-text. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). The text below is kept unedited as a record; do not run its commands without checking them against the current repo.
+> **Status: historical (reconciled 2026-10-17).** This guide was written for earlier deployment generations (Docker Compose, single-host or DigitalOcean/DOKS setups). Current deployment: AWS EKS `nous-dev-cluster` (`us-east-1`), namespace `multimodal-rag-system`, Argo CD application `nous-dev-aws`. Qdrant is removed; live retrieval is PostgreSQL full-text. Start with the [AWS deployment overview](aws-overview.md) and [AWS on-call commands](../operations/aws-on-call.md). Parts of the text below were updated on 2026-11-22 (env-file names, backup and restore, schema setup); the rest is a historical record. Check any other command against the current repo before running it.
 
 > **Legacy guide (2026-09-29):** The DigitalOcean staging/production deployment
 > workflows described here have been retired. For the current AWS dev release
@@ -427,15 +427,54 @@ kubectl rollout restart deployment/postgres -n knowledge-graph-analytics
 #### Scenario 3: Full Cluster Recovery
 
 ```bash
-# Restore from Velero backup
-velero restore create --from-backup <backup-name> --namespace knowledge-graph-analytics
+NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
 
-# Restore application data
-./backup-and-restore.sh restore <backup-id>
+# 1. Restore from the Velero backup (Velero >= 1.10). It contains no
+#    Secrets. --namespace is Velero's own namespace (the script's
+#    VELERO_NAMESPACE, default velero); the backup itself already records
+#    that it covers "$NS".
+velero restore create --from-backup <backup-name> --namespace velero
+
+# 2. Re-create the Infisical bootstrap Secret. App secrets come from
+#    InfisicalSecret CRs (templates/infisical-secrets.yaml), and the operator
+#    authenticates with the manually created Secret infisical-universal-auth.
+#    Export NS, then run the "Bootstrap commands" block in
+#    infrastructure/kubernetes/infisical-bootstrap.md; its loop targets "$NS".
+export NS
+
+# 3. Wait for the operator to resync (it reconciles within about 60s), then
+#    check that the CRs are synced and the native Secrets exist again.
+kubectl get infisicalsecrets -n "$NS"
+kubectl describe infisicalsecret -n "$NS" <name>   # if one is not synced
+
+# 4. Only aws-database-credentials comes from External Secrets Operator
+#    (templates/aws-rds-secret.yaml); ESO rebuilds it from Secrets Manager.
+kubectl get externalsecret -n "$NS"
+
+# 5. Recover the Helm release record (see the note below)
+helm upgrade --install knowledge-graph-analytics \
+  infrastructure/helm/knowledge-graph-analytics \
+  -n "$NS" -f <the values files used for this cluster>
+
+# 6. Restore application data with the "PostgreSQL Database Recovery" block
+#    in RUNBOOKS.md. It is not repeated here: it stops every writer and
+#    drops ragdb first, and it stops before touching anything when the
+#    database is RDS (as on AWS), where you restore from an RDS snapshot or
+#    point-in-time restore instead. Redis is copied into the pod but not
+#    loaded; Neo4j, configs and uploads are listed as SKIPPED.
 
 # Verify application functionality
-kubectl get pods -n knowledge-graph-analytics
+kubectl get pods -n "$NS"
 ```
+
+**Secrets and Helm history.** Velero backups run with
+`--exclude-resources secrets`, so no credential is ever written to the backup
+bucket. That includes `infisical-universal-auth`, the one Secret nothing
+re-creates automatically, which is why step 2 is manual. Helm 3 stores its
+release records as Secrets (`sh.helm.release.v1.<release>.v<n>`), so a
+restored namespace has no Helm history: `helm list` is empty and
+`helm rollback` has nothing to roll back to. Step 5 re-creates the release
+from the chart and values in git; the history restarts at revision 1.
 
 ### 3. Backup Testing
 

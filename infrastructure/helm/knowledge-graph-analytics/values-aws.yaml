@@ -62,9 +62,9 @@ backend:
     # 267685730035 = terraform output account_id; repos pushed to ECR in Task 2.
     # Immutable source tag and ECR digest for the AWS image build.
     repository: "267685730035.dkr.ecr.us-east-1.amazonaws.com/nous/backend"
-    tag: "df06c620e30500c6e119ef4e3072eb4de4e6720d"
-    digest: "sha256:a9b35b5e9c33becbe471a6546c79da6860bd984519b29c6df8cf55d363bda543"
-    sourceSha: "df06c620e30500c6e119ef4e3072eb4de4e6720d"
+    tag: "d05780eecdc38a21fe7aeca4c7a64bb972347cc2"
+    digest: "sha256:456ceff73771674c7b78e4d59648364a861319ab866d9573536aa87cac1169a1"
+    sourceSha: "d05780eecdc38a21fe7aeca4c7a64bb972347cc2"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -192,6 +192,19 @@ backend:
     # backend.image.sourceSha above.
     - name: HEALTH_EXPOSE_BUILD_SHA
       value: "true"
+    # Platform operators: comma-separated Supabase user UUIDs allowed to see
+    # host-wide metrics (/analytics/performance/system-health, the overview's
+    # system_health section, host-derived quality recommendations). Unset means
+    # nobody (fail-closed). Set the ids per environment as the
+    # PLATFORM_OPERATOR_USER_IDS key in Infisical app-secrets, never here: an
+    # env literal (even "") would override envFrom and would publish user ids
+    # in this public repo. GOO-673; see docs/engineering/gotchas.md.
+    - name: PLATFORM_OPERATOR_USER_IDS
+      valueFrom:
+        secretKeyRef:
+          name: app-secrets
+          key: PLATFORM_OPERATOR_USER_IDS
+          optional: true
     - name: AGENT_TOOL_REGISTRY_ENFORCEMENT_ENABLED
       value: "true"
     - name: PROJECT_SKILL_CATALOG_ENABLED

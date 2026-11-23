@@ -2,10 +2,13 @@
 User Behavior Analytics API endpoints
 """
 
+import asyncio
+import csv
+import io
 import logging
 import uuid
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -14,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from src.core.database import get_db, get_db_sync
 from src.core.dependencies import get_current_user
+from src.core.thread_offload import to_thread_finish_on_cancel
 from src.models.user import User
 from src.schemas.quality_metrics import (
     AnalyticsExportRequest,
@@ -22,11 +26,88 @@ from src.schemas.quality_metrics import (
     ContentUsageAnalytics,
     UserBehaviorAnalytics,
 )
-from src.services.quality.user_behavior_service import user_behavior_service
+from src.services.quality.user_behavior_service import (
+    analytics_window,
+    user_behavior_service,
+)
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
+
+async def _off_loop(
+    fn: Callable[..., Awaitable[_T]], /, *args: Any, **kwargs: Any
+) -> _T:
+    """Run a ``user_behavior_service`` coroutine in a worker thread.
+
+    The service is async in name only: every method opens a sync Session
+    (``next(get_db_sync())``) and queries it inline, with no real async I/O.
+    Awaiting it directly blocked the event loop for every query (GOO-643 /
+    API-5), so each call runs to completion on its own loop in a thread.
+    """
+    return await asyncio.to_thread(lambda: asyncio.run(fn(*args, **kwargs)))
+
+
 router = APIRouter()
+
+_EXPORT_DATA_TYPES = frozenset({"user_behavior", "content_usage"})
+# Formats the export actually produces. "json" (the schema default) returns
+# the structured rows; "csv" returns each table as CSV text. Anything else is
+# rejected instead of being echoed back over JSON data.
+_EXPORT_FORMATS = frozenset({"json", "csv"})
+# Same ceiling as the routes' ``days_back`` query parameter (le=365), plus a
+# day of slack for calendar-aligned windows.
+_EXPORT_MAX_WINDOW = timedelta(days=366)
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Analytics timestamps are stored as naive UTC; compare like with like."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+# A spreadsheet runs a cell that starts with one of these as a formula.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> Any:
+    """Make user-controlled text (titles, names) literal in a spreadsheet.
+
+    Only strings are prefixed, so a negative number stays a number (GOO-691).
+    """
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def _csv_table(rows: List[Dict[str, Any]]) -> str:
+    """Flat rows as CSV text, one column per key seen; "" if there are none."""
+    if not rows:
+        return ""
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=fieldnames, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(
+        {key: _csv_cell(value) for key, value in row.items()} for row in rows
+    )
+    return out.getvalue()
+
+
+def _export_as_csv(data_type: str, export_data: Dict[str, Any]) -> Dict[str, str]:
+    """One CSV table per section of ``export_data``."""
+    if data_type == "content_usage":
+        return {"content_usage": _csv_table(export_data["content_usage"])}
+    tables = {name: _csv_table(rows) for name, rows in export_data["trends"].items()}
+    pattern_rows = [
+        {"pattern": pattern, **row}
+        for pattern, rows in export_data["patterns"].items()
+        for row in rows
+    ]
+    tables["patterns"] = _csv_table(pattern_rows)
+    return tables
 
 
 @router.post("/sessions", response_model=dict)
@@ -39,19 +120,28 @@ def create_search_session(
     try:
         from src.models.quality_metrics import SearchSession
 
-        # Check if session already exists
+        token = session_data.get("session_id")
+        if not token or not isinstance(token, str):
+            raise HTTPException(status_code=422, detail="session_id is required")
+
+        # ``session_id`` is globally unique, so look it up by token, then only
+        # hand it back if it is the caller's own (same user and organization).
         existing_session = (
-            db.query(SearchSession)
-            .filter(SearchSession.session_id == session_data["session_id"])
-            .first()
+            db.query(SearchSession).filter(SearchSession.session_id == token).first()
         )
 
         if existing_session:
+            if str(existing_session.user_id) != str(current_user.id) or str(
+                existing_session.organization_id
+            ) != str(current_user.organization_id):
+                raise HTTPException(
+                    status_code=409, detail="session_id is already in use"
+                )
             return {"session_id": existing_session.session_id, "status": "existing"}
 
         # Create new session
         session = SearchSession(
-            session_id=session_data["session_id"],
+            session_id=token,
             user_id=current_user.id,
             organization_id=current_user.organization_id,
             user_agent=session_data.get("user_agent"),
@@ -71,6 +161,8 @@ def create_search_session(
             "created_at": session.created_at.isoformat(),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create search session: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -81,19 +173,29 @@ async def track_search_event(
     event_data: Dict[str, Any], current_user: User = Depends(get_current_user)
 ):
     """Track a search event for behavior analysis"""
+    # ``session_id`` is the token ``POST /sessions`` returned; it must be one
+    # of the caller's own sessions (the service returns None otherwise).
     try:
-        event = await user_behavior_service.track_search_event(
+        event = await _off_loop(
+            user_behavior_service.track_search_event,
             session_id=event_data["session_id"],
             query=event_data["query"],
             search_type=event_data["search_type"],
             results_count=event_data["results_count"],
             response_time=event_data["response_time"],
             user_id=str(current_user.id),
+            organization_id=(
+                str(current_user.organization_id)
+                if current_user.organization_id
+                else None
+            ),
             search_query_id=event_data.get("search_query_id"),
             page_number=event_data.get("page_number", 1),
             filters_applied=event_data.get("filters_applied"),
             sort_order=event_data.get("sort_order"),
         )
+        if event is None:
+            raise HTTPException(status_code=404, detail="Search session not found")
 
         return {
             "event_id": str(event.id),
@@ -101,6 +203,12 @@ async def track_search_event(
             "status": "tracked",
         }
 
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=422, detail="Missing required event field")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Malformed id in event")
     except Exception as e:
         logger.error(f"Failed to track search event: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -112,7 +220,8 @@ async def track_user_interaction(
 ):
     """Track user interaction with search results"""
     try:
-        success = await user_behavior_service.track_user_interaction(
+        success = await _off_loop(
+            user_behavior_service.track_user_interaction,
             session_id=interaction_data["session_id"],
             event_id=interaction_data["event_id"],
             interaction_type=interaction_data["interaction_type"],
@@ -140,7 +249,8 @@ async def get_my_behavior_analytics(
 ):
     """Get behavior analytics for the current user"""
     try:
-        metrics = await user_behavior_service.analyze_user_behavior(
+        metrics = await _off_loop(
+            user_behavior_service.analyze_user_behavior,
             user_id=str(current_user.id),
             days_back=days_back,
             organization_id=(
@@ -185,7 +295,9 @@ async def get_user_behavior_analytics(
         # Reject when the caller has no org, or the target is missing / in a
         # different org. Guard against None==None: a null-org caller must not
         # read other null-org users' behavior.
-        target_user = db.query(UserModel).filter(UserModel.id == user_id).first()
+        target_user = await to_thread_finish_on_cancel(
+            lambda: db.query(UserModel).filter(UserModel.id == user_id).first()
+        )
         if (
             not current_user.organization_id
             or not target_user
@@ -200,7 +312,8 @@ async def get_user_behavior_analytics(
         if str(current_user.id) != user_id and current_user.role.value != "admin":
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        metrics = await user_behavior_service.analyze_user_behavior(
+        metrics = await _off_loop(
+            user_behavior_service.analyze_user_behavior,
             user_id=user_id,
             days_back=days_back,
             organization_id=str(current_user.organization_id),
@@ -235,8 +348,10 @@ async def get_session_analysis(
         # rather than leaking another tenant's session — the admin role no
         # longer crosses the org boundary.
         try:
-            analysis = await user_behavior_service.analyze_session(
-                session_id, organization_id=str(current_user.organization_id)
+            analysis = await _off_loop(
+                user_behavior_service.analyze_session,
+                session_id,
+                organization_id=str(current_user.organization_id),
             )
         except ValueError:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -287,7 +402,8 @@ async def get_organization_behavior_trends(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        trends = await user_behavior_service.get_behavior_trends(
+        trends = await _off_loop(
+            user_behavior_service.get_behavior_trends,
             organization_id=str(current_user.organization_id),
             days_back=days_back,
             group_by=group_by,
@@ -316,8 +432,10 @@ async def get_behavioral_insights(
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
         # Get behavioral insights combining multiple data sources
-        insights = await user_behavior_service.get_behavioral_insights(
-            organization_id=str(current_user.organization_id), days_back=days_back
+        insights = await _off_loop(
+            user_behavior_service.get_behavioral_insights,
+            organization_id=str(current_user.organization_id),
+            days_back=days_back,
         )
 
         # Format response to match notebook expectations
@@ -369,8 +487,10 @@ async def get_organization_behavior_patterns(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        patterns = await user_behavior_service.identify_behavior_patterns(
-            organization_id=str(current_user.organization_id), min_sessions=min_sessions
+        patterns = await _off_loop(
+            user_behavior_service.identify_behavior_patterns,
+            organization_id=str(current_user.organization_id),
+            min_sessions=min_sessions,
         )
 
         return patterns
@@ -403,8 +523,9 @@ async def get_organization_user_behavior(
 
         # Get all users in the organization
 
-        users = db.execute(
-            text("""
+        users = await to_thread_finish_on_cancel(
+            lambda: db.execute(
+                text("""
             SELECT DISTINCT u.id
             FROM users u
             WHERE u.organization_id = :org_id
@@ -416,18 +537,20 @@ async def get_organization_user_behavior(
             ORDER BY u.created_at DESC
             LIMIT :limit
         """),
-            {
-                "org_id": current_user.organization_id,
-                "cutoff_date": datetime.utcnow() - timedelta(days=90),
-                "limit": limit * 2,  # Get more to filter
-            },
-        ).fetchall()
+                {
+                    "org_id": current_user.organization_id,
+                    "cutoff_date": datetime.utcnow() - timedelta(days=90),
+                    "limit": limit * 2,  # Get more to filter
+                },
+            ).fetchall()
+        )
 
         user_analytics = []
 
         for user in users:
             try:
-                metrics = await user_behavior_service.analyze_user_behavior(
+                metrics = await _off_loop(
+                    user_behavior_service.analyze_user_behavior,
                     user_id=str(user.id),
                     days_back=90,
                     use_cache=True,
@@ -476,8 +599,88 @@ async def get_organization_user_behavior(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _query_content_usage(
+    db: Session,
+    organization_id: Any,
+    days_back: int,
+    limit: int,
+    *,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Per-document usage rows for one organization (shared by two routes).
+
+    The window is ``[start_date, end_date)`` when given (naive UTC), otherwise
+    the last ``days_back`` days.
+    """
+    cutoff_date, end_date = analytics_window(days_back, start_date, end_date)
+    # Query content usage from search events
+    content_usage = db.execute(
+        text("""
+        SELECT
+            d.id as document_id,
+            d.title,
+            COUNT(DISTINCT s.user_id) as unique_users,
+            COUNT(DISTINCT se.session_id) as search_appearances,
+            COUNT(CASE WHEN se.clicked_results > 0 THEN 1 END) as total_clicks,
+            AVG(se.results_count) as avg_results_in_search,
+            MAX(se.created_at) as last_accessed
+        FROM documents d
+        JOIN search_results sr ON d.id = sr.document_id
+        JOIN search_queries sq ON sr.search_query_id = sq.id
+        JOIN search_events se ON sq.id = se.search_query_id
+        JOIN search_sessions s ON se.session_id = s.id
+        WHERE d.organization_id = :org_id
+            AND sq.organization_id = :org_id
+            AND se.organization_id = :org_id
+            AND s.organization_id = :org_id
+            AND se.created_at >= :cutoff_date
+            AND se.created_at < :end_date
+        GROUP BY d.id, d.title
+        HAVING COUNT(DISTINCT s.user_id) > 0
+        ORDER BY unique_users DESC, total_clicks DESC
+        LIMIT :limit
+    """),
+        {
+            "org_id": organization_id,
+            "cutoff_date": cutoff_date,
+            "end_date": end_date,
+            "limit": limit,
+        },
+    ).fetchall()
+
+    content_analytics = []
+
+    for content in content_usage:
+        # Calculate click-through rate
+        ctr = (
+            content.total_clicks / content.search_appearances
+            if content.search_appearances > 0
+            else 0
+        )
+
+        content_analytics.append(
+            {
+                "document_id": str(content.document_id),
+                "title": content.title,
+                "access_count": content.unique_users,
+                "search_appearances": content.search_appearances,
+                "total_clicks": content.total_clicks,
+                "click_through_rate": float(ctr),
+                "avg_results_in_search": float(content.avg_results_in_search or 0),
+                "last_accessed": (
+                    content.last_accessed.isoformat()
+                    if isinstance(content.last_accessed, datetime)
+                    else content.last_accessed
+                ),
+            }
+        )
+
+    return content_analytics
+
+
 @router.get("/content-usage")
-async def get_content_usage_analytics(
+def get_content_usage_analytics(
     days_back: int = Query(30, ge=1, le=365, description="Days of history to analyze"),
     limit: int = Query(50, ge=1, le=200, description="Maximum documents to return"),
     current_user: User = Depends(get_current_user),
@@ -491,62 +694,9 @@ async def get_content_usage_analytics(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-        # Query content usage from search events
-        content_usage = db.execute(
-            text("""
-            SELECT
-                d.id as document_id,
-                d.title,
-                COUNT(DISTINCT s.user_id) as unique_users,
-                COUNT(DISTINCT se.session_id) as search_appearances,
-                COUNT(CASE WHEN se.clicked_results > 0 THEN 1 END) as total_clicks,
-                AVG(se.results_count) as avg_results_in_search,
-                MAX(se.created_at) as last_accessed
-            FROM documents d
-            JOIN search_results sr ON d.id = sr.document_id
-            JOIN search_queries sq ON sr.search_query_id = sq.id
-            JOIN search_events se ON sq.id = se.search_query_id
-            JOIN search_sessions s ON se.session_id = s.id
-            WHERE d.organization_id = :org_id
-                AND se.created_at >= :cutoff_date
-            GROUP BY d.id, d.title
-            HAVING COUNT(DISTINCT s.user_id) > 0
-            ORDER BY unique_users DESC, total_clicks DESC
-            LIMIT :limit
-        """),
-            {
-                "org_id": current_user.organization_id,
-                "cutoff_date": datetime.utcnow() - timedelta(days=days_back),
-                "limit": limit,
-            },
-        ).fetchall()
-
-        content_analytics = []
-
-        for content in content_usage:
-            # Calculate click-through rate
-            ctr = (
-                content.total_clicks / content.search_appearances
-                if content.search_appearances > 0
-                else 0
-            )
-
-            content_analytics.append(
-                {
-                    "document_id": str(content.document_id),
-                    "title": content.title,
-                    "access_count": content.unique_users,
-                    "search_appearances": content.search_appearances,
-                    "total_clicks": content.total_clicks,
-                    "click_through_rate": float(ctr),
-                    "avg_results_in_search": float(content.avg_results_in_search or 0),
-                    "last_accessed": (
-                        content.last_accessed.isoformat()
-                        if content.last_accessed
-                        else None
-                    ),
-                }
-            )
+        content_analytics = _query_content_usage(
+            db, current_user.organization_id, days_back, limit
+        )
 
         return {
             "content_usage": content_analytics,
@@ -584,8 +734,8 @@ async def generate_behavior_report(
             # missing target with the same 403 so this is not an existence oracle.
             from src.models.user import User as UserModel
 
-            target_user = (
-                db.query(UserModel)
+            target_user = await to_thread_finish_on_cancel(
+                lambda: db.query(UserModel)
                 .filter(UserModel.id == report_request.user_id)
                 .first()
             )
@@ -598,7 +748,8 @@ async def generate_behavior_report(
             user_id = str(report_request.user_id)
 
         # Generate report
-        report = await user_behavior_service.generate_behavior_report(
+        report = await _off_loop(
+            user_behavior_service.generate_behavior_report,
             user_id=user_id,
             organization_id=str(current_user.organization_id),
             days_back=report_request.days_back,
@@ -621,6 +772,7 @@ async def export_behavior_data(
     export_request: AnalyticsExportRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db_sync),
 ):
     """Export behavior analytics data"""
     try:
@@ -630,31 +782,67 @@ async def export_behavior_data(
         if current_user.role not in [UserRole.ADMIN]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+        if export_request.data_type not in _EXPORT_DATA_TYPES:
+            raise HTTPException(status_code=400, detail="Unsupported data_type")
+
+        # Every request parameter is either honoured or rejected (API2B-2):
+        # the export covers exactly [start_date, end_date) in the requested
+        # format.
+        export_format = export_request.format.strip().lower()
+        if export_format not in _EXPORT_FORMATS:
+            raise HTTPException(
+                status_code=400, detail="Unsupported format; use json or csv"
+            )
+        start_date = _naive_utc(export_request.start_date)
+        end_date = _naive_utc(export_request.end_date)
+        if end_date <= start_date:
+            raise HTTPException(
+                status_code=400, detail="end_date must be after start_date"
+            )
+        if end_date - start_date > _EXPORT_MAX_WINDOW:
+            raise HTTPException(
+                status_code=400, detail="Export window is limited to 366 days"
+            )
+
         # Generate export data based on type
-        export_data = {}
+        export_data: Dict[str, Any] = {}
 
         if export_request.data_type == "user_behavior":
             # Get organization user behavior
-            trends = await user_behavior_service.get_behavior_trends(
+            trends = await _off_loop(
+                user_behavior_service.get_behavior_trends,
                 organization_id=str(current_user.organization_id),
-                days_back=(export_request.end_date - export_request.start_date).days,
                 group_by="day",
+                start_date=start_date,
+                end_date=end_date,
             )
             export_data["trends"] = trends
 
-            patterns = await user_behavior_service.identify_behavior_patterns(
-                organization_id=str(current_user.organization_id)
+            patterns = await _off_loop(
+                user_behavior_service.identify_behavior_patterns,
+                organization_id=str(current_user.organization_id),
+                start_date=start_date,
+                end_date=end_date,
             )
             export_data["patterns"] = patterns
 
         elif export_request.data_type == "content_usage":
-            # Get content usage
-            content_data = await get_content_usage_analytics(
-                days_back=(export_request.end_date - export_request.start_date).days,
+            # Sync Session query: keep it off the event loop (GOO-643 API-5).
+            export_data["content_usage"] = await to_thread_finish_on_cancel(
+                _query_content_usage,
+                db,
+                current_user.organization_id,
+                days_back=1,  # unused: the explicit window wins
                 limit=500,
-                current_user=current_user,
+                start_date=start_date,
+                end_date=end_date,
             )
-            export_data["content_usage"] = content_data["content_usage"]
+
+        data: Dict[str, Any] = (
+            _export_as_csv(export_request.data_type, export_data)
+            if export_format == "csv"
+            else export_data
+        )
 
         # Create export response
         export_response = AnalyticsExportResponse(
@@ -668,8 +856,12 @@ async def export_behavior_data(
         return {
             "export_id": export_response.export_id,
             "status": export_response.status,
-            "data": export_data,
-            "format": export_request.format,
+            "data": data,
+            "format": export_format,
+            "window": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
             "created_at": export_response.created_at,
         }
 

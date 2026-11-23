@@ -3,6 +3,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CodeBlock } from './CodeBlock';
+import { SafeMarkdownImage } from '@/components/markdown/SafeMarkdownImage';
 
 interface MarkdownRendererProps {
   content: string;
@@ -10,6 +11,8 @@ interface MarkdownRendererProps {
 }
 
 const MarkdownComponents = {
+  // SECURITY (GOO-636): never auto-load model-written remote images.
+  img: SafeMarkdownImage,
   code: ({ inline, className, children, ...props }: any) => {
     const match = /language-(\w+)/.exec(className || '');
     const language = match ? match[1] : '';

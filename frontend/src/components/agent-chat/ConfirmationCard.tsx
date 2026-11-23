@@ -57,15 +57,18 @@ export function ConfirmationCard({
   onCancel,
   isLoading,
 }: ConfirmationCardProps) {
-  const approveRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Focus the Approve button when the card mounts so keyboard users can act immediately.
+  // SECURITY (GOO-637): focus the card, not Approve, when it mounts. Keyboard
+  // users reach Approve with a deliberate Tab, so keystrokes they were already
+  // typing cannot approve a tool run. Escape still cancels.
   useEffect(() => {
-    approveRef.current?.focus();
+    dialogRef.current?.focus();
   }, []);
 
   return (
     <div
+      ref={dialogRef}
       role="alertdialog"
       aria-label="Approval needed"
       aria-describedby="fab-hitl-desc"
@@ -185,7 +188,6 @@ export function ConfirmationCard({
         style={{ borderColor: 'var(--nous-border-1)' }}
       >
         <button
-          ref={approveRef}
           onClick={onConfirm}
           disabled={isLoading}
           aria-label="Approve and run the requested action"

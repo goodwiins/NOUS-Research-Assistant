@@ -69,7 +69,19 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F"]
+select = [
+    "E",
+    "F",
+    # GOO-642: no blocking HTTP, subprocess or sleep inside `async def`.
+    # A ratchet: only the ASYNC rules backend/src is already clean on.
+    # ASYNC109/230/240 still have existing hits; add them once those are fixed.
+    "ASYNC210",
+    "ASYNC212",
+    "ASYNC220",
+    "ASYNC221",
+    "ASYNC222",
+    "ASYNC251",
+]
 ignore = [
     # Import ordering (handled by isort)
     "E402",   # Module level import not at top of file
@@ -92,6 +104,9 @@ ignore = [
 # deliberately NOT ignored: they are latent NameErrors, not style.
 
 [tool.ruff.lint.per-file-ignores]
+# The ASYNC ratchet above covers the API code only; scripts, notebooks and
+# test harnesses outside backend/src still have hits (13 as of 11-22).
+"!backend/src/**" = ["ASYNC"]
 "__init__.py" = ["F401", "F403", "F405"]
 "backend/src/tasks/*.py" = ["E402"]
 "backend/src/websocket/*.py" = ["F401", "F841"]
