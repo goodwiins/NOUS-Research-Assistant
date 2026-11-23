@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Breadcrumb, ErrorEvent, Log } from '@sentry/nextjs';
 import {
   FILTERED,
   MAX_KEYS,
+  MAX_SCAN_LENGTH,
   MAX_STRING_LENGTH,
   TRUNCATED_KEYS,
   OBJECT_PLACEHOLDER,
@@ -54,6 +55,70 @@ const TOOL_CALL = {
 const SSE_LINE =
   'data: {"type":"text-delta","delta":"Here is your private answer about the merger"}';
 const THREAD_TITLE = 'Divorce settlement strategy with Dr. Smith';
+
+// GOO-781: cost checks without wall-clock bounds, which flake on loaded CI
+// runners (GOO-773). Two checks replace them:
+//
+// 1. The cut (deterministic): a 5 MB input is cheap only because
+//    scrubString cuts it to MAX_SCAN_LENGTH before any pattern runs. Record
+//    the length of every string a regex replace runs on; none may be near
+//    the input's size. Below the cut the windowed patterns ({8,4096}) may
+//    rescan from each position, so cost there is bounded by the cut, not
+//    linear: the cut is the guarantee, and this is what it checks.
+// 2. Growth, for a shape that must stay linear: 16x the input must cost
+//    about 16x the time, not the ~256x of a quadratic pattern. Small and
+//    large runs alternate and medians are compared, so a load spike lands
+//    on both sizes (as in the citationParser test of #2314). The bound, 40,
+//    sits between the two.
+
+// A redaction can lengthen the cut text a little ("Token abcdefgh" becomes
+// "Token [Filtered]"), so later patterns see slightly more than the cut;
+// never anything near the 5 MB input.
+const MAX_SCAN_BOUND = MAX_SCAN_LENGTH * 2;
+
+/** Lengths of every string String.prototype.replace ran on during `run`. */
+function replacedLengths(run: () => void): number[] {
+  const spy = vi.spyOn(String.prototype, 'replace');
+  try {
+    run();
+    return spy.mock.contexts.map((self) => String(self).length);
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+const median = (values: number[]): number =>
+  [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+
+const GROWTH_BOUND = 40;
+
+/**
+ * How much longer a 16x larger input takes, as a median of interleaved runs.
+ * The default sizes, 256 and 4096, both sit within MAX_SCAN_LENGTH, so no
+ * cut changes the work between them.
+ */
+function growthRatio(
+  make: (length: number) => string,
+  smallLength = 256,
+  reps = 50
+): number {
+  const small = make(smallLength);
+  const large = make(smallLength * 16);
+  const time = (input: string): number => {
+    const start = performance.now();
+    for (let i = 0; i < reps; i += 1) scrubString(input);
+    return performance.now() - start;
+  };
+  time(small); // warm up
+  time(large);
+  const smallRuns: number[] = [];
+  const largeRuns: number[] = [];
+  for (let pair = 0; pair < 7; pair += 1) {
+    smallRuns.push(time(small));
+    largeRuns.push(time(large));
+  }
+  return median(largeRuns) / median(smallRuns);
+}
 
 /** Everything the hooks emit, flattened to one string for leak checks. */
 const dump = (value: unknown): string => JSON.stringify(value);
@@ -125,17 +190,20 @@ describe('cost is bounded (no quadratic patterns)', () => {
   it.each([
     ['5 MB hex run', HEX_5MB],
     ['5 MB email-like run with no @', EMAILISH_5MB],
-  ])('scrubs a %s in well under 50 ms', (_label, input) => {
-    scrubString('warm up');
-    const start = performance.now();
-    const out = scrubString(input);
-    const crumb = safeBeforeBreadcrumb({
-      category: 'console',
-      message: input,
-      data: { arguments: [input, input] },
+  ])('cuts a %s before any pattern runs on it', (_label, input) => {
+    let out = '';
+    let crumb: Breadcrumb | null = null;
+    const lengths = replacedLengths(() => {
+      out = scrubString(input);
+      crumb = safeBeforeBreadcrumb({
+        category: 'console',
+        message: input,
+        data: { arguments: [input, input] },
+      });
     });
-    const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(50);
+
+    expect(lengths.length).toBeGreaterThan(0);
+    expect(Math.max(...lengths)).toBeLessThan(MAX_SCAN_BOUND);
     expect(out.length).toBeLessThan(MAX_STRING_LENGTH + 40);
     expect(dump(crumb).length).toBeLessThan(2000);
   });
@@ -545,16 +613,16 @@ describe('tuning: ordinary error messages stay readable', () => {
 
   it('stays linear on a long run of dots after a scheme (#2278 delta review)', () => {
     // A run of dots that does not end the value is the slow shape for
-    // /[.!]+$/: every start position scans to the end and fails.
-    for (const value of [
-      `Token ${'.'.repeat(4080)}x`,
-      `Authorization: ${'.'.repeat(4000)}x`,
-    ]) {
-      scrubString(value); // warm up
-      const start = performance.now();
-      for (let i = 0; i < 100; i += 1) scrubString(value);
-      // The quadratic regex took 8-21 ms per call here (0.8 s+ for 100).
-      expect(performance.now() - start, value.slice(0, 14)).toBeLessThan(250);
+    // /[.!]+$/: every start position scans to the end and fails. That
+    // regex grows ~256x for 16x the dots; the loop that replaced it ~16x.
+    // 64 to 1024 characters: the Authorization rule captures at most 1024,
+    // so both sizes are wholly the captured value and do the same work.
+    for (const prefix of ['Token ', 'Authorization: ']) {
+      const ratio = growthRatio(
+        (n) => `${prefix}${'.'.repeat(n - prefix.length - 1)}x`,
+        64
+      );
+      expect(ratio, prefix).toBeLessThan(GROWTH_BOUND);
     }
   });
 });
@@ -696,11 +764,11 @@ describe('tuning: robustness', () => {
     ['5 MB of password: prefixes', 'password: '.repeat(500_000)],
     ['5 MB of Token words', 'Token abcdefgh '.repeat(333_334)],
     ['5 MB of cookie: prose', 'cookie: not set '.repeat(312_500)],
-  ])('scrubs %s in well under 50 ms', (_label, input) => {
-    scrubString('warm up');
-    const start = performance.now();
-    scrubString(input);
-    expect(performance.now() - start).toBeLessThan(50);
+  ])('cuts %s before any pattern runs on it', (_label, input) => {
+    const lengths = replacedLengths(() => scrubString(input));
+
+    expect(lengths.length).toBeGreaterThan(0);
+    expect(Math.max(...lengths)).toBeLessThan(MAX_SCAN_BOUND);
   });
 
   // GOO-773: this used to assert a 50 ms wall-clock bound, which flaked at

@@ -215,36 +215,81 @@ def check() -> None:
                     except OSError:
                         break
 
-        def wait_for(text: str, start: int = 0) -> None:
-            end = time.monotonic() + 12
+        # GOO-781: the waits below key on what the UI draws, not on fixed
+        # sleeps. The bounds are backstops only: generous, because a cold
+        # start compiles the app with tsx (over 12 s on a loaded runner),
+        # and each failure names what it was waiting for.
+        STARTUP_BOUND = 90.0
+        STEP_BOUND = 30.0
+        # Ink redraws the whole frame. While a command runs, the line under
+        # the composer footer reads "... · Esc to cancel"; typed input is not
+        # sent then (isSendDisabled) and a second command is dropped
+        # (runOperation returns early).
+        FOOTER = b"stop/exit"
+        BUSY = "· Esc to cancel".encode()
+
+        def screen() -> str:
+            return output.decode(errors="replace")[-3500:]
+
+        def settle(bound: float = 5.0) -> None:
+            """Drain until the app has stopped drawing for a moment, i.e. it
+            has handled the keys sent so far."""
+            end = time.monotonic() + bound
+            while time.monotonic() < end:
+                before = len(output)
+                drain(0.25)
+                if len(output) == before:
+                    return
+
+        def wait_for(text: str, start: int = 0, bound: float = STEP_BOUND) -> None:
+            end = time.monotonic() + bound
             while text.encode() not in output[start:] and time.monotonic() < end:
                 drain()
-            assert text.encode() in output[start:], output.decode(errors="replace")[
-                -3500:
-            ]
+            assert text.encode() in output[start:], (
+                f"Timed out after {bound:.0f}s waiting for {text!r}.\n{screen()}"
+            )
+
+        def wait_idle() -> None:
+            """Wait for a settled frame drawn after the previous command
+            finished: its busy line is gone from under the footer."""
+            end = time.monotonic() + STEP_BOUND
+            while time.monotonic() < end:
+                settle()
+                busy_at = output.rfind(BUSY)
+                if busy_at == -1 or busy_at < output.rfind(FOOTER):
+                    return
+                drain()
+            raise AssertionError(
+                f"The previous command was still running after {STEP_BOUND:.0f}s.\n"
+                f"{screen()}"
+            )
 
         def send(text: str) -> None:
             os.write(master, text.encode())
-            drain()
+            settle()
 
         def command(text: str, expected: str) -> None:
+            wait_idle()
             start = len(output)
             send(text)
             send("\r")
             wait_for(expected, start)
 
         def wait_saved(key: str, value: Any) -> None:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + STEP_BOUND
             while saved().get(key) != value and time.monotonic() < deadline:
                 drain()
-            assert saved().get(key) == value, output.decode(errors="replace")[-3500:]
+            assert saved().get(key) == value, (
+                f"Timed out after {STEP_BOUND:.0f}s waiting for config "
+                f"{key}={value!r} (have {saved().get(key)!r}).\n{screen()}"
+            )
 
         def saved() -> dict[str, Any]:
             data: dict[str, Any] = json.loads(Path(config, "config.json").read_text())
             return data
 
         try:
-            wait_for("Ask NOUS")
+            wait_for("Ask NOUS", bound=STARTUP_BOUND)
             wait_for("Locally saved question")
             wait_for("Could not refresh")
             assert b"Wrong sibling question" not in output
