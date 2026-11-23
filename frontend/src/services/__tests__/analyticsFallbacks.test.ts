@@ -30,6 +30,9 @@ vi.mock('@/services/api-client', () => ({
 
 const get = api.get as Mock;
 
+/** "Now" for the windowed chart: D is 2026-11-23 UTC, so D-6 is 11-17. */
+const NOW = new Date('2026-11-23T05:00:00Z');
+
 /** Answer each request by path prefix; anything unlisted fails like a 404. */
 function route(table: Record<string, unknown>): void {
   get.mockImplementation(async (url: string) => {
@@ -191,7 +194,7 @@ describe('trend getters call valid routes with the right parameters (GOO-649)', 
       '/analytics/performance/charts/search_volume': searchVolumeChartBody,
     });
 
-    const points = await performanceApi.getSearchVolumeTrend();
+    const points = await performanceApi.getSearchVolumeTrend(NOW);
 
     expect(get).toHaveBeenCalledWith(
       '/analytics/performance/charts/search_volume?time_range=7d&granularity=day'
@@ -201,6 +204,107 @@ describe('trend getters call valid routes with the right parameters (GOO-649)', 
       { name: '2026-11-21', date: '2026-11-21T00:00:00.000Z', value: 4 },
       { name: '2026-11-22', date: '2026-11-22T00:00:00.000Z', value: 9 },
     ]);
+  });
+
+  it('drops the partial D-7 bucket the utcnow()-7d cutoff lets in (8 buckets)', async () => {
+    // An active org: 8 daily buckets, the first only partly inside the window.
+    const days = [16, 17, 18, 19, 20, 21, 22, 23];
+    route({
+      '/analytics/performance/charts/search_volume': {
+        ...searchVolumeChartBody,
+        data: days.map((day, i) => ({
+          timestamp: `2026-11-${day}T00:00:00+00:00`,
+          value: i === 0 ? 1 : 10,
+        })),
+      },
+    });
+
+    const points = await performanceApi.getSearchVolumeTrend(NOW);
+
+    expect(points.map((p) => p.name)).toEqual([
+      '2026-11-17',
+      '2026-11-18',
+      '2026-11-19',
+      '2026-11-20',
+      '2026-11-21',
+      '2026-11-22',
+      '2026-11-23',
+    ]);
+    expect(points.every((p) => p.value === 10)).toBe(true);
+  });
+
+  it('keeps a sparse series as-is: days without searches stay absent', async () => {
+    route({
+      '/analytics/performance/charts/search_volume': {
+        ...searchVolumeChartBody,
+        data: [
+          { timestamp: '2026-11-19T00:00:00+00:00', value: 2.0 },
+          { timestamp: '2026-11-23T00:00:00+00:00', value: 5.0 },
+        ],
+      },
+    });
+
+    const points = await performanceApi.getSearchVolumeTrend(NOW);
+
+    expect(points.map((p) => [p.name, p.value])).toEqual([
+      ['2026-11-19', 2],
+      ['2026-11-23', 5],
+    ]);
+  });
+
+  it('cuts on the UTC day, not the local one, just after midnight UTC', async () => {
+    route({
+      '/analytics/performance/charts/search_volume': {
+        ...searchVolumeChartBody,
+        data: [
+          { timestamp: '2026-11-16T00:00:00+00:00', value: 1.0 },
+          { timestamp: '2026-11-17T00:00:00+00:00', value: 3.0 },
+        ],
+      },
+    });
+
+    const points = await performanceApi.getSearchVolumeTrend(
+      new Date('2026-11-23T00:30:00Z')
+    );
+
+    expect(points.map((p) => p.name)).toEqual(['2026-11-17']);
+  });
+
+  it('at exactly midnight UTC, the D-7 bucket is still out (cut is D-6 midnight, not now-7d)', async () => {
+    route({
+      '/analytics/performance/charts/search_volume': {
+        ...searchVolumeChartBody,
+        data: [
+          { timestamp: '2026-11-16T00:00:00+00:00', value: 1.0 },
+          { timestamp: '2026-11-17T00:00:00+00:00', value: 3.0 },
+        ],
+      },
+    });
+
+    const points = await performanceApi.getSearchVolumeTrend(
+      new Date('2026-11-23T00:00:00Z')
+    );
+
+    expect(points.map((p) => p.name)).toEqual(['2026-11-17']);
+  });
+
+  it('late in the UTC day the window is still D-6..D, whatever the local date', async () => {
+    // 23:30Z is already the 24th in Europe/Paris: a local-day cut would drop 11-17.
+    route({
+      '/analytics/performance/charts/search_volume': {
+        ...searchVolumeChartBody,
+        data: [
+          { timestamp: '2026-11-17T00:00:00+00:00', value: 3.0 },
+          { timestamp: '2026-11-23T00:00:00+00:00', value: 5.0 },
+        ],
+      },
+    });
+
+    const points = await performanceApi.getSearchVolumeTrend(
+      new Date('2026-11-23T23:30:00Z')
+    );
+
+    expect(points.map((p) => p.name)).toEqual(['2026-11-17', '2026-11-23']);
   });
 
   it('rejects a chart point without a usable timestamp', async () => {

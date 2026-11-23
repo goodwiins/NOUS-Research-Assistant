@@ -105,12 +105,8 @@ interface DashboardData {
   searchTypes: Array<{ name: string; value: number }> | null;
   fileTypeDistribution: ReturnType<typeof transformFileTypeForChart>;
   processingStats: ReturnType<typeof transformProcessingStats>;
-  /**
-   * The backend's 7 daily buckets, without `date`: AnalyticsChart drops points
-   * older than its own `now - 7d` cutoff, which would cut the first bucket
-   * (truncated to midnight) from a series the backend already windowed.
-   */
-  searchVolume: Array<{ name: string; value: number }> | null;
+  /** The last 7 UTC calendar days, already windowed by the service. */
+  searchVolume: DailyPoint[] | null;
   /** Admin only; `undefined` for other roles. */
   activeUserTrend?: DailyPoint[] | null;
 }
@@ -220,9 +216,7 @@ export async function fetchAnalyticsDashboard(
       processingStats: transformProcessingStats(
         fileStats?.processing_stats ?? []
       ),
-      searchVolume: searchVolume
-        ? searchVolume.map(({ name, value }) => ({ name, value }))
-        : null,
+      searchVolume,
       activeUserTrend,
     },
     failed: Array.from(new Set(failed)),
@@ -560,6 +554,10 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
                   data={data.searchVolume}
                   labels={{ value: 'Searches' }}
                   height={300}
+                  // The response is a fixed 7-day window: no prior period to
+                  // compare against, and no other range to select.
+                  showTrend={false}
+                  showTimeRange={false}
                 />
               )}
 

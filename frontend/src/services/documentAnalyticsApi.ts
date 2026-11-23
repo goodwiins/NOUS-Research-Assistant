@@ -498,6 +498,14 @@ export function parseBackendTimestamp(raw: unknown): Date {
   return date;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Whole UTC calendar days in the search-volume chart, today included. */
+const SEARCH_VOLUME_DAYS = 7;
+
+/** Midnight UTC of the calendar day `date` falls on, in epoch ms. */
+const utcDayStart = (date: Date): number =>
+  Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+
 const toDailyPoint = (period: unknown, value: unknown): DailyPoint => {
   const date = parseBackendTimestamp(period);
   return {
@@ -623,15 +631,23 @@ class PerformanceApiService {
    * requested granularity: 1h/24h are hourly, 7d is daily, and anything longer
    * is weekly (while the route still echoes `granularity`). So 7d is the only
    * range that yields per-day points. Days without searches are absent.
+   *
+   * The backend's cutoff is `utcnow() - 7d`, not a midnight, so an active
+   * organization gets up to 8 buckets: a partial day D-7 plus D-6 through D.
+   * Only the last 7 whole UTC calendar days (D-6 through today) are kept, so
+   * the partial bucket never shows as a full day.
    */
-  async getSearchVolumeTrend(): Promise<DailyPoint[]> {
+  async getSearchVolumeTrend(now: Date = new Date()): Promise<DailyPoint[]> {
     const response = await api.get<{
       data: Array<{ timestamp: string; value: number }>;
     }>(`${this.basePath}/charts/search_volume?time_range=7d&granularity=day`);
+    const firstDay = utcDayStart(now) - (SEARCH_VOLUME_DAYS - 1) * DAY_MS;
     return requireArray<{ timestamp: string; value: number }>(
       response?.data,
       'data'
-    ).map((point) => toDailyPoint(point.timestamp, point.value));
+    )
+      .map((point) => toDailyPoint(point.timestamp, point.value))
+      .filter((point) => Date.parse(point.date) >= firstDay);
   }
 }
 

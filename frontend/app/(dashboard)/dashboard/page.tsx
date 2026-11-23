@@ -148,11 +148,15 @@ export default function DashboardPage() {
 
   // `useDocuments` starts with a total of 0 before any fetch, so the card
   // waits for the first successful response instead of showing that default.
-  const documentsStat: StatValue = documentsError
-    ? null
-    : documentsLoaded
-      ? documentCount
-      : undefined;
+  // Signed out once auth has settled: nothing will be fetched, so every card
+  // is unavailable rather than loading forever.
+  const signedOut = !authLoading && !isAuthenticated;
+  const settled = (value: StatValue): StatValue => (signedOut ? null : value);
+
+  const documentsStat: StatValue = settled(
+    documentsError ? null : documentsLoaded ? documentCount : undefined
+  );
+  const processingStat = settled(processingCount);
 
   // Quick actions
   const quickActions = [
@@ -179,13 +183,17 @@ export default function DashboardPage() {
   // "Conversations" card (the old one read search sessions as chats).
   const statCards = [
     { label: 'Documents', value: documentsStat, icon: FileText },
-    { label: 'Searches, last 7 days', value: totalSearches, icon: Search },
+    {
+      label: 'Searches, last 7 days',
+      value: settled(totalSearches),
+      icon: Search,
+    },
     {
       label: 'Avg search time (ms), last 7 days',
-      value: avgSearchTimeMs,
+      value: settled(avgSearchTimeMs),
       icon: Clock,
     },
-    { label: 'Processing', value: processingCount, icon: Zap },
+    { label: 'Processing', value: processingStat, icon: Zap },
   ];
 
   const insights = [
@@ -434,7 +442,7 @@ export default function DashboardPage() {
               </div>
 
               <div className="p-6">
-                {processingCount === null ? (
+                {processingStat === null ? (
                   <p role="status" className="text-sm text-muted-foreground">
                     Document types are unavailable right now.
                   </p>

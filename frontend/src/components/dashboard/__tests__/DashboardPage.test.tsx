@@ -9,11 +9,14 @@ import { searchPerformanceBody } from '@/services/__tests__/fixtures/analyticsBa
 vi.mock('@/services/api-client', () => ({
   api: { get: vi.fn() },
 }));
+const session = vi.hoisted(() => ({ signedIn: true, isLoading: false }));
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({
-    isAuthenticated: true,
-    isLoading: false,
-    user: { id: 'me', email: 'me@example.test', role: 'user' },
+    isAuthenticated: session.signedIn,
+    isLoading: session.isLoading,
+    user: session.signedIn
+      ? { id: 'me', email: 'me@example.test', role: 'user' }
+      : null,
   }),
 }));
 const docs = vi.hoisted(() => ({
@@ -49,6 +52,8 @@ describe('DashboardPage stat cards (GOO-649)', () => {
   beforeEach(() => {
     get.mockReset();
     docs.state = { total: 7, hasLoaded: true, error: null };
+    session.signedIn = true;
+    session.isLoading = false;
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -129,6 +134,39 @@ describe('DashboardPage stat cards (GOO-649)', () => {
       expect(statCard('Processing')).toHaveTextContent('Unavailable right now')
     );
     expect(statCard('Processing')).not.toHaveTextContent('0');
+  });
+
+  it('a signed-out user sees unavailable cards, not an endless loading state', async () => {
+    session.signedIn = false;
+    // useDocuments does not fetch when signed out: loading false, no error.
+    docs.state = { total: 0, hasLoaded: false, error: null };
+
+    render(<DashboardPage />);
+
+    for (const label of [
+      'Documents',
+      'Searches, last 7 days',
+      'Avg search time (ms), last 7 days',
+      'Processing',
+    ]) {
+      expect(statCard(label)).toHaveTextContent('Unavailable right now');
+      expect(statCard(label)).not.toHaveTextContent('loading');
+    }
+    expect(
+      screen.getByText('Document types are unavailable right now.')
+    ).toBeInTheDocument();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('still shows loading while auth itself is loading', () => {
+    session.signedIn = false;
+    session.isLoading = true;
+    docs.state = { total: 0, hasLoaded: false, error: null };
+
+    render(<DashboardPage />);
+
+    expect(statCard('Documents')).toHaveTextContent('loading');
+    expect(statCard('Documents')).not.toHaveTextContent('Unavailable');
   });
 
   it('shows service health as not available yet, with no request and no Retry', async () => {
