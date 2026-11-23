@@ -29,7 +29,6 @@ This directory is the frontend's API client layer. Every call to the FastAPI bac
 | `featureFlags.tsx`              | Feature flag context and hooks — reads from `/api/v1/feature-flags/`.                                                                                                                               |
 | `nousCliAuth.ts`                | Auth token exchange for the NOUS CLI (desktop companion).                                                                                                                                           |
 | `projectChatService.ts`         | Chat completions scoped to a project context.                                                                                                                                                       |
-| `mockDocumentService.ts`        | Drop-in mock of `documentService` for tests and Storybook.                                                                                                                                          |
 
 ## HTTP client conventions
 
