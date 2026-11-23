@@ -57,10 +57,16 @@ back to the public registry.
 
 Static regression tests that fail loudly if a boundary above erodes:
 
-- `backend/tests/unit/architecture/test_workspace_boundaries.py` — workspace
-  route modules own no transaction/SQL, don't reach sideways into a sibling
-  resource module, and the compatibility shim resolves to the composed
-  routers.
+- `backend/tests/unit/architecture/test_workspace_boundaries.py` — each
+  workspace route handler owns at most one commit (and each resource module at
+  least one), never rolls back/flushes/refreshes, and doesn't reach sideways
+  into a sibling resource module; leaf thread services are flush-only; the
+  compatibility shim resolves to the composed routers. Route modules may still
+  issue read-only `select()`s; that is deliberately not banned.
+- `backend/tests/unit/architecture/test_agent_api_boundaries.py` — routers
+  under `src/api/agent` never commit/roll back/flush/refresh, open their own
+  sessions, or reference thread/workspace columns (scope goes through
+  `workspace_access`); recorded debt lives in a shrink-only allowlist.
 - `backend/tests/unit/architecture/test_maintenance_contracts.py` — every
   scope/access getter in `workspace_access.py` requires the caller's
   identity (fails closed).
