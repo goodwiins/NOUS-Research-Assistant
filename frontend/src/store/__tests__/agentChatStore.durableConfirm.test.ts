@@ -173,6 +173,84 @@ describe('durable confirmations take the durable path (FL2D-1)', () => {
   });
 });
 
+describe('a durable card clicked before its wait token lands (GOO-748)', () => {
+  const STILL_PREPARING = 'Still preparing this step — try again in a moment.';
+
+  function awaiting(waitTokenId?: string): ReturnType<typeof runStatus> {
+    return {
+      ...runStatus('WAITING'),
+      metadata: {
+        status: 'awaiting_confirmation',
+        ...(waitTokenId ? { waitTokenId } : {}),
+      },
+    };
+  }
+
+  beforeEach(() => {
+    useAgentChatStore.getState().reset();
+    vi.clearAllMocks();
+    serviceMocks.getDurableRunStatus.mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('re-reads the run and completes a token that arrived late', async () => {
+    parkDurableConfirmation(null);
+    serviceMocks.getDurableRunStatus
+      .mockResolvedValueOnce(awaiting('wait-late'))
+      .mockResolvedValue(
+        runStatus('COMPLETED', { result: { message: 'Ingested 1 paper.' } })
+      );
+
+    const p = useAgentChatStore.getState().confirmAction('thread-A', false);
+    await vi.advanceTimersByTimeAsync(2 * 3000);
+    await p;
+
+    expect(serviceMocks.completeDurableConfirmation).toHaveBeenCalledWith(
+      'run_cmabc123',
+      'wait-late',
+      false
+    );
+    const state = useAgentChatStore.getState();
+    expect(state.messages[0].content).toBe('Ingested 1 paper.');
+    expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+  });
+
+  it.each([
+    ['the run still has no token', () => Promise.resolve(awaiting())],
+    [
+      'the run has moved on',
+      () =>
+        Promise.resolve({
+          ...runStatus('EXECUTING'),
+          metadata: { status: 'running', waitTokenId: 'wait-old' },
+        }),
+    ],
+    [
+      'the status read fails',
+      () => Promise.reject(new Error('Failed to get run status: 502')),
+    ],
+  ])('keeps the card with a visible message when %s', async (_label, read) => {
+    parkDurableConfirmation(null);
+    serviceMocks.getDurableRunStatus.mockImplementation(read);
+
+    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+
+    expect(serviceMocks.getDurableRunStatus).toHaveBeenCalledWith(
+      'run_cmabc123'
+    );
+    expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+    expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+    const state = useAgentChatStore.getState();
+    expect(state.pendingConfirmations['thread-A']?.jobId).toBe('run_cmabc123');
+    expect(state.messages[0].content).toBe(STILL_PREPARING);
+    expect(state.isConfirming).toBe(false);
+    expect(state.isStreaming).toBe(false);
+  });
+});
+
 describe('durable polls survive a dropped request (FL2D-2)', () => {
   beforeEach(() => {
     useAgentChatStore.getState().reset();
