@@ -15,7 +15,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -524,3 +524,145 @@ async def test_an_unexpected_crash_replaces_stale_partial_flags(
     assert doc.get_metadata()["processing_partial"] is False
     assert results["errors"] == ["Document processing failed"]
     assert SECRET not in repr(job.error_message)
+
+
+# --- steps that catch their own errors leak nothing either -------------------
+
+
+def _strings(value: Any) -> List[str]:
+    """Every string anywhere inside ``value`` (dict keys and values, lists)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [x for k, v in value.items() for x in _strings(k) + _strings(v)]
+    if isinstance(value, (list, tuple)):
+        return [x for item in value for x in _strings(item)]
+    return []
+
+
+def _assert_no_secret(*stores: Any) -> None:
+    leaked = [text for store in stores for text in _strings(store) if SECRET in text]
+    assert leaked == []
+
+
+@pytest.mark.asyncio
+async def test_internally_caught_step_errors_leak_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.services.documents import document_quality_service as dqs
+    from src.services.knowledge_graph import knowledge_graph_service as kgs
+    from src.services.processing import entity_extraction_service as ees
+
+    entity = Entity(
+        entity_type=EntityType.PERSON,
+        name="Ada Lovelace",
+        confidence=0.9,
+        extraction_method=ExtractionMethod.SPACY,
+        properties={"start_char": 0, "end_char": 12},
+    )
+
+    class _Spacy:
+        def nlp(self, text: str) -> Any:
+            return object()
+
+        def extract_entities_from_text(self, document: Any, text: str) -> List[Any]:
+            return [entity]
+
+        def _extract_relationships(self, doc: Any, entities: Any) -> List[Any]:
+            raise RuntimeError(SECRET)
+
+    class _Quality:
+        def __init__(self, db: Any) -> None:
+            pass
+
+        async def comprehensive_quality_assessment(self, document: Any) -> dict:
+            raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    monkeypatch.setattr(ees, "EntityExtractionService", _Spacy)
+    monkeypatch.setattr(
+        kgs.knowledge_graph_service,
+        "create_entity",
+        AsyncMock(side_effect=RuntimeError(SECRET)),
+    )
+    monkeypatch.setattr(dqs, "DocumentQualityService", _Quality)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(
+        svc,
+        monkeypatch,
+        broken={
+            # The real steps: they catch their own errors and return them.
+            "Knowledge Graph Storage": svc.store_entities_in_knowledge_graph,
+            "Quality Assessment": svc.assess_quality,
+        },
+    )
+    doc, job = _real_doc(), ProcessingJob()
+
+    results = await svc.process_document(doc, job)
+
+    assert doc.processing_status == ProcessingStatus.COMPLETED
+    kg = results["knowledge_graph_storage"]
+    assert kg["errors"] == [
+        mps._KG_ENTITY_ERROR,
+        mps._KG_EXTRACTION_ERROR,
+    ]
+    assert results["quality_assessment"]["error"] == mps._QUALITY_ERROR
+    _assert_no_secret(results, doc.get_metadata(), job.result, job.error_message)
+
+
+@pytest.mark.asyncio
+async def test_a_knowledge_graph_crash_leaks_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.services.processing import entity_extraction_service as ees
+
+    def _crash() -> Any:
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(mps, "EntityExtractionService", _RealSignatureService)
+    monkeypatch.setattr(ees, "EntityExtractionService", _crash)
+    svc = _svc()
+    svc.processed_dir = tmp_path
+    _pipeline_with(
+        svc,
+        monkeypatch,
+        broken={"Knowledge Graph Storage": svc.store_entities_in_knowledge_graph},
+    )
+    doc, job = _real_doc(), ProcessingJob()
+
+    results = await svc.process_document(doc, job)
+
+    assert results["knowledge_graph_storage"]["errors"] == [mps._KG_STORAGE_ERROR]
+    _assert_no_secret(results, doc.get_metadata(), job.result)
+
+
+def test_retry_task_failure_leaks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.tasks import document_processing_tasks as dpt
+
+    job = ProcessingJob()
+    setattr(job, "retry_count", 0)
+    setattr(job, "max_retries", 3)
+    job.fail_job("earlier failure")
+    doc = _real_doc()
+
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.side_effect = [job, doc]
+    monkeypatch.setattr(dpt, "SessionLocal", lambda: db)
+
+    class _Service:
+        def __init__(self, db: Any) -> None:
+            pass
+
+        async def process_document(self, document: Any, job: Any) -> dict:
+            raise PermissionError(13, "Permission denied", SECRET)
+
+    monkeypatch.setattr(dpt, "MultimodalProcessingService", _Service)
+
+    result = dpt.retry_failed_processing.run(str(uuid4()))
+
+    assert result["status"] == "error"
+    assert result["error"] == dpt._RETRY_FAILED
+    assert job.status == JobStatus.FAILED
+    assert job.error_message == dpt._RETRY_FAILED
+    _assert_no_secret(result, job.error_message, job.result)

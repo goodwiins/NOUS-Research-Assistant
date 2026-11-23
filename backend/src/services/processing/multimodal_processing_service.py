@@ -97,6 +97,13 @@ def _shared_entity_service() -> EntityExtractionService:
 _PAGE_MARKER_RE = re.compile(r"\[Page \d+\]")
 _NEEDS_TEXT = frozenset({DocumentType.PDF, DocumentType.IMAGE})
 _NO_TEXT_ERROR = "No text could be extracted from this document"
+# Fixed messages for steps that catch their own errors: these land in
+# processing_results and job.result, which the API returns.
+_KG_ENTITY_ERROR = "Could not store an entity in the knowledge graph"
+_KG_RELATIONSHIP_ERROR = "Could not store a relationship in the knowledge graph"
+_KG_EXTRACTION_ERROR = "Could not extract relationships"
+_KG_STORAGE_ERROR = "Knowledge graph storage failed"
+_QUALITY_ERROR = "Quality assessment failed"
 # Step outputs that can carry a PDF's or image's text (step name -> key).
 _TEXT_OUTPUTS = (
     ("pdf_processing", "text_content"),
@@ -1146,10 +1153,13 @@ class MultimodalProcessingService:
                         f"Stored entity in knowledge graph: {entity.name} ({entity_type_str})"
                     )
 
-                except Exception as e:
-                    error_msg = f"Failed to store entity {entity.name}: {str(e)}"
-                    logger.warning(error_msg)
-                    results["errors"].append(error_msg)
+                except Exception:
+                    logger.warning(
+                        "Failed to store entity %r in the knowledge graph",
+                        entity.name,
+                        exc_info=True,
+                    )
+                    results["errors"].append(_KG_ENTITY_ERROR)
 
             # Extract and store relationships
             try:
@@ -1223,15 +1233,16 @@ class MultimodalProcessingService:
                             f"Stored relationship: {source_entity.name} --[{graph_rel_type.value}]--> {target_entity.name}"
                         )
 
-                    except Exception as e:
-                        error_msg = f"Failed to store relationship: {str(e)}"
-                        logger.warning(error_msg)
-                        results["errors"].append(error_msg)
+                    except Exception:
+                        logger.warning(
+                            "Failed to store a relationship in the knowledge graph",
+                            exc_info=True,
+                        )
+                        results["errors"].append(_KG_RELATIONSHIP_ERROR)
 
-            except Exception as e:
-                error_msg = f"Failed to extract relationships: {str(e)}"
-                logger.warning(error_msg)
-                results["errors"].append(error_msg)
+            except Exception:
+                logger.warning("Failed to extract relationships", exc_info=True)
+                results["errors"].append(_KG_EXTRACTION_ERROR)
 
             results["processing_time"] = time.time() - start_time
 
@@ -1241,13 +1252,15 @@ class MultimodalProcessingService:
 
             return results
 
-        except Exception as e:
-            logger.error(f"Failed to store entities in knowledge graph: {str(e)}")
+        except Exception:
+            logger.error(
+                "Failed to store entities in the knowledge graph", exc_info=True
+            )
             return {
                 "entities_stored": 0,
                 "relationships_stored": 0,
                 "processing_time": 0,
-                "errors": [str(e)],
+                "errors": [_KG_STORAGE_ERROR],
             }
 
     async def generate_embeddings(
@@ -1387,11 +1400,11 @@ class MultimodalProcessingService:
 
             return results
 
-        except Exception as e:
-            logger.error(f"Quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Quality assessment failed", exc_info=True)
             return {
                 "quality_assessment_performed": False,
-                "error": str(e),
+                "error": _QUALITY_ERROR,
                 "overall_score": 0.0,
             }
 

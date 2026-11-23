@@ -200,12 +200,17 @@ async def test_a_short_page_is_not_truncated_and_passes_the_window(
     spy = MagicMock(wraps=tracker.detect_changes)
     monkeypatch.setattr(tracker, "detect_changes", spy)  # type: ignore[method-assign]
 
+    # The clock is read around the call, not at import: under xdist a test
+    # can run minutes after collection.
+    before = datetime.now(timezone.utc)
     await _track(tracker, monkeypatch, {"cat:cs.AI": [_paper("a", NOW)]})
+    after = datetime.now(timezone.utc)
 
     kwargs = spy.call_args.kwargs
     assert kwargs["scan_truncated"] is False
     window_start = kwargs["window_start"]
-    assert abs((NOW - timedelta(days=7)) - window_start) < timedelta(minutes=1)
+    week = timedelta(days=7)
+    assert before - week <= window_start <= after - week
 
 
 # --- withdrawal confirmation ----------------------------------------------
