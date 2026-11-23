@@ -245,9 +245,9 @@ def check() -> None:
             end = time.monotonic() + bound
             while text.encode() not in output[start:] and time.monotonic() < end:
                 drain()
-            assert text.encode() in output[start:], (
-                f"Timed out after {bound:.0f}s waiting for {text!r}.\n{screen()}"
-            )
+            assert (
+                text.encode() in output[start:]
+            ), f"Timed out after {bound:.0f}s waiting for {text!r}.\n{screen()}"
 
         def wait_idle() -> None:
             """Wait for a settled frame drawn after the previous command
