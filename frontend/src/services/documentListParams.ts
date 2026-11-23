@@ -16,9 +16,23 @@ type BackendDocumentType = components['schemas']['DocumentType'];
 
 /** The backend's page-size bound (`size: Query(ge=1, le=100)`). */
 export const MAX_DOCUMENT_PAGE_SIZE = 100;
+/** The backend's default page size (`size: Query(20)`). */
+export const DEFAULT_DOCUMENT_PAGE_SIZE = 20;
+
+type FrontendFileType = NonNullable<DocumentFilters['file_type']>;
+
+/** A file type with no backend DocumentType: a programming error. */
+export class UnmappedDocumentTypeError extends Error {
+  constructor(readonly fileType: string) {
+    super(`No backend document_type for file type "${fileType}"`);
+    this.name = 'UnmappedDocumentTypeError';
+  }
+}
 
 // Frontend file types (extensions and modalities) -> backend DocumentType.
-const FILE_TYPE_TO_DOCUMENT_TYPE: Readonly<Record<string, BackendDocumentType>> = {
+// Exhaustive by type: a new frontend file type fails type-check until it is
+// mapped here.
+const FILE_TYPE_TO_DOCUMENT_TYPE: Readonly<Record<FrontendFileType, BackendDocumentType>> = {
   pdf: 'pdf',
   txt: 'text',
   text: 'text',
@@ -34,35 +48,40 @@ const FILE_TYPE_TO_DOCUMENT_TYPE: Readonly<Record<string, BackendDocumentType>> 
   multimodal: 'multimodal',
 };
 
-/** One value, or undefined when the selection is empty or names several. */
-function single<T>(values: Iterable<T>): T | undefined {
-  const unique = new Set(values);
-  return unique.size === 1 ? unique.values().next().value : undefined;
+const isProduction = (): boolean => process.env.NODE_ENV === 'production';
+
+function toDocumentType(fileType: string): BackendDocumentType | undefined {
+  const mapped = (FILE_TYPE_TO_DOCUMENT_TYPE as Readonly<Record<string, BackendDocumentType>>)[fileType];
+  if (mapped) return mapped;
+  // Only reachable through a cast. Fail loudly where a developer will see
+  // it; in production send no type filter rather than a value the backend
+  // rejects with a 422.
+  if (!isProduction()) throw new UnmappedDocumentTypeError(fileType);
+  return undefined;
 }
 
-/**
- * Build the list query. A filter that resolves to several values cannot be
- * expressed (the backend takes one), so it is not sent rather than sent in a
- * form the backend rejects.
- */
+/** A positive integer, or the fallback for NaN, Infinity and non-numbers. */
+const positiveInt = (value: number, fallback: number): number =>
+  Number.isFinite(value) ? Math.max(1, Math.floor(value)) : fallback;
+
+/** Build the list query: one value per filter, by type. */
 export function buildDocumentListQuery(
   page: number,
   pageSize: number,
   filters?: DocumentFilters
 ): DocumentListQuery {
   const query: DocumentListQuery = {
-    page: Math.max(1, Math.floor(page)),
-    size: Math.min(MAX_DOCUMENT_PAGE_SIZE, Math.max(1, Math.floor(pageSize))),
+    page: positiveInt(page, 1),
+    size: Math.min(
+      MAX_DOCUMENT_PAGE_SIZE,
+      positiveInt(pageSize, DEFAULT_DOCUMENT_PAGE_SIZE)
+    ),
   };
-  const documentType = single(
-    (filters?.file_types ?? []).flatMap((type) => {
-      const mapped = type ? FILE_TYPE_TO_DOCUMENT_TYPE[type] : undefined;
-      return mapped ? [mapped] : [];
-    })
-  );
-  if (documentType) query.document_type = documentType;
-  const status = single(filters?.status ?? []);
-  if (status) query.processing_status = status;
+  if (filters?.file_type) {
+    const documentType = toDocumentType(filters.file_type);
+    if (documentType) query.document_type = documentType;
+  }
+  if (filters?.status) query.processing_status = filters.status;
   if (filters?.search_term) query.search = filters.search_term;
   if (filters?.date_range) {
     query.date_from = filters.date_range.start;

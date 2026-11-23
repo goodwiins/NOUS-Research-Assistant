@@ -39,6 +39,18 @@ class WorkerStatsResponse(BaseModel):
     worker_details: List[Dict[str, Any]]
 
 
+# The Trigger.dev health monitor parses this with WorkerHealthResponseSchema
+# (src/trigger/_lib/schemas.ts); tests/trigger/worker-response-contract.test.mjs
+# fails if the two drift.
+class WorkerHealthResponse(BaseModel):
+    """Overall health of the Celery worker infrastructure"""
+
+    healthy: bool
+    workers_online: int
+    issues: List[str]
+    timestamp: str
+
+
 class QueueStatsResponse(BaseModel):
     """Queue statistics"""
 
@@ -325,8 +337,10 @@ def shutdown_worker(
         )
 
 
-@router.get("/health")
-def get_workers_health(current_user: User = Depends(require_platform_operator)):
+@router.get("/health", response_model=WorkerHealthResponse)
+def get_workers_health(
+    current_user: User = Depends(require_platform_operator),
+) -> WorkerHealthResponse:
     """
     Get overall health status of worker infrastructure
 
@@ -363,18 +377,18 @@ def get_workers_health(current_user: User = Depends(require_platform_operator)):
 
         healthy = workers_online > 0 and len(issues) == 0
 
-        return {
-            "healthy": healthy,
-            "workers_online": workers_online,
-            "issues": issues,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+        return WorkerHealthResponse(
+            healthy=healthy,
+            workers_online=workers_online,
+            issues=issues,
+            timestamp=datetime.utcnow().isoformat(),
+        )
 
     except Exception:
         logger.error("Worker health check failed", exc_info=True)
-        return {
-            "healthy": False,
-            "workers_online": 0,
-            "issues": ["Failed to check worker health"],
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+        return WorkerHealthResponse(
+            healthy=False,
+            workers_online=0,
+            issues=["Failed to check worker health"],
+            timestamp=datetime.utcnow().isoformat(),
+        )
