@@ -26,8 +26,11 @@
  *    navigations and history writes pass through it, and replay is stopped
  *    BEFORE the address bar shows a sensitive URL.
  * 3. Links whose target carries a query are blocked (`REPLAY_BLOCK_SELECTORS`):
- *    recorded as empty placeholders, with no `href`. So is every `iframe`,
- *    whose `srcdoc`/`src` would otherwise be recorded verbatim (GOO-746).
+ *    recorded as empty placeholders, with no `href`. So is every `iframe`
+ *    (GOO-746): the SDK's default already blocks `srcdoc`-only frames, but a
+ *    frame whose document it cannot read (cross-origin, such as a signed
+ *    viewer link) still has its URL recorded as `rr_src`, query and fragment
+ *    included.
  *
  * This module deliberately imports no Sentry runtime: callers pass the replay
  * integration, so the browser test can drive the real SDK with these exact
@@ -222,12 +225,14 @@ export function resetReplayPrivacyForTests(): void {
  * (SDK 10.78 `transformAttribute`), so `block` is the option that works.
  * Stylesheet `<link>`s are left alone so replays keep their styling.
  *
- * Every `iframe` is blocked too (GOO-746). Attributes are recorded verbatim
- * and text masking never applies to them, so an artifact preview's `srcdoc`
- * (model-written HTML that can hold user or document content) and a viewer's
- * `src` would be sent whole; a blocked iframe is a sized placeholder with no
- * attributes and no contents. `blockAllMedia` already covers `object` and
- * `embed`, but not `iframe`.
+ * Every `iframe` is blocked too (GOO-746). The SDK's default block list
+ * already covers `iframe[srcdoc]:not([src])`, so the artifact preview's
+ * `srcdoc` was never recorded. What it does not cover is a frame with a
+ * `src` whose document the recorder cannot read (cross-origin, such as a
+ * signed viewer link): rrweb records that URL as `rr_src`, query and fragment
+ * included, and text masking never applies to attributes. A blocked iframe is
+ * a sized placeholder with no attributes and no contents. `blockAllMedia`
+ * already covers `object` and `embed`, but not `iframe`.
  */
 export const REPLAY_BLOCK_SELECTORS = [
   'iframe',

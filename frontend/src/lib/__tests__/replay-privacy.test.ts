@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  REPLAY_BLOCK_SELECTORS,
+  REPLAY_PRIVACY_OPTIONS,
   hasSensitiveUrlParams,
   installReplayUrlGuard,
   resetReplayPrivacyForTests,
@@ -7,6 +9,7 @@ import {
   syncReplayWithUrl,
   type ReplayControl,
 } from '@/lib/replay-privacy';
+import { scrubReplayRecordingEvent } from '@/lib/sentry-scrub';
 
 describe('hasSensitiveUrlParams', () => {
   it.each([
@@ -207,5 +210,26 @@ describe('installReplayUrlGuard', () => {
     expect(window.history.pushState).toBe(wrapped);
     expect(() => window.history.pushState(null, '', '/search?q=x')).not.toThrow();
     expect(window.location.search).toBe('?q=x');
+  });
+});
+
+describe('REPLAY_PRIVACY_OPTIONS (GOO-746, GOO-774)', () => {
+  it('blocks every iframe', () => {
+    // The browser spec proves the effect but runs on pull requests only;
+    // this pins the selector on every unit run.
+    expect(REPLAY_BLOCK_SELECTORS).toContain('iframe');
+    expect(REPLAY_PRIVACY_OPTIONS.block).toContain('iframe');
+  });
+
+  it('masks text, blocks media and query links, and scrubs recorded URLs', () => {
+    expect(REPLAY_PRIVACY_OPTIONS).toEqual({
+      maskAllText: true,
+      blockAllMedia: true,
+      block: [...REPLAY_BLOCK_SELECTORS],
+      beforeAddRecordingEvent: scrubReplayRecordingEvent,
+    });
+    expect(REPLAY_BLOCK_SELECTORS).toEqual(
+      expect.arrayContaining(['a[href*="?"]', 'a[href*="#"][href*="="]'])
+    );
   });
 });

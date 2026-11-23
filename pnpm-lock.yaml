@@ -126,9 +126,6 @@ importers:
       '@statsig/react-bindings':
         specifier: ^3.33.0
         version: 3.33.8(react@18.3.1)
-      '@statsig/session-replay':
-        specifier: ^3.33.0
-        version: 3.33.8
       '@statsig/web-analytics':
         specifier: ^3.33.0
         version: 3.33.8
@@ -3158,15 +3155,6 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@rrweb/record@2.1.7':
-    resolution: {integrity: sha512-lIAbWdH8JwRuujURxTBtgrlsPvyBUGXUa9aB5hK8s5DdHgagyLFkIaAWhtthuOwT3o4o4+w38yUVPLc3W2oOrw==}
-
-  '@rrweb/types@2.2.1':
-    resolution: {integrity: sha512-GGUGQXekOJ35Ab644SO6iWU7vWpXiGPz1B5egTsPEwNTHv+syXWOoe2rXwB1NQOs64XirHzHqYX6SSYaJme3Cg==}
-
-  '@rrweb/utils@2.2.1':
-    resolution: {integrity: sha512-aRubNFue2PeI6ZlesjNfAJeXE2okDEiIpspvC03aotTRgbmJ0SXSsrBbYcWVCM6o7E5aNolmb7m7SKmUyCLDnQ==}
-
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
 
@@ -3495,9 +3483,6 @@ packages:
     peerDependencies:
       react: ^16.6.3 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
-  '@statsig/session-replay@3.33.8':
-    resolution: {integrity: sha512-JdivvUqy+eZTOGU9AMBNrntWOTHyyEm29vUtDbB+pVz4a2nmp7poWxbbvbRRnfJtqyRAmJ/49stXxo2HPt0mig==}
-
   '@statsig/web-analytics@3.33.8':
     resolution: {integrity: sha512-Pjiav8UVOPzOzDbKCjL/RcyYEL0j0UomvL9b3iCur2x5qwcP8ELq0P9JKKw9tOH2nKWAJP/KRCH6BppP8HdFIQ==}
 
@@ -3744,9 +3729,6 @@ packages:
 
   '@types/cors@2.8.19':
     resolution: {integrity: sha512-mFNylyeyqN93lfe/9CSxOGREz8cpzAhH+E93xJ4xWQf62V8sQ/24reV2nyzUWM6H6Xji+GGHpkbLe7pVoUEskg==}
-
-  '@types/css-font-loading-module@0.0.7':
-    resolution: {integrity: sha512-nl09VhutdjINdWyXxHWN/w9zlNCfr60JUqJbd24YXUuCwgeL0TpFSdElCwb6cxfB6ybE19Gjj4g0jsgkXxKv1Q==}
 
   '@types/d3-array@3.2.2':
     resolution: {integrity: sha512-hOLWVbm7uRza0BYXpIIW5pxfrKe0W+D5lrFiAEYR+pb6w3N2SwSMaJbXdUfSEv+dT4MfHBLtn5js0LAWaO6otw==}
@@ -4389,9 +4371,6 @@ packages:
   '@webassemblyjs/wast-printer@1.14.1':
     resolution: {integrity: sha512-kPSSXE6De1XOR820C90RIo2ogvZG+c3KiHzqUoO/F34Y2shGzesfqv7o57xrxovZJH/MetF5UjroJ/R/3isoiw==}
 
-  '@xstate/fsm@1.6.5':
-    resolution: {integrity: sha512-b5o1I6aLNeYlU/3CPlj/Z91ybk1gUsKT+5NAJI+2W4UjvS5KLG28K9v5UvNoFVjHV8PajVZ00RH3vnjyQO7ZAw==}
-
   '@xtuc/ieee754@1.2.0':
     resolution: {integrity: sha512-DX8nKgqcGwsc0eJSqYt5lwP4DH5FlHnmuWWBRy7X0NcaGR0ZtuyeESgMwTYVEtxmsNGY+qit4QYT/MIYTOTPeA==}
 
@@ -4743,10 +4722,6 @@ packages:
 
   bare-url@2.4.3:
     resolution: {integrity: sha512-Kccpc7ACfXaxfeInfqKcZtW4pT5YBn1mesc4sCsun6sRwtbJ4h+sNOaksUpYEJUKfN65YWC6Bw2OJEFiKxq8nQ==}
-
-  base64-arraybuffer@1.0.2:
-    resolution: {integrity: sha512-I3yl4r9QB5ZRY3XuJVEPfc2XhZO6YweFPI+UovAzn+8/hb3oJ6lnysaFcjVpkCPfVWFUDvoZ8kmVDP7WyRtYtQ==}
-    engines: {node: '>= 0.6.0'}
 
   base64-js@1.5.1:
     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
@@ -8135,20 +8110,11 @@ packages:
     resolution: {integrity: sha512-nLTrUKm2UyiL7rlhapu/Zl45FwNgkZGaCpZbIHajDYgwlJCOzLSk+cIPAnsEqV955GjILJnKbdQC1nVPz+gAYQ==}
     engines: {node: '>= 18'}
 
-  rrdom@2.2.1:
-    resolution: {integrity: sha512-nUrhXH2DyD62+9hru7mrPhtbF0CVobMdJzhl0uIgoMtaLS2vN4mNrRL/DmC/gpEH4EO0JlmWH7lzdqaY90fGgA==}
-
   rrweb-cssom@0.7.1:
     resolution: {integrity: sha512-TrEMa7JGdVm0UThDJSx7ddw5nVm3UJS9o9CCIZ72B1vSyEZoziDqBYP3XIoi/12lKrJR8rE3jeFHMok2F/Mnsg==}
 
   rrweb-cssom@0.8.0:
     resolution: {integrity: sha512-guoltQEx+9aMf2gDZ0s62EcV8lsXR+0w8915TC3ITdn2YueuNjdAYh/levpU9nFaoChh9RUS5ZdQMrKfVEN9tw==}
-
-  rrweb-snapshot@2.2.1:
-    resolution: {integrity: sha512-BkpFnPYoSKjSGe9rWnSo5ZQH0OnIzubTl7Lk3vyX6ktM1NaXkkPQwx3SNhdhrDS0Ja+ndlvYaNF0I1WG0exCtQ==}
-
-  rrweb@2.1.7:
-    resolution: {integrity: sha512-UZzK43vVmbtBt5WyEVO/CO8q9hKi38LRZDQS5C+X+FYgpVLK4vhWyUzzi1K0iXzHFb3MOVaTak5TAsdK5K6V6Q==}
 
   run-applescript@7.1.0:
     resolution: {integrity: sha512-DPe5pVFaAsinSaV6QjQ6gdiedWDcRCbUuiQfQa2wmWV7+xC9bGulGI8+TdRmoFkAPaBXk8CrAbnlY2ISniJ47Q==}
@@ -11954,16 +11920,6 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.2':
     optional: true
 
-  '@rrweb/record@2.1.7':
-    dependencies:
-      '@rrweb/types': 2.2.1
-      '@rrweb/utils': 2.2.1
-      rrweb: 2.1.7
-
-  '@rrweb/types@2.2.1': {}
-
-  '@rrweb/utils@2.2.1': {}
-
   '@rtsao/scc@1.1.0': {}
 
   '@s2-dev/streamstore@0.22.10':
@@ -12367,12 +12323,6 @@ snapshots:
       '@statsig/js-client': 3.33.8
       react: 18.3.1
 
-  '@statsig/session-replay@3.33.8':
-    dependencies:
-      '@rrweb/record': 2.1.7
-      '@statsig/client-core': 3.33.8
-      rrweb: 2.1.7
-
   '@statsig/web-analytics@3.33.8':
     dependencies:
       '@statsig/client-core': 3.33.8
@@ -12675,8 +12625,6 @@ snapshots:
   '@types/cors@2.8.19':
     dependencies:
       '@types/node': 26.6.6
-
-  '@types/css-font-loading-module@0.0.7': {}
 
   '@types/d3-array@3.2.2': {}
 
@@ -13349,8 +13297,6 @@ snapshots:
       '@webassemblyjs/ast': 1.14.1
       '@xtuc/long': 4.2.2
 
-  '@xstate/fsm@1.6.5': {}
-
   '@xtuc/ieee754@1.2.0': {}
 
   '@xtuc/long@4.2.2': {}
@@ -13682,8 +13628,6 @@ snapshots:
   bare-url@2.4.3:
     dependencies:
       bare-path: 3.0.0
-
-  base64-arraybuffer@1.0.2: {}
 
   base64-js@1.5.1: {}
 
@@ -17795,28 +17739,9 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  rrdom@2.2.1:
-    dependencies:
-      rrweb-snapshot: 2.2.1
-
   rrweb-cssom@0.7.1: {}
 
   rrweb-cssom@0.8.0: {}
-
-  rrweb-snapshot@2.2.1:
-    dependencies:
-      postcss: 8.5.23
-
-  rrweb@2.1.7:
-    dependencies:
-      '@rrweb/types': 2.2.1
-      '@rrweb/utils': 2.2.1
-      '@types/css-font-loading-module': 0.0.7
-      '@xstate/fsm': 1.6.5
-      base64-arraybuffer: 1.0.2
-      mitt: 3.0.1
-      rrdom: 2.2.1
-      rrweb-snapshot: 2.2.1
 
   run-applescript@7.1.0: {}
 
