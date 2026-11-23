@@ -46,6 +46,20 @@ from .tracer import (
 logger = get_logger(__name__)
 
 
+def _route_template(request: Request) -> str:
+    """The matched route's path template (``/api/v1/threads/{thread_id}``).
+
+    Metric labels must have bounded cardinality: the raw URL path carries
+    ids, so every thread or document would become its own time series.
+    Routing records the matched route on the shared ASGI scope, which is
+    readable here after ``call_next``. Requests no route matched (404s,
+    probes for random paths) collapse into one ``unmatched`` series.
+    """
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) and path else "unmatched"
+
+
 class ObservabilityMiddleware(BaseHTTPMiddleware):
     """Middleware for automatic HTTP request tracing and metrics"""
 
@@ -99,15 +113,13 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                     # Record metrics
                     attributes = {
                         "method": request.method,
-                        "path": request.url.path,
+                        "path": _route_template(request),
                         "status_code": str(status_code),
                         "status_class": f"{status_code // 100}xx",
                     }
-
-                    if user_id:
-                        attributes["user_id"] = user_id
-                    if tenant_id:
-                        attributes["tenant_id"] = tenant_id
+                    # user_id / tenant_id stay in logs and the correlation
+                    # context, not metric labels: they come from client
+                    # headers, so as labels they are unbounded and caller-set.
 
                     record_histogram(
                         "http_request_duration_seconds", duration, attributes
@@ -136,7 +148,7 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                     duration = time.time() - start_time
                     error_attrs = {
                         "method": request.method,
-                        "path": request.url.path,
+                        "path": _route_template(request),
                         "error_type": type(e).__name__,
                     }
 

@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import wraps
@@ -23,6 +24,7 @@ except ImportError:
     redis = None
 
 from src.config.analytics_config import get_analytics_config
+from src.core.config import settings
 from src.exceptions.analytics_exceptions import CacheError, CacheMissError
 
 logger = logging.getLogger(__name__)
@@ -71,7 +73,44 @@ class CacheTTL:
     EXPORTS = 7200  # 2 hours
 
 
+# After any Redis failure the cache serves from memory for this long, then
+# makes ONE background reconnect attempt: a Redis outage costs one attempt
+# per window, never one per request (circuit breaker, fail open).
 _RECONNECT_INTERVAL_SECONDS = 30.0
+# Analytics caching is an optimisation: a slow or black-holed Redis must cost
+# well under a second, after which the call falls back to memory.
+_REDIS_CONNECT_TIMEOUT_S = 0.5
+_REDIS_OP_TIMEOUT_S = 0.5
+_SCAN_BATCH = 500
+
+
+def _redis_url(config: Any) -> Optional[str]:
+    """``ANALYTICS_redis_analytics_url`` if set, else the app-wide ``REDIS_URL``.
+
+    No deployment sets the analytics-specific variable; the live pods get
+    Redis only as ``REDIS_URL`` from the ``redis-credentials`` Secret.
+    """
+    return config.redis_analytics_url or getattr(settings, "REDIS_URL", None) or None
+
+
+def _glob_escape(value: str) -> str:
+    """Escape Redis glob metacharacters so ``value`` matches only itself."""
+    return re.sub(r"([*?\[\]\\])", r"\\\1", value)
+
+
+def _glob_regex(pattern: str) -> "re.Pattern[str]":
+    """Redis glob (``*``, ``?``, backslash escapes) as an anchored regex."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\" and i + 1 < len(pattern):
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        out.append(".*" if char == "*" else "." if char == "?" else re.escape(char))
+        i += 1
+    return re.compile("".join(out) + r"\Z", re.DOTALL)
 
 
 class AnalyticsCache:
@@ -87,67 +126,102 @@ class AnalyticsCache:
         # not have. The old code called the async _init_redis() without
         # awaiting it, so Redis never connected and every pod silently used
         # its own in-memory cache. Connect lazily on first use instead.
-        self._redis_enabled = bool(
-            REDIS_AVAILABLE and self.config.redis_analytics_url
-        )
+        self._redis_url = _redis_url(self.config)
+        self._redis_enabled = bool(REDIS_AVAILABLE and self._redis_url)
         self._next_connect_attempt = 0.0
-        self._connect_lock: Optional[asyncio.Lock] = None
-        self._connect_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._connect_task: Optional[asyncio.Task] = None
+        self._connect_task_loop: Optional[asyncio.AbstractEventLoop] = None
 
         if not self._redis_enabled:
             logger.warning("Redis not available, using in-memory fallback cache")
 
-    async def connect(self) -> bool:
-        """Connect to Redis if enabled and not yet connected.
+    def _ensure_connecting(self) -> None:
+        """Start a background connect if one is due. Never waits for it.
 
-        Safe to call repeatedly; a failed attempt is retried at most every
-        ``_RECONNECT_INTERVAL_SECONDS`` so a Redis outage does not add a
-        connect timeout to every cache call.
+        Request paths call this, so a cold or black-holed Redis never adds
+        a connect to a request: the call is served from memory and Redis is
+        used from the next call once the background attempt succeeds.
         """
         if self._connected or not self._redis_enabled:
-            return self._connected
+            return
         loop = asyncio.get_running_loop()
+        task = self._connect_task
+        if task is not None and not task.done() and self._connect_task_loop is loop:
+            return  # one attempt in flight
         if loop.time() < self._next_connect_attempt:
-            return False
-        # A Lock binds to the loop it is first used on; the module singleton
-        # can outlive a loop (tests, worker restarts), so keep one per loop.
-        if self._connect_lock is None or self._connect_lock_loop is not loop:
-            self._connect_lock = asyncio.Lock()
-            self._connect_lock_loop = loop
-        async with self._connect_lock:
-            if self._connected:
-                return True
-            if loop.time() < self._next_connect_attempt:
-                return False
-            await self._init_redis()
-            if not self._connected:
-                self._next_connect_attempt = (
-                    loop.time() + _RECONNECT_INTERVAL_SECONDS
-                )
+            return  # breaker open
+        self._next_connect_attempt = loop.time() + _RECONNECT_INTERVAL_SECONDS
+        self._connect_task = loop.create_task(self._init_redis())
+        self._connect_task_loop = loop
+
+    async def connect(self) -> bool:
+        """Connect now and wait for the result (startup, warm-up, health).
+
+        Bounded by ``_REDIS_CONNECT_TIMEOUT_S``. Request paths use
+        ``_ensure_connecting`` instead and never wait.
+        """
+        self._ensure_connecting()
+        task = self._connect_task
+        if (
+            task is not None
+            and not task.done()
+            and self._connect_task_loop is asyncio.get_running_loop()
+        ):
+            await asyncio.shield(task)
         return self._connected
 
-    async def _init_redis(self):
-        """Initialize Redis connection"""
+    def _trip(self, operation: str, exc: BaseException) -> None:
+        """Open the breaker after a Redis failure: memory only for a window."""
+        logger.warning(
+            "Analytics Redis %s failed (%s); serving from memory for %.0fs",
+            operation,
+            type(exc).__name__,
+            _RECONNECT_INTERVAL_SECONDS,
+        )
+        self._connected = False
+        client, self.redis_client = self.redis_client, None
         try:
-            self.redis_client = redis.from_url(
-                self.config.redis_analytics_url,
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._next_connect_attempt = loop.time() + _RECONNECT_INTERVAL_SECONDS
+        if client is not None:
+            loop.create_task(self._close_quietly(client))
+
+    @staticmethod
+    async def _close_quietly(client: Any) -> None:
+        try:
+            close = getattr(client, "aclose", None) or client.close
+            await close()
+        except Exception:
+            pass
+
+    async def _init_redis(self) -> None:
+        """Open and ping a client; on failure leave the cache in memory mode."""
+        client = None
+        try:
+            client = redis.from_url(
+                self._redis_url,
                 encoding="utf-8",
                 decode_responses=True,  # Use string responses for JSON serialization
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
+                socket_connect_timeout=_REDIS_CONNECT_TIMEOUT_S,
+                socket_timeout=_REDIS_OP_TIMEOUT_S,
+                retry_on_timeout=False,  # a retry would double every bounded wait
                 health_check_interval=30,
             )
-
-            # Test connection
-            await self.redis_client.ping()
+            await client.ping()
+            self.redis_client = client
             self._connected = True
             logger.info("Analytics cache connected to Redis")
-
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            logger.warning(
+                "Analytics cache could not connect to Redis (%s); using memory",
+                type(e).__name__,
+            )
             self.redis_client = None
             self._connected = False
+            if client is not None:
+                await self._close_quietly(client)
 
     def _get_fallback_key(self, key: str) -> str:
         """Get fallback cache key"""
@@ -176,7 +250,7 @@ class AnalyticsCache:
         """Get value from cache"""
         try:
             # Try Redis first
-            await self.connect()
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
                     value = await self.redis_client.get(key)
@@ -190,7 +264,7 @@ class AnalyticsCache:
                             )
                             return None
                 except Exception as e:
-                    logger.warning(f"Redis get failed for key {key}: {e}")
+                    self._trip("get", e)
 
             # Fallback to in-memory cache
             if use_fallback:
@@ -210,7 +284,7 @@ class AnalyticsCache:
         """Set value in cache"""
         try:
             # Try Redis first
-            await self.connect()
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
                     # Serialize value using JSON (secure, prevents arbitrary code execution)
@@ -235,7 +309,7 @@ class AnalyticsCache:
                     return True
 
                 except Exception as e:
-                    logger.warning(f"Redis set failed for key {key}: {e}")
+                    self._trip("set", e)
 
             # Fallback to in-memory cache
             if use_fallback:
@@ -262,12 +336,12 @@ class AnalyticsCache:
             success = True
 
             # Delete from Redis
-            await self.connect()
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
                     await self.redis_client.delete(key)
                 except Exception as e:
-                    logger.warning(f"Redis delete failed for key {key}: {e}")
+                    self._trip("delete", e)
                     success = False
 
             # Delete from fallback cache
@@ -282,30 +356,33 @@ class AnalyticsCache:
             return False
 
     async def invalidate_pattern(self, pattern: str) -> int:
-        """Invalidate all cache keys matching pattern"""
+        """Invalidate all cache keys matching a Redis glob ``pattern``.
+
+        Uses SCAN, never KEYS: KEYS walks the whole keyspace in one blocking
+        call, and this Redis is shared with the Celery broker.
+        """
         try:
             deleted_count = 0
 
-            # Delete from Redis
-            await self.connect()
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
-                    keys = await self.redis_client.keys(pattern)
-                    if keys:
-                        deleted_count = await self.redis_client.delete(*keys)
+                    batch: List[str] = []
+                    async for key in self.redis_client.scan_iter(
+                        match=pattern, count=_SCAN_BATCH
+                    ):
+                        batch.append(key)
+                        if len(batch) >= _SCAN_BATCH:
+                            deleted_count += await self.redis_client.delete(*batch)
+                            batch = []
+                    if batch:
+                        deleted_count += await self.redis_client.delete(*batch)
                 except Exception as e:
-                    logger.warning(f"Redis pattern delete failed: {e}")
+                    self._trip("invalidate", e)
 
-            # Delete from fallback cache
-            pattern = pattern.replace("*", ".*")
-            fallback_pattern = f"fallback:{pattern}"
-
-            keys_to_delete = [
-                key
-                for key in self.fallback_cache.keys()
-                if fallback_pattern.replace(".*", "") in key
-            ]
-
+            # The in-memory fallback honours the same glob.
+            matcher = _glob_regex(self._get_fallback_key(pattern))
+            keys_to_delete = [key for key in self.fallback_cache if matcher.match(key)]
             for key in keys_to_delete:
                 self.fallback_cache.pop(key, None)
                 self.fallback_cache_expiry.pop(key, None)
@@ -371,12 +448,14 @@ class AnalyticsCache:
 
     async def invalidate_organization_data(self, organization_id: str) -> int:
         """Invalidate all cache data for an organization"""
-        pattern = f"analytics:*:*{organization_id}:*"
+        # The org is its own segment: ``*{org}`` would also match any org id
+        # ending in this one, and an unescaped id could carry glob syntax.
+        pattern = f"analytics:*:*:{_glob_escape(str(organization_id))}:*"
         return await self.invalidate_pattern(pattern)
 
     async def invalidate_data_type(self, data_type: str) -> int:
         """Invalidate all cache data for a specific data type"""
-        pattern = f"analytics:*:{data_type}:*"
+        pattern = f"analytics:*:{_glob_escape(str(data_type))}:*"
         return await self.invalidate_pattern(pattern)
 
     def _get_default_ttl(self, data_type: str) -> int:
