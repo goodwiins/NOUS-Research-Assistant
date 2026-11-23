@@ -8,13 +8,19 @@ import {
 } from '@statsig/react-bindings';
 import { StatsigSessionReplayPlugin } from '@statsig/session-replay';
 import { StatsigAutoCapturePlugin } from '@statsig/web-analytics';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
 
 interface StatsigClientProviderProps {
   children: React.ReactNode;
 }
 
 const SDK_KEY = process.env.NEXT_PUBLIC_STATSIG_CLIENT_KEY?.trim();
+
+// False on the server and during hydration, true once mounted on the client,
+// without a setState-in-effect re-render.
+const subscribeToNothing = (): (() => void) => () => {};
+const isClient = (): boolean => true;
+const isServer = (): boolean => false;
 
 function StatsigInitializedProvider({ children }: StatsigClientProviderProps) {
   const { user } = useAuth();
@@ -50,11 +56,7 @@ function StatsigInitializedProvider({ children }: StatsigClientProviderProps) {
 export function StatsigClientProvider({
   children,
 }: StatsigClientProviderProps) {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  const mounted = useSyncExternalStore(subscribeToNothing, isClient, isServer);
 
   if (!SDK_KEY || !mounted) {
     return <>{children}</>;

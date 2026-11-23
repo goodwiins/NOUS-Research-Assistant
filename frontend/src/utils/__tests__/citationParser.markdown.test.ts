@@ -124,12 +124,13 @@ describe('performance', () => {
   // superlinear on one giant paragraph.
   const unit =
     'Claim with `a[1]` inline and [2] cited.\n\n```\nx[1]\n```\n\n- item [3]\n\n';
-  const message = (bytes: number) =>
+  const message = (bytes: number): string =>
     unit.repeat(Math.ceil(bytes / unit.length));
 
   // Results are cached per content, so every timed run gets its own text.
   let variant = 0;
-  const fresh = (content: string) => `Run ${(variant += 1)}.\n\n${content}`;
+  const fresh = (content: string): string =>
+    `Run ${(variant += 1)}.\n\n${content}`;
 
   function parseMs(content: string): number {
     const start = performance.now();

@@ -15,7 +15,7 @@ const mockClient = {
   flush: vi.fn().mockResolvedValue(undefined),
 };
 
-vi.mock('@/hooks', () => ({
+vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({ user: null }),
 }));
 
