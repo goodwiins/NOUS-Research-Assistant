@@ -61,6 +61,20 @@ describe('neutralizeCsvFormula', () => {
     expect(neutralizeCsvFormula(null)).toBe('');
     expect(neutralizeCsvFormula(undefined)).toBe('');
   });
+  // GOO-763: a value that is not a string is converted first, then held to
+  // the same rule, so an array or object cannot smuggle a formula through.
+  it.each([
+    [['=cmd|"/c calc"!A0'], `'=cmd|"/c calc"!A0`],
+    [['-2+3', 'x'], `'-2+3,x`],
+    [{ toString: () => '@SUM(A1)' }, `'@SUM(A1)`],
+  ])('prefixes the non-string %j by its text', (value, expected) => {
+    expect(neutralizeCsvFormula(value)).toBe(expected);
+  });
+
+  it('leaves a non-string whose text is a plain number as it is', () => {
+    expect(neutralizeCsvFormula(['-5'])).toBe('-5');
+    expect(neutralizeCsvFormula({ toString: () => 'plain' })).toBe('plain');
+  });
 });
 
 describe('csvCell / toCsv', () => {

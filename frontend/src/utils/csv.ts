@@ -10,7 +10,10 @@
  * leading-whitespace forms, with one deliberate difference: a string that
  * is strictly a plain number (`-5`, `+1.5`, `-12%`) is left as it is, so
  * signed numbers in extracted tables stay numbers. GOO-753 brings the
- * backend in line. Non-string values are never prefixed.
+ * backend in line. A real number is never prefixed (`-1e+21` stays a
+ * number). Any other value is converted to text first and held to the
+ * same rule, so an array or object from an untyped payload cannot smuggle
+ * a formula through (GOO-763).
  */
 
 // Strictly a plain number: optional sign, digits, optional decimals,
@@ -23,9 +26,10 @@ const NEEDS_QUOTES = /[",\r\n]/;
 /** Make user-controlled text literal in a spreadsheet; numbers pass. */
 export function neutralizeCsvFormula(value: unknown): string {
   if (value === null || value === undefined) return '';
-  if (typeof value !== 'string') return String(value);
-  if (PLAIN_NUMBER.test(value)) return value;
-  return FORMULA_START.test(value) ? `'${value}` : value;
+  if (typeof value === 'number') return String(value);
+  const text = String(value);
+  if (PLAIN_NUMBER.test(text)) return text;
+  return FORMULA_START.test(text) ? `'${text}` : text;
 }
 
 /** One CSV field: neutralised, then quoted when it holds `"`, `,` or a newline. */
