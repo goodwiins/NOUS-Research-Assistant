@@ -115,6 +115,10 @@ const SAFE_KEYS = new Set([
   'source', 'handled', 'synthetic', 'readystate', 'serveraddress',
   'serverport', 'networkprotocolname', 'networkprotocolversion', 'urlpath',
   'framework', 'runtime', 'browser', 'os', 'device', 'sampled', 'mechanism',
+  // CSP reports (app/api/csp-report, GOO-729): already reduced to a
+  // directive name, a disposition, origins and a listed route.
+  'cspdirective', 'cspdisposition', 'cspblocked', 'documentorigin',
+  'documentroute',
 ]);
 
 // Keys whose values are URLs: kept without their query string or fragment.
