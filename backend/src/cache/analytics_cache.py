@@ -24,6 +24,7 @@ except ImportError:
     redis = None
 
 from src.config.analytics_config import get_analytics_config
+from src.core.background_tasks import spawn
 from src.core.config import settings
 from src.exceptions.analytics_exceptions import CacheError, CacheMissError
 
@@ -85,12 +86,19 @@ _SCAN_BATCH = 500
 
 
 def _redis_url(config: Any) -> Optional[str]:
-    """``ANALYTICS_redis_analytics_url`` if set, else the app-wide ``REDIS_URL``.
+    """``ANALYTICS_redis_analytics_url`` if set, else an explicit ``REDIS_URL``.
 
     No deployment sets the analytics-specific variable; the live pods get
-    Redis only as ``REDIS_URL`` from the ``redis-credentials`` Secret.
+    Redis only as ``REDIS_URL`` from the ``redis-credentials`` Secret. The
+    settings default (``redis://localhost:6379``) does not count: without an
+    explicit URL the cache stays in memory and never tries to connect, so a
+    local run without Redis does not retry a connect every window.
     """
-    return config.redis_analytics_url or getattr(settings, "REDIS_URL", None) or None
+    if config.redis_analytics_url:
+        return config.redis_analytics_url
+    if "REDIS_URL" not in getattr(settings, "model_fields_set", ()):
+        return None
+    return getattr(settings, "REDIS_URL", None) or None
 
 
 def _glob_escape(value: str) -> str:
@@ -186,7 +194,7 @@ class AnalyticsCache:
             return
         self._next_connect_attempt = loop.time() + _RECONNECT_INTERVAL_SECONDS
         if client is not None:
-            loop.create_task(self._close_quietly(client))
+            spawn(self._close_quietly(client), name="analytics-redis-close")
 
     @staticmethod
     async def _close_quietly(client: Any) -> None:

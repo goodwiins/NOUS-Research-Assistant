@@ -131,7 +131,9 @@ async def test_first_request_never_waits_for_a_connect(
 
     loop = asyncio.get_running_loop()
     started = loop.time()
-    assert await cache.get("k") == 1
+    # Bounded here, so awaiting the connect fails in a second instead of
+    # hanging until the suite-wide timeout.
+    assert await asyncio.wait_for(cache.get("k"), timeout=1.0) == 1
     assert loop.time() - started < 0.1  # did not wait on the ping
     assert client.get_calls == 0
     gate.set()
@@ -181,6 +183,8 @@ async def test_redis_failure_after_connect_opens_the_breaker_and_fails_open(
     cache, from_url = _cache(monkeypatch, client)
     assert await cache.connect() is True
     await cache.set("k", {"v": 1}, ttl=60)
+    # The connect was long ago: only the trip itself can open a window now.
+    cache._next_connect_attempt = 0.0
 
     client.fail_with = TimeoutError("redis stalled")
     assert await cache.get("k") == {"v": 1}  # fails open to memory
@@ -238,6 +242,64 @@ async def test_analytics_url_wins_when_set(monkeypatch: pytest.MonkeyPatch) -> N
     cache, from_url = _cache(monkeypatch, FakeRedis(), url="redis://analytics:1/2")
     await cache.connect()
     assert from_url.call_args.args[0] == "redis://analytics:1/2"
+
+
+@pytest.mark.asyncio
+async def test_trip_reopens_the_window_from_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeRedis()
+    cache, _ = _cache(monkeypatch, client)
+    assert await cache.connect() is True
+    cache._next_connect_attempt = 0.0
+
+    client.fail_with = ConnectionError("gone")
+    await cache.get("k")
+
+    now = asyncio.get_running_loop().time()
+    remaining = cache._next_connect_attempt - now
+    assert module._RECONNECT_INTERVAL_SECONDS - 1 < remaining
+    assert remaining <= module._RECONNECT_INTERVAL_SECONDS
+
+
+def test_default_redis_url_is_not_used_unless_set_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.config import Settings
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setattr(module, "REDIS_AVAILABLE", True)
+    monkeypatch.setattr(
+        module, "get_analytics_config", lambda: MagicMock(redis_analytics_url=None)
+    )
+    defaults = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert "REDIS_URL" not in defaults.model_fields_set
+    monkeypatch.setattr(module, "settings", defaults)
+
+    cache = module.AnalyticsCache()
+
+    assert cache._redis_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_no_connect_task_without_an_explicit_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from_url = MagicMock()
+    monkeypatch.setattr(module.redis, "from_url", from_url)
+    monkeypatch.setattr(
+        module, "get_analytics_config", lambda: MagicMock(redis_analytics_url=None)
+    )
+    monkeypatch.setattr(
+        module, "settings", MagicMock(model_fields_set=set(), REDIS_URL="redis://x")
+    )
+    cache = module.AnalyticsCache()
+
+    await cache.get("k")
+    await _settle()
+
+    assert cache._connect_task is None
+    from_url.assert_not_called()
 
 
 @pytest.mark.asyncio

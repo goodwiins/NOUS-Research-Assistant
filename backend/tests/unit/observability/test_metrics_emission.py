@@ -99,8 +99,18 @@ def test_helpers_work_before_configure_metrics(
 
 
 def test_module_registry_is_a_registry_at_import() -> None:
+    import os
     import subprocess
     import sys
+    from pathlib import Path
+
+    # backend/ holds the ``src`` package. CI runs pytest from the repo root,
+    # so the child must not depend on the caller's working directory.
+    backend_dir = Path(__file__).resolve().parents[3]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(backend_dir), env.get("PYTHONPATH")) if p
+    )
 
     probe = (
         "import src.observability.metrics as m; "
@@ -109,6 +119,11 @@ def test_module_registry_is_a_registry_at_import() -> None:
         "m.increment_counter('probe_total')"
     )
     result = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=backend_dir,
+        env=env,
     )
     assert result.returncode == 0, result.stderr[-2000:]
