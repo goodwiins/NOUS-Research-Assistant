@@ -138,6 +138,34 @@ describe('useDocuments', () => {
       expect(result.current.isAllSelected).toBe(true);
     });
 
+    it('hasLoaded is false until a fetch succeeds, so total 0 is not a count', async () => {
+      mockGet.mockResolvedValue(createBackendResponse(0));
+
+      const { result } = renderHook(() => useDocuments({ autoFetch: false }));
+
+      expect(result.current.hasLoaded).toBe(false);
+
+      await act(async () => {
+        await result.current.fetchDocuments();
+      });
+
+      expect(result.current.hasLoaded).toBe(true);
+      expect(result.current.pagination.total).toBe(0);
+    });
+
+    it('hasLoaded stays false when the first fetch fails', async () => {
+      mockGet.mockRejectedValue(new Error('Network error'));
+
+      const { result } = renderHook(() => useDocuments({ autoFetch: false }));
+
+      await act(async () => {
+        await result.current.fetchDocuments();
+      });
+
+      expect(result.current.error).toBe('Network error');
+      expect(result.current.hasLoaded).toBe(false);
+    });
+
     it('respects custom initialPageSize', () => {
       mockGet.mockResolvedValue(createBackendResponse(0));
 

@@ -111,7 +111,25 @@ class DocumentAnalyticsApiService {
    * Get file statistics including type distribution and processing status
    */
   async getFileStats(): Promise<FileStatsResponse> {
-    return api.get<FileStatsResponse>(`${this.basePath}/stats`);
+    const response = await api.get<FileStatsResponse>(`${this.basePath}/stats`);
+    // `FileStatsResponse` requires both lists. A 200 without them (or with a
+    // non-numeric count) is shape drift: reject so callers show the source as
+    // unavailable, instead of summing an empty list into "0" (GOO-649).
+    const filesByType = requireArray<FileTypeStats>(
+      response?.files_by_type,
+      'files_by_type'
+    );
+    const processingStats = requireArray<ProcessingStats>(
+      response?.processing_stats,
+      'processing_stats'
+    );
+    filesByType.forEach((item) =>
+      requireNumber(item?.count, 'files_by_type.count')
+    );
+    processingStats.forEach((item) =>
+      requireNumber(item?.count, 'processing_stats.count')
+    );
+    return response;
   }
 
   /**
@@ -459,13 +477,33 @@ export interface DailyPoint {
   value: number;
 }
 
-const toDailyPoint = (period: string, value: unknown): DailyPoint => {
-  const date = new Date(period);
+const HAS_ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+/**
+ * Parse a backend period. The producers emit `datetime.isoformat()`
+ * (`2026-11-21T00:00:00+00:00`) or `str(datetime)` (`2026-11-21 00:00:00+00:00`)
+ * of a `DATE_TRUNC` over a `timestamptz` column. A value without an offset is
+ * UTC, never the viewer's local time, so the day label does not shift with the
+ * browser's time zone.
+ */
+export function parseBackendTimestamp(raw: unknown): Date {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw new Error('Unexpected analytics response: period');
+  }
+  const iso = raw.trim().replace(' ', 'T');
+  const date = new Date(HAS_ZONE.test(iso) ? iso : `${iso}Z`);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('Unexpected analytics response: period');
+  }
+  return date;
+}
+
+const toDailyPoint = (period: unknown, value: unknown): DailyPoint => {
+  const date = parseBackendTimestamp(period);
   return {
-    name: Number.isNaN(date.getTime())
-      ? period
-      : date.toISOString().slice(0, 10),
-    date: period,
+    // The UTC calendar day: DATE_TRUNC('day') runs in the database's UTC zone.
+    name: date.toISOString().slice(0, 10),
+    date: date.toISOString(),
     value: requireNumber(value, 'trend value'),
   };
 };
@@ -556,8 +594,10 @@ class PerformanceApiService {
     );
     const search = requireObject(response?.search_performance, 'search_performance');
     const rawEngagement = response.user_engagement;
+    // `_scope_overview_for` pops the key for non-admins, so only a missing key
+    // means "not sent to you". Anything else present must be the real section.
     const engagement =
-      rawEngagement === undefined || rawEngagement === null
+      rawEngagement === undefined
         ? null
         : requireObject(rawEngagement, 'user_engagement');
     return {
@@ -577,14 +617,17 @@ class PerformanceApiService {
   }
 
   /**
-   * Daily search volume for the organization over the last 30 days, from
+   * Daily search volume for the organization over the last 7 days, from
    * `/charts/search_volume` (`{metric_name, time_range, granularity, data}`).
-   * Days without searches are absent from the backend series.
+   * `get_metric_chart_data` picks the bucket from the range and ignores the
+   * requested granularity: 1h/24h are hourly, 7d is daily, and anything longer
+   * is weekly (while the route still echoes `granularity`). So 7d is the only
+   * range that yields per-day points. Days without searches are absent.
    */
   async getSearchVolumeTrend(): Promise<DailyPoint[]> {
     const response = await api.get<{
       data: Array<{ timestamp: string; value: number }>;
-    }>(`${this.basePath}/charts/search_volume?time_range=30d&granularity=day`);
+    }>(`${this.basePath}/charts/search_volume?time_range=7d&granularity=day`);
     return requireArray<{ timestamp: string; value: number }>(
       response?.data,
       'data'

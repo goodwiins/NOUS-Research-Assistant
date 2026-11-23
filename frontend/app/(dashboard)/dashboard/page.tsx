@@ -55,7 +55,7 @@ export default function DashboardPage() {
   // Only the total count is needed here, so fetch a single page, not 100 docs.
   const {
     pagination,
-    loading: documentsLoading,
+    hasLoaded: documentsLoaded,
     error: documentsError,
   } = useDocuments({
     initialPageSize: 1,
@@ -128,8 +128,8 @@ export default function DashboardPage() {
     documentAnalyticsApi
       .getFileStats()
       .then((data) => {
-        setFilesByType(data.files_by_type ?? []);
-        setProcessingCount(countInFlightDocuments(data.processing_stats ?? []));
+        setFilesByType(data.files_by_type);
+        setProcessingCount(countInFlightDocuments(data.processing_stats));
       })
       .catch(() => {
         setProcessingCount(null);
@@ -146,11 +146,13 @@ export default function DashboardPage() {
     fetchDashboardData();
   }, [fetchDashboardData]);
 
+  // `useDocuments` starts with a total of 0 before any fetch, so the card
+  // waits for the first successful response instead of showing that default.
   const documentsStat: StatValue = documentsError
     ? null
-    : authLoading || documentsLoading
-      ? undefined
-      : documentCount;
+    : documentsLoaded
+      ? documentCount
+      : undefined;
 
   // Quick actions
   const quickActions = [

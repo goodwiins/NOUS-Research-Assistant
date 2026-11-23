@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import { render } from '@/test/test-utils';
-import { AnalyticsDashboard } from '@/components/analytics/AnalyticsDashboard';
+import {
+  AnalyticsDashboard,
+  fetchAnalyticsDashboard,
+} from '@/components/analytics/AnalyticsDashboard';
 import { api } from '@/services/api-client';
 import {
   adminOverviewBody,
@@ -101,8 +104,34 @@ describe('AnalyticsDashboard (GOO-649)', () => {
     expect(screen.queryByText('Active users, last 24 hours')).not.toBeInTheDocument();
     expect(requested().some((url) => url.startsWith('/analytics/behavior'))).toBe(false);
     expect(requested()).toContain(
-      '/analytics/performance/charts/search_volume?time_range=30d&granularity=day'
+      '/analytics/performance/charts/search_volume?time_range=7d&granularity=day'
     );
+  });
+
+  it('plots the 7-day daily search series and keeps its first, midnight-truncated day', async () => {
+    route(routesFor(memberOverviewBody));
+
+    const { data } = await fetchAnalyticsDashboard(false);
+
+    expect(requested()).toContain(
+      '/analytics/performance/charts/search_volume?time_range=7d&granularity=day'
+    );
+    // No `date`, so AnalyticsChart's own now-7d cutoff cannot drop 2026-11-17.
+    expect(data.searchVolume).toEqual([
+      { name: '2026-11-17', value: 3 },
+      { name: '2026-11-21', value: 4 },
+      { name: '2026-11-22', value: 9 },
+    ]);
+  });
+
+  it('titles the search chart as a 7-day daily series', async () => {
+    route(routesFor(memberOverviewBody));
+
+    render(<AnalyticsDashboard />);
+
+    expect(
+      await screen.findByText('Searches per day (last 7 days)')
+    ).toBeInTheDocument();
   });
 
   it('requests organization trends with days_back for an admin', async () => {

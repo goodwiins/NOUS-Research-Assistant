@@ -16,11 +16,15 @@ vi.mock('@/hooks/useAuth', () => ({
     user: { id: 'me', email: 'me@example.test', role: 'user' },
   }),
 }));
+const docs = vi.hoisted(() => ({
+  state: { total: 7, hasLoaded: true, error: null as string | null },
+}));
 vi.mock('@/hooks/useDocuments', () => ({
   useDocuments: () => ({
-    pagination: { total: 7 },
+    pagination: { total: docs.state.total },
     loading: false,
-    error: null,
+    hasLoaded: docs.state.hasLoaded,
+    error: docs.state.error,
   }),
 }));
 vi.mock('@/lib/analytics', () => ({
@@ -44,6 +48,7 @@ function statCard(label: string): HTMLElement {
 describe('DashboardPage stat cards (GOO-649)', () => {
   beforeEach(() => {
     get.mockReset();
+    docs.state = { total: 7, hasLoaded: true, error: null };
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -89,6 +94,41 @@ describe('DashboardPage stat cards (GOO-649)', () => {
     expect(statCard('Processing')).toHaveTextContent('2');
     // No organization-wide conversation count exists, so no card claims one.
     expect(screen.queryByText('Conversations')).not.toBeInTheDocument();
+  });
+
+  it('Documents waits for the first response instead of showing the default 0 (F3)', async () => {
+    // useDocuments' state before any fetch: loading false, total 0.
+    docs.state = { total: 0, hasLoaded: false, error: null };
+    get.mockRejectedValue(new Error('outage'));
+
+    render(<DashboardPage />);
+
+    expect(statCard('Documents')).toHaveTextContent('loading');
+    expect(statCard('Documents')).not.toHaveTextContent('0');
+  });
+
+  it('Documents shows unavailable when the document request fails (F3)', async () => {
+    docs.state = { total: 0, hasLoaded: false, error: 'Request failed' };
+    get.mockRejectedValue(new Error('outage'));
+
+    render(<DashboardPage />);
+
+    expect(statCard('Documents')).toHaveTextContent('Unavailable right now');
+    expect(statCard('Documents')).not.toHaveTextContent('0');
+  });
+
+  it('Processing is unavailable when /files/stats omits processing_stats (F4)', async () => {
+    get.mockImplementation(async (url: string) => {
+      if (url === '/files/stats') return { files_by_type: [] };
+      throw new Error(`404 ${url}`);
+    });
+
+    render(<DashboardPage />);
+
+    await waitFor(() =>
+      expect(statCard('Processing')).toHaveTextContent('Unavailable right now')
+    );
+    expect(statCard('Processing')).not.toHaveTextContent('0');
   });
 
   it('shows service health as not available yet, with no request and no Retry', async () => {

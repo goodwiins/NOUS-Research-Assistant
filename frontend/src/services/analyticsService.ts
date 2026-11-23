@@ -83,41 +83,6 @@ export interface UserSession {
   satisfaction_score: number | null;
 }
 
-export interface SystemMetrics {
-  timestamp: string;
-  cpu_usage: number;
-  memory_usage: number;
-  disk_usage: number;
-  network_io: {
-    bytes_in: number;
-    bytes_out: number;
-  };
-  response_time: number;
-  request_rate: number;
-  error_rate: number;
-  active_connections: number;
-}
-
-export interface ServiceStatus {
-  name: string;
-  status: 'healthy' | 'warning' | 'critical' | 'unknown';
-  response_time: number;
-  last_check: string;
-  uptime: number;
-  error_count: number;
-}
-
-export interface PerformanceAlert {
-  id: string;
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  type: 'performance' | 'availability' | 'capacity';
-  title: string;
-  description: string;
-  service: string;
-  timestamp: string;
-  resolved: boolean;
-}
-
 export interface Recommendation {
   id: string;
   title: string;
@@ -181,21 +146,6 @@ class AnalyticsService {
     return api.get(
       `/analytics/user-behavior?timeRange=${encodeURIComponent(timeRange)}`
     );
-  }
-
-  // Performance Monitoring
-  async getPerformanceMetrics(): Promise<{
-    metrics: SystemMetrics;
-    services: ServiceStatus[];
-    alerts: PerformanceAlert[];
-  }> {
-    // `/analytics/performance` is mounted on the backend (see
-    // `backend/src/main.py` mounting `performance_dashboard_router` under
-    // that prefix), but there is no index handler at the bare prefix yet —
-    // only sub-paths like `/overview`, `/system-health`, `/search-performance`.
-    // Until one lands this rejects and the dashboard shows the panel as
-    // unavailable.
-    return api.get('/analytics/performance');
   }
 
   // Recommendations Engine

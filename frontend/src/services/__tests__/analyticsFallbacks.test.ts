@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { api } from '@/services/api-client';
-import analyticsService from '@/services/analyticsService';
 import {
   countInFlightDocuments,
+  documentAnalyticsApi,
+  parseBackendTimestamp,
   performanceApi,
   searchAnalyticsApi,
   userBehaviorApi,
@@ -46,18 +47,8 @@ describe('analytics services never fabricate data', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
-  it('getPerformanceMetrics rejects instead of returning mock services (FL2C-1)', async () => {
-    get.mockRejectedValue(new Error('404'));
-    await expect(analyticsService.getPerformanceMetrics()).rejects.toThrow('404');
-  });
-
-  it('getPerformanceMetrics returns the response body as-is (FL2C-1)', async () => {
-    const body = { metrics: {}, services: [], alerts: [] };
-    get.mockResolvedValue(body);
-    await expect(analyticsService.getPerformanceMetrics()).resolves.toBe(body);
-  });
-
   it.each([
+    ['getFileStats', () => documentAnalyticsApi.getFileStats()],
     ['getDashboardOverview', () => performanceApi.getDashboardOverview()],
     ['getSearchVolumeTrend', () => performanceApi.getSearchVolumeTrend()],
     [
@@ -146,6 +137,36 @@ describe('getDashboardOverview reads the nested backend shape (GOO-649)', () => 
     );
   });
 
+  it.each([
+    ['a string', 'n/a'],
+    ['null', null],
+    ['an array', []],
+  ])('rejects user_engagement that is %s, not the section', async (_kind, value) => {
+    route({
+      '/analytics/performance/overview': {
+        ...memberOverviewBody,
+        user_engagement: value,
+      },
+    });
+
+    await expect(performanceApi.getDashboardOverview()).rejects.toThrow(
+      /user_engagement/
+    );
+  });
+
+  it('rejects user_engagement without total_sessions instead of reading 0', async () => {
+    route({
+      '/analytics/performance/overview': {
+        ...adminOverviewBody,
+        user_engagement: { ...adminOverviewBody.user_engagement, total_sessions: undefined },
+      },
+    });
+
+    await expect(performanceApi.getDashboardOverview()).rejects.toThrow(
+      /total_sessions/
+    );
+  });
+
   it('rejects a present but malformed user_engagement', async () => {
     route({
       '/analytics/performance/overview': {
@@ -165,7 +186,7 @@ describe('trend getters call valid routes with the right parameters (GOO-649)', 
     get.mockReset();
   });
 
-  it('search volume comes from /charts/search_volume and reads `data`', async () => {
+  it('search volume asks for the 7-day range, the only one the producer buckets by day', async () => {
     route({
       '/analytics/performance/charts/search_volume': searchVolumeChartBody,
     });
@@ -173,12 +194,23 @@ describe('trend getters call valid routes with the right parameters (GOO-649)', 
     const points = await performanceApi.getSearchVolumeTrend();
 
     expect(get).toHaveBeenCalledWith(
-      '/analytics/performance/charts/search_volume?time_range=30d&granularity=day'
+      '/analytics/performance/charts/search_volume?time_range=7d&granularity=day'
     );
     expect(points).toEqual([
-      { name: '2026-11-21', date: '2026-11-21T00:00:00', value: 4 },
-      { name: '2026-11-22', date: '2026-11-22T00:00:00', value: 9 },
+      { name: '2026-11-17', date: '2026-11-17T00:00:00.000Z', value: 3 },
+      { name: '2026-11-21', date: '2026-11-21T00:00:00.000Z', value: 4 },
+      { name: '2026-11-22', date: '2026-11-22T00:00:00.000Z', value: 9 },
     ]);
+  });
+
+  it('rejects a chart point without a usable timestamp', async () => {
+    route({
+      '/analytics/performance/charts/search_volume': {
+        ...searchVolumeChartBody,
+        data: [{ timestamp: 'yesterday', value: 1 }],
+      },
+    });
+    await expect(performanceApi.getSearchVolumeTrend()).rejects.toThrow(/period/);
   });
 
   it('rejects a chart body without a data array', async () => {
@@ -194,7 +226,62 @@ describe('trend getters call valid routes with the right parameters (GOO-649)', 
     expect(get).toHaveBeenCalledWith(
       '/analytics/behavior/organization/trends?days_back=30&group_by=day'
     );
-    expect(points.map((p) => p.value)).toEqual([2, 4]);
+    expect(points).toEqual([
+      { name: '2026-11-21', date: '2026-11-21T00:00:00.000Z', value: 2 },
+      { name: '2026-11-22', date: '2026-11-22T00:00:00.000Z', value: 4 },
+    ]);
+  });
+});
+
+// Run this file under several TZ values (see the PR): every expectation here
+// must hold whatever the viewer's local zone is.
+describe('parseBackendTimestamp reads backend periods as UTC (GOO-649 F2)', () => {
+  it.each([
+    ['isoformat with offset', '2026-11-21T00:00:00+00:00', '2026-11-21T00:00:00.000Z'],
+    ['str() with offset', '2026-11-21 00:00:00+00:00', '2026-11-21T00:00:00.000Z'],
+    ['naive isoformat is UTC', '2026-11-21T00:00:00', '2026-11-21T00:00:00.000Z'],
+    ['naive str() is UTC', '2026-11-21 00:00:00', '2026-11-21T00:00:00.000Z'],
+    ['Z suffix', '2026-11-21T00:00:00Z', '2026-11-21T00:00:00.000Z'],
+    ['a non-UTC offset is honoured', '2026-11-21T00:00:00+01:00', '2026-11-20T23:00:00.000Z'],
+  ])('%s', (_case, raw, expected) => {
+    expect(parseBackendTimestamp(raw).toISOString()).toBe(expected);
+  });
+
+  it.each([[''], ['soon'], [null], [42]])('rejects %j', (raw) => {
+    expect(() => parseBackendTimestamp(raw)).toThrow(/period/);
+  });
+});
+
+describe('getFileStats rejects a body that would read as 0 (GOO-649 F4)', () => {
+  beforeEach(() => {
+    get.mockReset();
+  });
+
+  it('returns a well-formed body', async () => {
+    const body = {
+      files_by_type: [{ type: 'pdf', count: 2, total_size_mb: 1 }],
+      processing_stats: [{ status: 'pending', count: 1 }],
+    };
+    route({ '/files/stats': body });
+    await expect(documentAnalyticsApi.getFileStats()).resolves.toBe(body);
+  });
+
+  it.each([
+    ['without processing_stats', { files_by_type: [] }, /processing_stats/],
+    ['without files_by_type', { processing_stats: [] }, /files_by_type/],
+    [
+      'with a non-numeric processing count',
+      { files_by_type: [], processing_stats: [{ status: 'pending' }] },
+      /processing_stats.count/,
+    ],
+    [
+      'with a non-numeric type count',
+      { files_by_type: [{ type: 'pdf', count: '2' }], processing_stats: [] },
+      /files_by_type.count/,
+    ],
+  ])('%s', async (_case, body, error) => {
+    route({ '/files/stats': body });
+    await expect(documentAnalyticsApi.getFileStats()).rejects.toThrow(error);
   });
 });
 

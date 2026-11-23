@@ -105,7 +105,12 @@ interface DashboardData {
   searchTypes: Array<{ name: string; value: number }> | null;
   fileTypeDistribution: ReturnType<typeof transformFileTypeForChart>;
   processingStats: ReturnType<typeof transformProcessingStats>;
-  searchVolume: DailyPoint[] | null;
+  /**
+   * The backend's 7 daily buckets, without `date`: AnalyticsChart drops points
+   * older than its own `now - 7d` cutoff, which would cut the first bucket
+   * (truncated to midnight) from a series the backend already windowed.
+   */
+  searchVolume: Array<{ name: string; value: number }> | null;
   /** Admin only; `undefined` for other roles. */
   activeUserTrend?: DailyPoint[] | null;
 }
@@ -215,7 +220,9 @@ export async function fetchAnalyticsDashboard(
       processingStats: transformProcessingStats(
         fileStats?.processing_stats ?? []
       ),
-      searchVolume,
+      searchVolume: searchVolume
+        ? searchVolume.map(({ name, value }) => ({ name, value }))
+        : null,
       activeUserTrend,
     },
     failed: Array.from(new Set(failed)),
@@ -538,18 +545,18 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {data.searchVolume === null ? (
                 <ChartNotice
-                  title="Search volume"
+                  title="Searches per day (last 7 days)"
                   message="Search volume is unavailable right now."
                 />
               ) : data.searchVolume.length === 0 ? (
                 <ChartNotice
-                  title="Search volume"
-                  message="No searches in the last 30 days."
+                  title="Searches per day (last 7 days)"
+                  message="No searches in the last 7 days."
                 />
               ) : (
                 <AnalyticsChart
-                  title="Search volume"
-                  description="Searches per day over the last 30 days"
+                  title="Searches per day (last 7 days)"
+                  description="Daily search totals for your organization"
                   data={data.searchVolume}
                   labels={{ value: 'Searches' }}
                   height={300}
@@ -574,7 +581,7 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
               ) : (
                 <AnalyticsChart
                   title="Active users"
-                  description="Users active per day over the last 30 days"
+                  description="Users active per day, up to the last 30 days"
                   data={data.activeUserTrend}
                   type="bar"
                   labels={{ value: 'Active users' }}

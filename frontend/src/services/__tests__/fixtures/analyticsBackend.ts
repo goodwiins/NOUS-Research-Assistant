@@ -113,25 +113,35 @@ export const searchAnalyticsBody = {
   average_results_per_search: 6.5,
 };
 
-// backend/src/api/quality/performance_dashboard.py: get_metric_chart_data
-// (GET /analytics/performance/charts/search_volume).
+// GET /analytics/performance/charts/search_volume?time_range=7d&granularity=day.
+// `data` is what PerformanceDashboardService.get_metric_chart_data
+// (backend/src/services/quality/performance_dashboard_service.py) returns for
+// LAST_7D: it forces `day` buckets for 7d (`hour` for 1h/24h, `week` for
+// anything longer, whatever `granularity` says), one row per day that had
+// searches, `{"timestamp": period.isoformat(), "value": float(count)}`.
+// `period` is DATE_TRUNC over `search_queries.created_at`, a timestamptz, so
+// the timestamp carries an offset. The route wrapper
+// (backend/src/api/quality/performance_dashboard.py: get_metric_chart_data)
+// adds the other three keys and echoes the requested granularity.
 export const searchVolumeChartBody = {
   metric_name: 'search_volume',
-  time_range: '30d',
+  time_range: '7d',
   granularity: 'day',
   data: [
-    { timestamp: '2026-11-21T00:00:00', value: 4.0 },
-    { timestamp: '2026-11-22T00:00:00', value: 9.0 },
+    { timestamp: '2026-11-17T00:00:00+00:00', value: 3.0 },
+    { timestamp: '2026-11-21T00:00:00+00:00', value: 4.0 },
+    { timestamp: '2026-11-22T00:00:00+00:00', value: 9.0 },
   ],
 };
 
 // backend/src/services/quality/user_behavior_service.py:
 // UserBehaviorService.get_behavior_trends
-// (GET /analytics/behavior/organization/trends, admin only).
+// (GET /analytics/behavior/organization/trends, admin only). `period` is
+// `str()` of a DATE_TRUNC over timestamptz columns, hence the space and offset.
 export const organizationTrendsBody = {
   session_trends: [
     {
-      period: '2026-11-22 00:00:00',
+      period: '2026-11-22 00:00:00+00:00',
       session_count: 3,
       avg_searches_per_session: 2.0,
       avg_duration_seconds: 60.0,
@@ -139,7 +149,7 @@ export const organizationTrendsBody = {
   ],
   search_trends: [
     {
-      period: '2026-11-22 00:00:00',
+      period: '2026-11-22 00:00:00+00:00',
       search_count: 6,
       avg_response_time: 200.0,
       avg_results: 5.0,
@@ -148,13 +158,13 @@ export const organizationTrendsBody = {
   ],
   engagement_trends: [
     {
-      period: '2026-11-21 00:00:00',
+      period: '2026-11-21 00:00:00+00:00',
       active_users: 2,
       power_users: 0,
       avg_satisfaction: 0.0,
     },
     {
-      period: '2026-11-22 00:00:00',
+      period: '2026-11-22 00:00:00+00:00',
       active_users: 4,
       power_users: 1,
       avg_satisfaction: 0.5,
