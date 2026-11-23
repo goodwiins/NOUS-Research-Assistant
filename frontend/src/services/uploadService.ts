@@ -372,7 +372,11 @@ class UploadService {
         return;
       }
 
-      console.error('Upload failed for file:', item.file.name, error);
+      // No file name: it is user data, and console.error reaches Sentry.
+      console.error('Upload failed', {
+        uploadId: item.id,
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
 
       this.failItem(item, error instanceof Error ? error.message : 'Upload failed');
     } finally {

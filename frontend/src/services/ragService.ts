@@ -277,7 +277,7 @@ export async function retrieveRAGContext(
   const startTime = performance.now();
 
   try {
-    console.log('[RAG] Calling /search/hybrid with query:', query);
+    console.log('[RAG] Calling /search/hybrid');
 
     const response = await api.post<{
       query: string;

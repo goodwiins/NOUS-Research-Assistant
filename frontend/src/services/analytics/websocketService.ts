@@ -372,7 +372,9 @@ export class WebSocketService {
   }
 
   private handleError(message: ErrorMessage): void {
-    console.error('WebSocket error:', message.payload);
+    // The payload is server data; the handler below gets it as an Error, so
+    // don't also send it to the console (forwarded to Sentry, GOO-638).
+    console.error('WebSocket error received');
     this.handlers.onError?.(new Error(message.payload.message));
   }
 

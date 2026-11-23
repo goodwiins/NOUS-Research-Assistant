@@ -420,7 +420,7 @@ export function useChatSession(): UseChatSessionReturn {
       if (targetConv) {
         if (targetConv.id !== useChatStore.getState().currentThreadId) {
           setCurrentThread(targetConv.id);
-          console.log('[Chat] Switched to thread:', targetConv.title);
+          console.log('[Chat] Switched to thread:', targetConv.id);
         }
         return;
       }
@@ -619,7 +619,7 @@ export function useChatSession(): UseChatSessionReturn {
             setCurrentThread(urlConversation.id);
             console.log(
               '[Chat] Restored thread from URL param:',
-              urlConversation.title
+              urlConversation.id
             );
           } else {
             // The URL effect owns uncached deep links, including when the
@@ -635,7 +635,7 @@ export function useChatSession(): UseChatSessionReturn {
           // thread, don't stomp it with our independently-fetched first row.
           const selectedConversation = uiConversations[0];
           setCurrentThread(selectedConversation.id);
-          console.log('[Chat] Active thread:', selectedConversation.title);
+          console.log('[Chat] Active thread:', selectedConversation.id);
         }
         return { ok: true, threadCount: uiConversations.length };
       } catch (error: unknown) {
