@@ -478,6 +478,17 @@ else
   skipped "Trigger.dev type-check + node tests" "no --frontend and no Trigger.dev path changed"
 fi
 
+# Removes only the directory this run created with `mktemp -d` for the ESLint
+# report; the variable is empty before that and after cleanup.
+ESLINT_REPORT_DIR=""
+# shellcheck disable=SC2329  # invoked indirectly, by the traps below
+_remove_eslint_report_dir() {
+  if [ -n "$ESLINT_REPORT_DIR" ] && [ -d "$ESLINT_REPORT_DIR" ]; then
+    rm -rf -- "$ESLINT_REPORT_DIR"
+  fi
+  ESLINT_REPORT_DIR=""
+}
+
 if [ "$DO_FRONTEND" -eq 1 ]; then
   step "Frontend type-check + quality ratchet (blocking) + full lint (advisory)"
   ( cd frontend && pnpm run type-check ); check $? "pnpm type-check"
@@ -487,7 +498,20 @@ if [ "$DO_FRONTEND" -eq 1 ]; then
   # used by .github/workflows/test-pipeline.yml. ESLint returns nonzero when
   # the known full-tree debt is present, so its exit status is intentionally
   # not used as the ratchet verdict; the comparator below owns that decision.
-  ESLINT_REPORT="$(mktemp "${TMPDIR:-/tmp}/run_local_ci-eslint.XXXXXX.json")"
+  #
+  # The report lives in a fresh `mktemp -d` directory: the Xs must be the
+  # last characters of the template, because BSD/macOS mktemp uses a
+  # template with a suffix after the Xs literally (GOO-771). The trap removes the
+  # directory on every exit path, including Ctrl-C during the ESLint run.
+  ESLINT_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/run_local_ci-eslint.XXXXXX")"
+  ESLINT_REPORT=""
+  if [ -n "$ESLINT_REPORT_DIR" ] && [ -d "$ESLINT_REPORT_DIR" ]; then
+    trap _remove_eslint_report_dir EXIT
+    trap '_remove_eslint_report_dir; exit 130' INT
+    trap '_remove_eslint_report_dir; exit 143' TERM
+    ESLINT_REPORT="$ESLINT_REPORT_DIR/eslint-report.json"
+    : > "$ESLINT_REPORT"
+  fi
   if [ -z "$ESLINT_REPORT" ] || [ ! -f "$ESLINT_REPORT" ]; then
     warn "  could not create a temporary ESLint JSON report"
     check 1 "frontend quality ratchet (report unavailable)"
@@ -501,8 +525,9 @@ if [ "$DO_FRONTEND" -eq 1 ]; then
     check $? "frontend quality ratchet"
     "$PY" scripts/ci/check_tsconfig_exclusions.py --base "$BASE"
     check $? "tsconfig exclusion ratchet"
-    rm -f -- "$ESLINT_REPORT"
   fi
+  _remove_eslint_report_dir
+  trap - EXIT INT TERM
 
   # Preserve the complete human-readable lint output for diagnosis, but keep
   # the known baseline debt advisory just as the GitHub workflow does.
