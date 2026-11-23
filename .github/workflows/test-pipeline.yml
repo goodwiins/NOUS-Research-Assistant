@@ -855,6 +855,12 @@ jobs:
         # profile, so this job runs for both.
         working-directory: .
         run: node --experimental-transform-types --experimental-test-module-mocks --no-warnings --test tests/trigger/*.test.mjs
+      - name: Type-check Trigger.dev tasks (tsc)
+        # The root tsconfig.json covers src/trigger and trigger.config.ts;
+        # node:test strips types without checking them, and the Trigger.dev
+        # deploy bundles without a type check (GOO-755). The root has no
+        # typescript of its own, so use the frontend's compiler.
+        run: pnpm exec tsc --noEmit -p ../tsconfig.json
       - name: Check NOUS QA runner (node:test)
         # tests/e2e/qa (pnpm qa:nous) and its nous-verify selection/evidence
         # code have no other CI coverage; the suites need no browser.

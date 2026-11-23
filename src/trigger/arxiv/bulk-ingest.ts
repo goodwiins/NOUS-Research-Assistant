@@ -71,14 +71,13 @@ export const bulkIngestArxiv = task({
         })),
       );
 
-      // A child that returned failed/timeout/skipped still has run.ok;
-      // count by the child's reported outcome, not by run.ok alone.
+      // Each child POSTs the paper and returns `accepted` (the backend
+      // queues it; the outcome is not observable) or throws once its task
+      // retries run out. Count by the reported outcome, not by run.ok alone.
       tallyIngestRuns(results.runs, tally);
 
       metadata.set("progress", (batchIdx + 1) / batches.length);
-      metadata.set("ingested", tally.ingested);
       metadata.set("accepted", tally.accepted);
-      metadata.set("skipped", tally.skipped);
       metadata.set("failed", tally.failed);
 
       logger.info("Batch complete", {
