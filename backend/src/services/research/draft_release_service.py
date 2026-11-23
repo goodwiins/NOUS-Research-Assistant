@@ -8,11 +8,17 @@ Collection UPDATE, roles reloaded after the lock), then this Collection's
 transaction (which already holds the Collection lock and its own stream), so
 ``research_release`` is always the last lock taken. Status is derived from
 ``draft_releases`` rows plus the evidence graph; nothing is stored on drafts.
+
+GOO-721: staling only needs the graph's edges, so writers read them before
+they queue on the Collection lock (``resolve_for_staling_write``) and only
+confirm under the lock that the decision ledger has not moved since. A moved
+ledger, or a writer with no snapshot, falls back to reading the edges (never
+the derived ``changed`` set) under the lock.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence, cast
+from typing import Any, Awaitable, Callable, Iterable, Sequence, cast
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -34,7 +40,7 @@ from src.models.research_claim import (
     ResearchClaimStanceObservation,
     ResearchClaimVersion,
 )
-from src.models.research_decision import ResearchDecisionEvent
+from src.models.research_decision import ResearchDecisionEvent, ResearchDecisionStream
 from src.models.research_project_role import ResearchProjectRole
 from src.models.user import User
 from src.services.research import claim_rules, extraction_rules
@@ -50,7 +56,7 @@ from src.services.research_engine.identity_service import (
     _replayed_event,
     current_protocol_version_id,
 )
-from src.services.research_engine.project_access import ProjectContext
+from src.services.research_engine.project_access import ProjectContext, ResearchAction
 from src.services.research_engine.screening_service import _is_unique_violation
 from src.shared.research_schemas import (
     DraftPromoteRequest,
@@ -122,10 +128,59 @@ async def load_edges(db: AsyncSession, collection_id: UUID) -> list[Edge]:
     ``# ponytail: accepted values pin their own source revision, so the
     observation hop adds no reachability; walk it if observations ever
     carry their own dependents.``"""
-    return (await _graph(db, collection_id)).edges
+    return await _build_edges(db, collection_id)
+
+
+@dataclass(frozen=True)
+class _Inputs:
+    """The rows ``_graph`` derives its ``changed`` set from, and the edges."""
+
+    edges: list[Edge]
+    accepted: list[Any]
+    versions: dict[UUID, Any]
+    links: list[Any]
+    assessments: list[Any]
+    part_changed: set[rules.Node]
+
+
+async def _build_edges(db: AsyncSession, collection_id: UUID) -> list[Edge]:
+    """The edges alone: no source-pin hashing, no derived ``changed`` set."""
+    return (await _inputs(db, collection_id)).edges
 
 
 async def _graph(db: AsyncSession, collection_id: UUID) -> Graph:
+    inputs = await _inputs(db, collection_id)
+    superseded_versions = set(
+        await _all(
+            db,
+            select(ResearchClaimVersion.supersedes_claim_version_id).where(
+                ResearchClaimVersion.collection_id == collection_id,
+                ResearchClaimVersion.supersedes_claim_version_id.is_not(None),
+            ),
+        )
+    )
+    changed = await _changed_sources(db, inputs.edges)
+    changed |= inputs.part_changed
+    changed |= {
+        rules.node("accepted", row.id)
+        for row in inputs.accepted
+        if _accepted_moved(row, inputs.accepted, inputs.versions)
+    }
+    changed |= {
+        rules.node("link", row.supersedes_link_id)
+        for row in inputs.links
+        if row.supersedes_link_id
+    }
+    changed |= {
+        rules.node("assessment", row.supersedes_assessment_id)
+        for row in inputs.assessments
+        if row.supersedes_assessment_id
+    }
+    changed |= {rules.node("claim_version", value) for value in superseded_versions}
+    return Graph(inputs.edges, changed)
+
+
+async def _inputs(db: AsyncSession, collection_id: UUID) -> _Inputs:
     accepted, versions = await _project_extraction(db, collection_id)
     links = await _all(
         db,
@@ -141,15 +196,6 @@ async def _graph(db: AsyncSession, collection_id: UUID) -> Graph:
     )
     releases = await _all(
         db, select(DraftRelease).where(DraftRelease.collection_id == collection_id)
-    )
-    superseded_versions = set(
-        await _all(
-            db,
-            select(ResearchClaimVersion.supersedes_claim_version_id).where(
-                ResearchClaimVersion.collection_id == collection_id,
-                ResearchClaimVersion.supersedes_claim_version_id.is_not(None),
-            ),
-        )
     )
     edges: list[Edge] = []
     for row in accepted:
@@ -224,25 +270,114 @@ async def _graph(db: AsyncSession, collection_id: UUID) -> Graph:
         if (document := rules.node("document", rules.parse_source(source[1])[0]))
         in documents
     ]
-    changed = await _changed_sources(db, edges)
-    changed |= part_changed
-    changed |= {
-        rules.node("accepted", row.id)
-        for row in accepted
-        if _accepted_moved(row, accepted, versions)
-    }
-    changed |= {
-        rules.node("link", row.supersedes_link_id)
-        for row in links
-        if row.supersedes_link_id
-    }
-    changed |= {
-        rules.node("assessment", row.supersedes_assessment_id)
-        for row in assessments
-        if row.supersedes_assessment_id
-    }
-    changed |= {rules.node("claim_version", value) for value in superseded_versions}
-    return Graph(edges, changed)
+    return _Inputs(edges, accepted, versions, links, assessments, part_changed)
+
+
+# --- Edges read outside the Collection lock (GOO-721) ---
+
+
+@dataclass(frozen=True)
+class ReleaseEdges:
+    """One Collection's graph edges, read after the ledger heads in ``token``.
+
+    ``confirmed`` means the caller checked under the Collection lock, before
+    writing anything, that no decision has been appended since: every writer
+    of a graph input appends its decision event in the same transaction, so
+    an unmoved ledger means unmoved edges. The caller's own later rows are
+    leaves (they cite older nodes; nothing yet cites them), so they cannot put
+    a live release in reach. ``review_update_service`` adds edges between old
+    nodes and must never pass a snapshot taken before its own write."""
+
+    collection_id: UUID
+    token: str
+    edges: list[Edge]
+    confirmed: bool = False
+
+
+async def _ledger_token(db: AsyncSession, collection_id: UUID) -> str:
+    """Every decision stream head in this Collection, as one digest."""
+    rows = (
+        await db.execute(
+            select(
+                ResearchDecisionStream.aggregate_type,
+                ResearchDecisionStream.aggregate_id,
+                ResearchDecisionStream.next_seq,
+            )
+            .where(ResearchDecisionStream.collection_id == collection_id)
+            .order_by(
+                ResearchDecisionStream.aggregate_type,
+                ResearchDecisionStream.aggregate_id,
+            )
+        )
+    ).all()
+    return decision_request_fingerprint(
+        {
+            "heads": [
+                [str(kind), str(aggregate), int(seq)] for kind, aggregate, seq in rows
+            ]
+        }
+    )
+
+
+async def snapshot_edges(db: AsyncSession, collection_id: UUID) -> ReleaseEdges:
+    """Read without the Collection lock. The token is read first, so a write
+    that commits while the edges load moves the ledger past it and
+    ``confirm_edges`` refuses the snapshot instead of trusting it."""
+    token = await _ledger_token(db, collection_id)
+    return ReleaseEdges(collection_id, token, await _build_edges(db, collection_id))
+
+
+async def confirm_edges(
+    db: AsyncSession, snapshot: ReleaseEdges | None
+) -> ReleaseEdges | None:
+    """Under the Collection lock and before any write: the snapshot if the
+    ledger has not moved since it was read, else None (rebuild under lock)."""
+    if snapshot is None:
+        return None
+    if await _ledger_token(db, snapshot.collection_id) != snapshot.token:
+        return None
+    return replace(snapshot, confirmed=True)
+
+
+async def locked_edges(
+    db: AsyncSession, collection_id: UUID, edges: ReleaseEdges | None
+) -> ReleaseEdges:
+    """A confirmed snapshot of this Collection, else the edges read now, under
+    the caller's lock (current by construction)."""
+    if edges is not None and edges.confirmed and edges.collection_id == collection_id:
+        return edges
+    return ReleaseEdges(
+        collection_id, "", await _build_edges(db, collection_id), confirmed=True
+    )
+
+
+Resolver = Callable[[AsyncSession, UUID, UUID, ResearchAction], Awaitable[Any]]
+
+
+async def resolve_for_staling_write(
+    db: AsyncSession,
+    project_id: UUID,
+    user_id: UUID,
+    action: ResearchAction,
+    *,
+    resolve: Resolver,
+    stales: bool = True,
+) -> tuple[ProjectContext, ReleaseEdges | None]:
+    """The route's ``resolve`` (``resolve_project``) for a write that may
+    stale releases.
+
+    Access is checked first without a lock (VIEW), the edges are read while
+    other writers may still hold the Collection, then ``action`` takes the
+    lock and the snapshot is confirmed before the caller writes anything.
+    ``stales=False`` (a write that cannot stale anything) skips the read."""
+    if not stales:
+        return await resolve(db, project_id, user_id, action), None
+    view = await resolve(db, project_id, user_id, ResearchAction.VIEW)
+    snapshot = await snapshot_edges(db, _cid(view))
+    context = await resolve(db, project_id, user_id, action)
+    if _cid(context) != snapshot.collection_id:
+        return context, None
+    return context, await confirm_edges(db, snapshot)
 
 
 async def _project_extraction(
@@ -686,11 +821,14 @@ async def promote(
 
 
 async def source_nodes(
-    db: AsyncSession, collection_id: UUID, document_id: UUID
+    db: AsyncSession,
+    collection_id: UUID,
+    document_id: UUID,
+    edges: ReleaseEdges | None = None,
 ) -> set[rules.Node]:
     """This document's graph source revisions that its text no longer matches."""
-    edges = (await _graph(db, collection_id)).edges
-    return await _changed_sources(db, edges, document_id)
+    current = await locked_edges(db, collection_id, edges)
+    return await _changed_sources(db, current.edges, document_id)
 
 
 async def invalidate_dependents(
@@ -701,15 +839,18 @@ async def invalidate_dependents(
     actor_id: UUID,
     actor_role: str,
     cause: dict[str, Any],
+    edges: ReleaseEdges | None = None,
 ) -> list[UUID]:
     """Stamp every live release reachable from ``changed`` stale and append
     one ``release.staled``. Runs in the caller's transaction; never commits.
-    The ``stale_at IS NULL`` guard makes a release stale exactly once."""
+    The ``stale_at IS NULL`` guard makes a release stale exactly once.
+    ``edges`` confirmed under the lock (GOO-721) are walked as they are;
+    otherwise the edges are read here, under the caller's lock."""
     changed = set(changed)
     if not changed:
         return []
-    graph = await _graph(db, collection_id)
-    reached = rules.dependents(graph.edges, changed)
+    current = await locked_edges(db, collection_id, edges)
+    reached = rules.dependents(current.edges, changed)
     candidates = [UUID(value) for kind, value in reached if kind == "release"]
     if not candidates:
         return []

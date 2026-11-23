@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_db
 from src.core.dependencies import get_current_user
 from src.models.user import User
-from src.services.research import claims_service
+from src.services.research import claims_service, draft_release_service
 from src.services.research_engine.project_access import ResearchAction, resolve_project
 from src.shared.claim_schemas import (
     ClaimAssessmentCreate,
@@ -118,11 +118,15 @@ async def create_claim_version(
     db: AsyncSession = Depends(get_db),
 ) -> ClaimVersionResponse:
     """Append a reworded version superseding the claim's tip (EDIT)."""
-    context = await resolve_project(
-        db, project_id, _uid(current_user), ResearchAction.EDIT
+    context, edges = await draft_release_service.resolve_for_staling_write(
+        db,
+        project_id,
+        _uid(current_user),
+        ResearchAction.EDIT,
+        resolve=resolve_project,
     )
     result, replayed = await claims_service.create_version(
-        db, context, claim_id, _uid(current_user), request
+        db, context, claim_id, _uid(current_user), request, edges
     )
     _status(response, replayed)
     return result
@@ -140,11 +144,16 @@ async def create_claim_link(
     db: AsyncSession = Depends(get_db),
 ) -> ClaimLinkResponse:
     """Link, re-point or withdraw evidence on the claim's tip version (EDIT)."""
-    context = await resolve_project(
-        db, project_id, _uid(current_user), ResearchAction.EDIT
+    context, edges = await draft_release_service.resolve_for_staling_write(
+        db,
+        project_id,
+        _uid(current_user),
+        ResearchAction.EDIT,
+        resolve=resolve_project,
+        stales=request.supersedes_link_id is not None,
     )
     result, replayed = await claims_service.link(
-        db, context, claim_id, _uid(current_user), request
+        db, context, claim_id, _uid(current_user), request, edges
     )
     _status(response, replayed)
     return result
@@ -189,11 +198,16 @@ async def create_claim_assessment(
     db: AsyncSession = Depends(get_db),
 ) -> ClaimAssessmentResponse:
     """Assess the claim's tip version (ADJUDICATOR role only)."""
-    context = await resolve_project(
-        db, project_id, _uid(current_user), ResearchAction.ADJUDICATE
+    context, edges = await draft_release_service.resolve_for_staling_write(
+        db,
+        project_id,
+        _uid(current_user),
+        ResearchAction.ADJUDICATE,
+        resolve=resolve_project,
+        stales=request.supersedes_assessment_id is not None,
     )
     result, replayed = await claims_service.assess(
-        db, context, claim_id, _uid(current_user), request
+        db, context, claim_id, _uid(current_user), request, edges
     )
     _status(response, replayed)
     return result

@@ -18,7 +18,7 @@ write; it never commits and has no ``ProjectContext``, so it can never reach
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -65,6 +65,9 @@ from src.shared.scispace_schemas import (
     ExtractionObservationCreate,
     ExtractionObservationResponse,
 )
+
+if TYPE_CHECKING:  # draft_release_service imports this module
+    from src.services.research.draft_release_service import ReleaseEdges
 
 AGGREGATE_TYPE = "research_extraction"
 SUBJECT_TYPE = "extraction_matrix"
@@ -265,16 +268,20 @@ async def _invalidate_releases(
     event_id: UUID | None,
     kind: str,
     document_id: UUID | None = None,
+    edges: "ReleaseEdges | None" = None,
 ) -> None:
     """GOO-307: stale the releases built on ``changed``, in this transaction.
     With ``document_id``, that document's outdated source revisions count as
     changed too: span links hang off the source itself, so a changed text
-    stales their releases even when no accepted tip was pinned to it."""
+    stales their releases even when no accepted tip was pinned to it.
+    ``edges``: the route's snapshot confirmed under the lock (GOO-721); the
+    edges are read under the lock at most once when it is missing."""
     from src.services.research import draft_release_service  # import cycle
 
     if document_id is not None:
+        edges = await draft_release_service.locked_edges(db, collection_id, edges)
         changed = changed | await draft_release_service.source_nodes(
-            db, collection_id, document_id
+            db, collection_id, document_id, edges
         )
     await draft_release_service.invalidate_dependents(
         db,
@@ -287,6 +294,7 @@ async def _invalidate_releases(
             "event_id": None if event_id is None else str(event_id),
             "kind": kind,
         },
+        edges=edges,
     )
 
 
@@ -388,6 +396,7 @@ async def create_version(
     matrix: Any,
     columns: Sequence[Mapping[str, Any]],
     actor_id: UUID,
+    release_edges: "ReleaseEdges | None" = None,
 ) -> Any:
     """Append an authored form version (EDIT; the route resolved it).
 
@@ -464,6 +473,7 @@ async def create_version(
             actor_role="editor",
             event_id=event_id,
             kind="extraction.staled",
+            edges=release_edges,
         )
     await db.commit()
     await db.refresh(version)
@@ -545,6 +555,7 @@ async def _stale_changed_source(
     document: Any,
     actor_id: UUID,
     actor_role: str,
+    release_edges: "ReleaseEdges | None" = None,
 ) -> list[str]:
     """Name this document's accepted tips pinned to an older source in one
     ``extraction.staled`` v2 event (``source_changed``). Rows are never
@@ -591,6 +602,7 @@ async def _stale_changed_source(
         event_id=event_id,
         kind="source_changed",
         document_id=document.id,
+        edges=release_edges,
     )
     return staled
 
@@ -926,6 +938,7 @@ async def assert_anchor_acceptable(
     cited: Sequence[Any],
     data: ExtractionAcceptCreate,
     actor_id: UUID,
+    release_edges: "ReleaseEdges | None" = None,
 ) -> AnchorResolution | SourceChanged:
     """GOO-304 ``accept_value`` step 7, re-checked at decision time.
 
@@ -944,6 +957,7 @@ async def assert_anchor_acceptable(
             document=document,
             actor_id=actor_id,
             actor_role="adjudicator",
+            release_edges=release_edges,
         )
         return SourceChanged(staled)
     if data.missingness is not None:
@@ -993,6 +1007,7 @@ async def accept_value(
     matrix_id: UUID,
     actor_id: UUID,
     data: ExtractionAcceptCreate,
+    release_edges: "ReleaseEdges | None" = None,
 ) -> ExtractionAcceptedValueResponse:
     """Record the accepted value for one cell (ADJUDICATE only).
 
@@ -1065,6 +1080,7 @@ async def accept_value(
         cited,
         data.model_copy(update={"value": value}),
         actor_id,
+        release_edges,
     )
     if isinstance(guard, SourceChanged):
         await db.commit()  # persist the staled event, then refuse
@@ -1132,6 +1148,7 @@ async def accept_value(
             actor_role="adjudicator",
             event_id=event_id,
             kind="extraction.accepted",
+            edges=release_edges,
         )
     await db.commit()
     await db.refresh(row)

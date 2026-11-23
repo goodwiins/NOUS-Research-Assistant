@@ -21,7 +21,7 @@ from src.models import Collection, CollectionDocument, Workspace
 from src.models.document import Document
 from src.models.extraction_matrix import ExtractionCell, ExtractionMatrix
 from src.models.user import User
-from src.services.research import extraction_forms_service
+from src.services.research import draft_release_service, extraction_forms_service
 from src.services.research.extraction_matrix_service import ExtractionMatrixService
 from src.services.research_engine.project_access import (
     ProjectContext,
@@ -286,8 +286,14 @@ async def update_matrix(
             detail="Matrix not found",
         )
 
-    context = await resolve_project(
-        db, matrix.project_id, current_user.id, ResearchAction.EDIT
+    # GOO-721: a column change can stale releases; read the edges unlocked.
+    context, edges = await draft_release_service.resolve_for_staling_write(
+        db,
+        matrix.project_id,
+        current_user.id,
+        ResearchAction.EDIT,
+        resolve=resolve_project,
+        stales=request.columns is not None,
     )
 
     columns_changed = False
@@ -316,6 +322,7 @@ async def update_matrix(
             matrix,
             [col.model_dump() for col in request.columns],
             current_user.id,
+            edges,
         )
 
     logger.info(
@@ -587,9 +594,16 @@ async def accept_extraction_value(
     db: AsyncSession = Depends(get_db),
 ) -> ExtractionAcceptedValueResponse:
     """Accept a value that equals a cited observation (ADJUDICATOR role only)."""
-    context = await _matrix_context(
-        db, matrix_id, current_user, ResearchAction.ADJUDICATE
+    # GOO-721: a supersede or a changed source stales releases; read the
+    # edges before queueing on the project lock.
+    project_id = await extraction_forms_service.matrix_project_id(db, matrix_id)
+    context, edges = await draft_release_service.resolve_for_staling_write(
+        db,
+        project_id,
+        current_user.id,
+        ResearchAction.ADJUDICATE,
+        resolve=resolve_project,
     )
     return await extraction_forms_service.accept_value(
-        db, context, matrix_id, current_user.id, request
+        db, context, matrix_id, current_user.id, request, edges
     )
