@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, asc, desc, func, or_, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
@@ -484,69 +485,72 @@ class QualityRecommendationsService:
         """Generate infrastructure-related recommendations"""
         recommendations = []
 
-        # Get system performance data
+        # Get system performance data. Only the dependency call is tolerated;
+        # a bug while building a recommendation must surface.
         try:
             system_health = (
                 await performance_dashboard_service.get_system_health_metrics()
             )
-
-            if system_health.cpu_usage > 80:
-                recommendations.append(
-                    QualityRecommendation(
-                        id=str(uuid.uuid4()),
-                        category=RecommendationCategory.INFRASTRUCTURE,
-                        priority=RecommendationPriority.CRITICAL,
-                        title="Scale System Resources - High CPU Usage",
-                        description=f"System CPU usage is critical ({system_health.cpu_usage:.1f}%)",
-                        impact_assessment="Critical impact on all system operations",
-                        effort_required="High - infrastructure scaling",
-                        actionable_steps=[
-                            "Scale up compute resources immediately",
-                            "Implement horizontal scaling for search services",
-                            "Add load balancing for search queries",
-                            "Optimize resource-intensive operations",
-                            "Consider auto-scaling configuration",
-                        ],
-                        expected_outcome="Improved system performance and reliability",
-                        metrics_to_track=["cpu_usage", "response_time", "error_rate"],
-                        supporting_data={"cpu_usage": system_health.cpu_usage},
-                        estimated_improvement=50.0,
-                        due_date=datetime.utcnow() + timedelta(days=7),
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                    )
-                )
-
-            if system_health.memory_usage > 85:
-                recommendations.append(
-                    QualityRecommendation(
-                        id=str(uuid.uuid4()),
-                        category=RecommendationCategory.INFRASTRUCTURE,
-                        priority=RecommendationPriority.HIGH,
-                        title="Optimize Memory Usage",
-                        description=f"System memory usage is high ({system_health.memory_usage:.1f}%)",
-                        impact_assessment="High impact on system stability and performance",
-                        effort_required="Medium - memory optimization",
-                        actionable_steps=[
-                            "Analyze memory usage patterns",
-                            "Implement memory-efficient algorithms",
-                            "Add memory monitoring and alerts",
-                            "Optimize data structures and caching",
-                            "Consider memory scaling",
-                        ],
-                        expected_outcome="Reduced memory usage and improved stability",
-                        metrics_to_track=["memory_usage", "error_rate", "performance"],
-                        supporting_data={"memory_usage": system_health.memory_usage},
-                        estimated_improvement=30.0,
-                        due_date=datetime.utcnow() + timedelta(days=14),
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                    )
-                )
-
         except Exception as e:
             logger.warning(
-                f"Could not get system health for infrastructure recommendations: {e}"
+                "Could not get system health for infrastructure recommendations: "
+                f"{type(e).__name__}",
+                exc_info=True,
+            )
+            return recommendations
+
+        if system_health.cpu_usage > 80:
+            recommendations.append(
+                QualityRecommendation(
+                    id=str(uuid.uuid4()),
+                    category=RecommendationCategory.INFRASTRUCTURE,
+                    priority=RecommendationPriority.CRITICAL,
+                    title="Scale System Resources - High CPU Usage",
+                    description=f"System CPU usage is critical ({system_health.cpu_usage:.1f}%)",
+                    impact_assessment="Critical impact on all system operations",
+                    effort_required="High - infrastructure scaling",
+                    actionable_steps=[
+                        "Scale up compute resources immediately",
+                        "Implement horizontal scaling for search services",
+                        "Add load balancing for search queries",
+                        "Optimize resource-intensive operations",
+                        "Consider auto-scaling configuration",
+                    ],
+                    expected_outcome="Improved system performance and reliability",
+                    metrics_to_track=["cpu_usage", "response_time", "error_rate"],
+                    supporting_data={"cpu_usage": system_health.cpu_usage},
+                    estimated_improvement=50.0,
+                    due_date=datetime.utcnow() + timedelta(days=7),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
+
+        if system_health.memory_usage > 85:
+            recommendations.append(
+                QualityRecommendation(
+                    id=str(uuid.uuid4()),
+                    category=RecommendationCategory.INFRASTRUCTURE,
+                    priority=RecommendationPriority.HIGH,
+                    title="Optimize Memory Usage",
+                    description=f"System memory usage is high ({system_health.memory_usage:.1f}%)",
+                    impact_assessment="High impact on system stability and performance",
+                    effort_required="Medium - memory optimization",
+                    actionable_steps=[
+                        "Analyze memory usage patterns",
+                        "Implement memory-efficient algorithms",
+                        "Add memory monitoring and alerts",
+                        "Optimize data structures and caching",
+                        "Consider memory scaling",
+                    ],
+                    expected_outcome="Reduced memory usage and improved stability",
+                    metrics_to_track=["memory_usage", "error_rate", "performance"],
+                    supporting_data={"memory_usage": system_health.memory_usage},
+                    estimated_improvement=30.0,
+                    due_date=datetime.utcnow() + timedelta(days=14),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
             )
 
         return recommendations
@@ -557,45 +561,49 @@ class QualityRecommendationsService:
         """Generate monitoring-related recommendations"""
         recommendations = []
 
-        # Check for active alerts
+        # Check for active alerts. Only the dependency call is tolerated.
         try:
             alerts = await performance_dashboard_service.get_active_alerts(
                 organization_id
             )
-
-            if len(alerts) > 10:
-                recommendations.append(
-                    QualityRecommendation(
-                        id=str(uuid.uuid4()),
-                        category=RecommendationCategory.MONITORING,
-                        priority=RecommendationPriority.MEDIUM,
-                        title="Improve Alert Management - Too Many Active Alerts",
-                        description=f"Too many active alerts ({len(alerts)}) may indicate alert fatigue",
-                        impact_assessment="Medium impact on operational efficiency",
-                        effort_required="Low - alert configuration optimization",
-                        actionable_steps=[
-                            "Review and consolidate alert rules",
-                            "Implement alert correlation and grouping",
-                            "Add alert severity classification",
-                            "Implement alert acknowledgment workflows",
-                            "Schedule regular alert rule reviews",
-                        ],
-                        expected_outcome="Reduced alert noise and improved response times",
-                        metrics_to_track=[
-                            "alert_count",
-                            "mean_time_to_resolution",
-                            "false_positive_rate",
-                        ],
-                        supporting_data={"active_alerts": len(alerts)},
-                        estimated_improvement=25.0,
-                        due_date=datetime.utcnow() + timedelta(days=30),
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                    )
-                )
-
         except Exception as e:
-            logger.warning(f"Could not get alerts for monitoring recommendations: {e}")
+            logger.warning(
+                "Could not get alerts for monitoring recommendations: "
+                f"{type(e).__name__}",
+                exc_info=True,
+            )
+            return recommendations
+
+        if len(alerts) > 10:
+            recommendations.append(
+                QualityRecommendation(
+                    id=str(uuid.uuid4()),
+                    category=RecommendationCategory.MONITORING,
+                    priority=RecommendationPriority.MEDIUM,
+                    title="Improve Alert Management - Too Many Active Alerts",
+                    description=f"Too many active alerts ({len(alerts)}) may indicate alert fatigue",
+                    impact_assessment="Medium impact on operational efficiency",
+                    effort_required="Low - alert configuration optimization",
+                    actionable_steps=[
+                        "Review and consolidate alert rules",
+                        "Implement alert correlation and grouping",
+                        "Add alert severity classification",
+                        "Implement alert acknowledgment workflows",
+                        "Schedule regular alert rule reviews",
+                    ],
+                    expected_outcome="Reduced alert noise and improved response times",
+                    metrics_to_track=[
+                        "alert_count",
+                        "mean_time_to_resolution",
+                        "false_positive_rate",
+                    ],
+                    supporting_data={"active_alerts": len(alerts)},
+                    estimated_improvement=25.0,
+                    due_date=datetime.utcnow() + timedelta(days=30),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
 
         return recommendations
 
@@ -603,8 +611,8 @@ class QualityRecommendationsService:
         self, organization_id: str, cutoff_date: datetime
     ) -> List[QualityInsight]:
         """Analyze relevance metric insights"""
+        db = next(get_db_sync())
         try:
-            db = next(get_db_sync())
 
             # Get relevance metrics
             relevance_data = db.execute(
@@ -680,8 +688,13 @@ class QualityRecommendationsService:
                     )
                 ]
 
-        except Exception as e:
-            logger.error(f"Failed to analyze relevance insights: {e}", exc_info=True)
+        except SQLAlchemyError:
+            # Expected absence: database or metric table unavailable. Anything
+            # else is a bug and must surface, not become "no insights".
+            logger.warning(
+                "Failed to analyze relevance insights: database unavailable",
+                exc_info=True,
+            )
         finally:
             db.close()
 
@@ -705,8 +718,8 @@ class QualityRecommendationsService:
         self, organization_id: str, cutoff_date: datetime
     ) -> List[QualityInsight]:
         """Analyze response time insights"""
+        db = next(get_db_sync())
         try:
-            db = next(get_db_sync())
 
             # Get response time from search queries
             response_time_data = db.execute(
@@ -776,8 +789,13 @@ class QualityRecommendationsService:
                     )
                 ]
 
-        except Exception as e:
-            logger.error(f"Failed to analyze response time insights: {e}", exc_info=True)
+        except SQLAlchemyError:
+            # Expected absence: database or metric table unavailable. Anything
+            # else is a bug and must surface, not become "no insights".
+            logger.warning(
+                "Failed to analyze response time insights: database unavailable",
+                exc_info=True,
+            )
         finally:
             db.close()
 
@@ -841,6 +859,7 @@ class QualityRecommendationsService:
             )
 
         return causes
+
 
 # Global service instance
 quality_recommendations_service = QualityRecommendationsService()
