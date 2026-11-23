@@ -1,6 +1,7 @@
 import { type NextRequest } from 'next/server';
 import { updateSession } from '@/lib/supabase/middleware';
 import { AUTH_RETURN_TO_HEADER } from '@/utils/authRedirect';
+import { buildCsp } from '@/lib/csp';
 
 /**
  * Per-request CSP with a script nonce (audit #4 completion).
@@ -14,34 +15,10 @@ import { AUTH_RETURN_TO_HEADER } from '@/utils/authRedirect';
  * style-src keeps 'unsafe-inline' (styled-jsx/Tailwind inline styles — a style
  * nonce is a separate follow-up). The static CSP was removed from
  * next.config.js: two CSP headers enforce their intersection.
+ *
+ * The policy itself lives in src/lib/csp.ts (GOO-722) so tests and the
+ * Playwright CSP specs use the exact production policy.
  */
-function buildCsp(nonce: string): string {
-  return [
-    "default-src 'self'",
-    "base-uri 'self'",
-    "object-src 'none'",
-    "frame-src 'self' blob:",
-    "frame-ancestors 'none'",
-    "form-action 'self'",
-    // React dev mode needs eval() for debugging features (callstack
-    // reconstruction); never emitted in production builds.
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${
-      process.env.NODE_ENV === 'development' ? " 'unsafe-eval'" : ''
-    }`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
-    "font-src 'self' data:",
-    // Dev: the browser calls the backend directly (getPublicApiOrigin falls
-    // back to http://localhost:8000), which https:/wss: alone would block.
-    `connect-src 'self' https: wss:${
-      process.env.NODE_ENV === 'development'
-        ? ' http://localhost:8000 ws://localhost:8000 http://127.0.0.1:8000 ws://127.0.0.1:8000'
-        : ''
-    }`,
-    "worker-src 'self' blob:",
-    ...(process.env.NODE_ENV === 'development' ? [] : ['upgrade-insecure-requests']),
-  ].join('; ');
-}
 
 // NOTE (AU8, 2026-07-16): this proxy intentionally does NOT gate auth. It
 // only refreshes the Supabase session cookie (updateSession) and sets the

@@ -82,6 +82,7 @@ import {
 import { useProjectStore } from '@/store/projectStore';
 import { useAuthStore } from '@/stores/authStore';
 import { v5 as uuidv5 } from 'uuid';
+import { PROJECT_MUTATING_TOOLS } from '@/lib/agent-tools';
 
 /**
  * Map a raw rag_context SSE item ({document_id, title, content, score} from
@@ -288,15 +289,6 @@ function resetStreamingTurnState(): void {
     streamingThreadId: null,
   });
 }
-
-const PROJECT_MUTATING_TOOLS = new Set([
-  'ingest_arxiv',
-  'add_document_to_project',
-  'create_project',
-  'create_project_note',
-  'create_draft',
-  'revise_draft',
-]);
 
 // ============================================
 // TYPES
@@ -1519,7 +1511,6 @@ export function useChatStreaming(
             },
             onToolStart: (tool, args, callId) => {
               if (!isCurrentSession()) return;
-              console.log('[Agent] Tool start:', tool, args);
               if (currentThreadId && !isReplayedPrefix?.()) {
                 useAgentActivityStore
                   .getState()
@@ -1546,7 +1537,6 @@ export function useChatStreaming(
             },
             onToolEnd: (tool, result, isError, callId) => {
               if (!isCurrentSession()) return;
-              console.log('[Agent] Tool end:', tool, result, { isError });
               const remainsPending = isPendingToolResult(result, isError);
               const resultFailed = isFailedToolResult(result, isError);
               const replayedPrefix = isReplayedPrefix?.() ?? false;
@@ -1639,7 +1629,6 @@ export function useChatStreaming(
             },
             onConfirmation: (threadId, confirmation, runId) => {
               if (!isCurrentSession()) return;
-              console.log('[Agent] HITL confirmation needed:', confirmation);
               streamHadConfirmation = true;
               const confirmationRunId =
                 runId ??
@@ -2416,10 +2405,6 @@ export function useChatStreaming(
 
             if (preflightWasSuperseded()) return;
             const dynamicTitle = generateConversationTitle(content);
-            console.log(
-              '[Chat] Creating new thread in database with title:',
-              dynamicTitle
-            );
             const newThread = await workspaceService.createThread(
               buildThreadCreateRequest({
                 conversationId: threadConversation.id,

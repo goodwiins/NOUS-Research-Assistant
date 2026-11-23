@@ -89,7 +89,9 @@ async function request<T>(
     } catch (err) {
       clearTimeout(timeout);
 
-      if (err instanceof BackendApiError) throw err;
+      // HTTP errors and schema mismatches are deterministic: retrying
+      // repeats the same answer (GOO-678).
+      if (err instanceof BackendApiError || err instanceof z.ZodError) throw err;
 
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt === maxRetries) break;

@@ -312,6 +312,62 @@ class TestWorkflowEngine:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("wrap", [False, True])
+    async def test_step_failure_logs_cause_type_and_origin_without_content(
+        self, caplog: pytest.LogCaptureFixture, wrap: bool
+    ) -> None:
+        from src.services.research_engine.step_executor import StepExecutionError
+
+        def _provider_call() -> None:
+            raise ConnectionError("PRIVATE_PROMPT_TEXT")
+
+        async def _execute(*_args: object, **_kwargs: object) -> StepResult:
+            try:
+                _provider_call()
+            except ConnectionError as exc:
+                if wrap:
+                    raise StepExecutionError(
+                        "research stage provider call failed", model_calls=1
+                    ) from exc
+                raise
+            raise AssertionError("unreachable")
+
+        mock_executor = AsyncMock(spec=StepExecutor)
+        mock_executor.execute.side_effect = _execute
+        engine = WorkflowEngine(step_executor=mock_executor)
+
+        with caplog.at_level("INFO"):
+            events = [
+                event
+                async for event in engine.run(
+                    {"steps": [{"id": "extract", "type": "extract"}]}, uuid4()
+                )
+            ]
+
+        assert events[-1]["event"] == "run_failed"
+        failures = [
+            record
+            for record in caplog.records
+            if record.getMessage() == "Research step execution failed"
+        ]
+        assert len(failures) == 1
+        record = failures[0]
+        assert record.step_id == "extract"
+        assert record.root_cause_type == "ConnectionError"
+        assert record.root_cause_origin.endswith(
+            f"_provider_call:{_provider_call.__code__.co_firstlineno + 1}"
+        )
+        if wrap:
+            assert record.error_type == "StepExecutionError"
+            assert record.cause_chain == ["ConnectionError"]
+            assert record.levelname == "WARNING"
+        else:
+            assert record.error_type == "ConnectionError"
+            assert record.levelname == "ERROR"
+        assert record.exc_info is None
+        assert "PRIVATE_PROMPT_TEXT" not in json.dumps(record.__dict__, default=str)
+
+    @pytest.mark.asyncio
     async def test_malformed_telemetry_value_cannot_fail_run_or_leak_content(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
