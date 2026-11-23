@@ -279,6 +279,121 @@ describe('useAuthStore first-load profile failures (FL2E-2)', () => {
     expect(apiGet).toHaveBeenCalledTimes(1);
   });
 
+  it('marks the verified profile unavailable once retries run out, and clears it on recovery', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+
+    apiGet.mockRejectedValue(UNAVAILABLE());
+    await useAuthStore.getState().fetchProfile();
+    // Still retrying: not yet reported as unavailable.
+    expect(useAuthStore.getState().profileUnavailable).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(useAuthStore.getState().profileUnavailable).toBe(true);
+
+    apiGet.mockResolvedValueOnce(PROFILE);
+    await useAuthStore.getState().fetchProfile();
+    expect(useAuthStore.getState()).toMatchObject({
+      isAuthenticated: true,
+      profileUnavailable: false,
+      error: null,
+    });
+  });
+
+  it('does not mark the profile unavailable when the token is rejected', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    apiGet.mockRejectedValueOnce(
+      new APIErrorClass({
+        message: 'Invalid token',
+        status_code: 401,
+        type: 'auth_error',
+      })
+    );
+    await useAuthStore.getState().fetchProfile();
+    expect(useAuthStore.getState().profileUnavailable).toBe(false);
+  });
+
+  it('retryProfile holds the loading state and runs a fresh retry chain', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+
+    apiGet.mockRejectedValue(UNAVAILABLE());
+    await useAuthStore.getState().fetchProfile();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(apiGet).toHaveBeenCalledTimes(3);
+
+    const retry = useAuthStore.getState().retryProfile();
+    expect(useAuthStore.getState().isLoading).toBe(true);
+    await retry;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(apiGet).toHaveBeenCalledTimes(6);
+    expect(useAuthStore.getState()).toMatchObject({
+      isLoading: false,
+      profileUnavailable: true,
+    });
+  });
+
+  it('gives the next account all of its retries after a switch', async () => {
+    const { useAuthStore, apiGet, getUser, getSession, emit } =
+      await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+
+    // User 1 uses one retry, then the account switches to user 2.
+    apiGet.mockRejectedValue(UNAVAILABLE());
+    await useAuthStore.getState().fetchProfile();
+    expect(apiGet).toHaveBeenCalledTimes(1);
+
+    const userB = { id: 'user-2' };
+    getUser.mockResolvedValue({ data: { user: userB }, error: null });
+    getSession.mockResolvedValue({
+      data: { session: { access_token: 'access-token-2', user: userB } },
+    });
+    emit('SIGNED_IN', { access_token: 'access-token-2', user: userB });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // User 2: first attempt plus both retries; user 1's timer never fires.
+    expect(apiGet).toHaveBeenCalledTimes(4);
+    expect(useAuthStore.getState().profileUnavailable).toBe(true);
+  });
+
+  it('gives a new sign-in of the same account a fresh retry budget', async () => {
+    const { useAuthStore, apiGet, emit } = await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+
+    // First load uses one attempt, then the user signs in again; that
+    // sign-in's own /auth/me fails too.
+    apiGet.mockRejectedValue(UNAVAILABLE());
+    await useAuthStore.getState().fetchProfile();
+    await expect(
+      useAuthStore.getState().signIn('ada@example.com', 'synthetic-password')
+    ).rejects.toThrow('Service unavailable');
+    expect(apiGet).toHaveBeenCalledTimes(2);
+
+    emit('TOKEN_REFRESHED', SESSION);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // The new sign-in's chain: first attempt plus both retries.
+    expect(apiGet).toHaveBeenCalledTimes(5);
+  });
+
+  it('keeps a single retry chain when an outside fetch fails meanwhile', async () => {
+    const { useAuthStore, apiGet } = await loadStore();
+    await stampOwner('user-1');
+    vi.useFakeTimers();
+
+    apiGet.mockRejectedValue(UNAVAILABLE());
+    await useAuthStore.getState().fetchProfile();
+    // TOKEN_REFRESHED, a focus refetch... while the first retry is pending.
+    await useAuthStore.getState().fetchProfile();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(apiGet).toHaveBeenCalledTimes(3);
+    expect(useAuthStore.getState().profileUnavailable).toBe(true);
+  });
+
   it('drops a pending retry when the user signs out meanwhile', async () => {
     const { useAuthStore, apiGet, emit } = await loadStore();
     vi.useFakeTimers();
