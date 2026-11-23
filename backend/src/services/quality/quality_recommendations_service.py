@@ -7,7 +7,7 @@ import json
 import logging
 import statistics
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -82,6 +82,10 @@ class QualityRecommendation:
     updated_at: datetime = None
 
 
+class RecommendationTrackingUnavailable(RuntimeError):
+    """Raised when a write the service cannot persist is requested."""
+
+
 @dataclass
 class QualityInsight:
     """Insight about quality metrics"""
@@ -94,6 +98,7 @@ class QualityInsight:
     impact_area: str
     root_causes: List[str]
     related_metrics: List[str]
+    supporting_data: Dict[str, Any] = field(default_factory=dict)
 
 
 class QualityRecommendationsService:
@@ -270,78 +275,29 @@ class QualityRecommendationsService:
     ) -> bool:
         """Track implementation progress of a recommendation"""
 
-        # In a real implementation, this would update a database table
-        # For now, we'll just log the update
-        logger.info(
-            f"Recommendation {recommendation_id} status updated to {status.value}"
+        # Nothing stores recommendation progress. Reporting success here told
+        # clients a status change was saved when it was not, so say so instead.
+        raise RecommendationTrackingUnavailable(
+            "Recommendation progress tracking is not available"
         )
-        if notes:
-            logger.info(f"Notes: {notes}")
-        if actual_improvement is not None:
-            logger.info(f"Actual improvement: {actual_improvement}%")
-
-        return True
 
     async def get_recommendation_effectiveness(
         self, organization_id: str, completed_days: int = 30
     ) -> Dict[str, Any]:
         """Analyze effectiveness of implemented recommendations"""
 
-        try:
-            # Get recent quality metrics
-            recent_metrics = await self._get_recent_quality_metrics(
-                organization_id, completed_days
-            )
-
-            # Compare with baseline metrics (before recommendations)
-            baseline_metrics = await self._get_baseline_quality_metrics(
-                organization_id, completed_days * 2
-            )
-
-            effectiveness = {}
-
-            for metric_name in [
-                "relevance",
-                "precision",
-                "recall",
-                "response_time",
-                "user_satisfaction",
-            ]:
-                recent_value = recent_metrics.get(metric_name, 0)
-                baseline_value = baseline_metrics.get(metric_name, 0)
-
-                if baseline_value > 0:
-                    improvement = (
-                        (recent_value - baseline_value) / baseline_value
-                    ) * 100
-                    effectiveness[metric_name] = {
-                        "baseline": baseline_value,
-                        "current": recent_value,
-                        "improvement_percentage": improvement,
-                    }
-                else:
-                    effectiveness[metric_name] = {
-                        "baseline": baseline_value,
-                        "current": recent_value,
-                        "improvement_percentage": 0,
-                    }
-
-            return {
-                "organization_id": organization_id,
-                "period_days": completed_days,
-                "effectiveness": effectiveness,
-                "overall_improvement": (
-                    statistics.mean(
-                        [e["improvement_percentage"] for e in effectiveness.values()]
-                    )
-                    if effectiveness
-                    else 0
-                ),
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to get recommendation effectiveness: {e}")
-            raise
+        # No baseline is recorded when a recommendation is implemented, so a
+        # before/after comparison cannot be measured. The previous version
+        # compared two hard-coded dictionaries and served the difference as
+        # the organization's improvement; report "not available" instead.
+        return {
+            "organization_id": organization_id,
+            "period_days": completed_days,
+            "available": False,
+            "reason": "Recommendation effectiveness is not measured yet",
+            "effectiveness": {},
+            "overall_improvement": None,
+        }
 
     async def _generate_content_recommendations(
         self, insights: List[QualityInsight], organization_id: str
@@ -725,7 +681,7 @@ class QualityRecommendationsService:
                 ]
 
         except Exception as e:
-            logger.error(f"Failed to analyze relevance insights: {e}")
+            logger.error(f"Failed to analyze relevance insights: {e}", exc_info=True)
         finally:
             db.close()
 
@@ -756,14 +712,14 @@ class QualityRecommendationsService:
             response_time_data = db.execute(
                 text("""
                 SELECT
-                    AVG(sq.response_time) as current_value,
+                    AVG(sq.search_duration_ms) as current_value,
                     COUNT(*) as sample_count,
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sq.response_time) as p95
+                    PERCENTILE_CONT(0.95) WITHIN GROUP
+                        (ORDER BY sq.search_duration_ms) as p95
                 FROM search_queries sq
-                JOIN search_sessions s ON sq.session_id = s.id
-                WHERE s.organization_id = :org_id
+                WHERE sq.organization_id = :org_id
                     AND sq.created_at >= :cutoff_date
-                    AND sq.response_time IS NOT NULL
+                    AND sq.search_duration_ms IS NOT NULL
             """),
                 {"org_id": organization_id, "cutoff_date": cutoff_date},
             ).fetchone()
@@ -778,13 +734,12 @@ class QualityRecommendationsService:
                 prev_cutoff = cutoff_date - period_length
                 prev_rt_data = db.execute(
                     text("""
-                    SELECT AVG(sq.response_time) as prev_value
+                    SELECT AVG(sq.search_duration_ms) as prev_value
                     FROM search_queries sq
-                    JOIN search_sessions s ON sq.session_id = s.id
-                    WHERE s.organization_id = :org_id
+                    WHERE sq.organization_id = :org_id
                         AND sq.created_at >= :prev_cutoff
                         AND sq.created_at < :cutoff_date
-                        AND sq.response_time IS NOT NULL
+                        AND sq.search_duration_ms IS NOT NULL
                 """),
                     {
                         "org_id": organization_id,
@@ -822,7 +777,7 @@ class QualityRecommendationsService:
                 ]
 
         except Exception as e:
-            logger.error(f"Failed to analyze response time insights: {e}")
+            logger.error(f"Failed to analyze response time insights: {e}", exc_info=True)
         finally:
             db.close()
 
@@ -886,33 +841,6 @@ class QualityRecommendationsService:
             )
 
         return causes
-
-    async def _get_recent_quality_metrics(
-        self, organization_id: str, days_back: int
-    ) -> Dict[str, float]:
-        """Get recent quality metrics"""
-        # Implementation to fetch recent metrics
-        return {
-            "relevance": 0.75,
-            "precision": 0.82,
-            "recall": 0.78,
-            "response_time": 800.0,
-            "user_satisfaction": 4.1,
-        }
-
-    async def _get_baseline_quality_metrics(
-        self, organization_id: str, days_back: int
-    ) -> Dict[str, float]:
-        """Get baseline quality metrics"""
-        # Implementation to fetch baseline metrics
-        return {
-            "relevance": 0.65,
-            "precision": 0.75,
-            "recall": 0.70,
-            "response_time": 1200.0,
-            "user_satisfaction": 3.8,
-        }
-
 
 # Global service instance
 quality_recommendations_service = QualityRecommendationsService()

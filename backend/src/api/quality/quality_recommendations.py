@@ -21,6 +21,7 @@ from src.services.quality.quality_recommendations_service import (
     RecommendationCategory,
     RecommendationPriority,
     RecommendationStatus,
+    RecommendationTrackingUnavailable,
     quality_recommendations_service,
 )
 
@@ -201,6 +202,13 @@ async def update_recommendation_progress(
                 status_code=400, detail="Failed to update recommendation progress"
             )
 
+    except RecommendationTrackingUnavailable:
+        raise HTTPException(
+            status_code=501,
+            detail="Recommendation progress tracking is not available",
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update recommendation progress: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -225,6 +233,8 @@ async def get_recommendation_effectiveness(
         return {
             "organization_id": effectiveness["organization_id"],
             "period_days": completed_days,
+            "available": effectiveness["available"],
+            "reason": effectiveness.get("reason"),
             "effectiveness": effectiveness["effectiveness"],
             "overall_improvement": effectiveness["overall_improvement"],
             "analyzed_at": datetime.utcnow().isoformat(),
