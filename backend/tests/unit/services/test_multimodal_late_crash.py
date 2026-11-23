@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.orm import Session
@@ -152,7 +152,7 @@ def _run_retry_task(
 
     monkeypatch.setattr(tasks, "SessionLocal", lambda: db)
     monkeypatch.setattr(tasks, "MultimodalProcessingService", FakeService)
-    return tasks.retry_failed_processing.run(str(job.id))
+    return cast(dict[str, Any], tasks.retry_failed_processing.run(str(job.id)))
 
 
 def test_the_retry_task_reports_failed_when_the_job_row_failed(
