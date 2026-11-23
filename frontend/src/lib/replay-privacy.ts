@@ -13,13 +13,18 @@
  *
  * Defences, in order:
  *
- * 1. Pages that can drop the param from the address bar right after reading
- *    it (`stripUrlParams`): `/search` drops `q`, `/verify-email` drops
- *    `token_hash`.
- * 2. While the URL still carries one (cli-auth keeps `session_id` so refresh
- *    and the login round trip keep working), replay is stopped WITHOUT
+ * 1. One-time secrets with no use in the address bar are dropped from it
+ *    right after they are read (`stripUrlParams`): `/verify-email` drops
+ *    `token_hash` and `type`.
+ * 2. While the URL carries a sensitive param, replay is stopped WITHOUT
  *    sending, which discards its buffer, and buffering restarts with a fresh
- *    snapshot of the clean URL once the param is gone (`syncReplayWithUrl`).
+ *    snapshot of the clean URL once the param is gone. This covers URLs that
+ *    keep their param on purpose: `/search?q=` (refresh, Back and bookmarks
+ *    need it), cli-auth's `session_id` and the ORCID callback's `code`.
+ *    `installReplayUrlGuard` checks every history change: it wraps
+ *    `pushState`/`replaceState` before Next patches them, so Next's own
+ *    navigations and history writes pass through it, and replay is stopped
+ *    BEFORE the address bar shows a sensitive URL.
  * 3. Links whose target carries a query are blocked (`REPLAY_BLOCK_SELECTORS`):
  *    recorded as empty placeholders, with no `href`.
  *
@@ -80,9 +85,15 @@ export function hasSensitiveUrlParams(href: string): boolean {
 }
 
 /**
- * Remove `keys` from the current URL in place. Passes Next's history state
- * through so back/forward keep working; Next syncs `useSearchParams` with
- * native `replaceState`.
+ * Remove `keys` from the current URL in place.
+ *
+ * The state must be `null`, not `history.state`: Next's patched
+ * `replaceState` skips calls whose state carries its own `__NA` marker, so
+ * passing Next's state through would change the address bar but not the
+ * router, and the router would write the old URL back on its next update.
+ * With `null`, Next copies its internal state into the entry (back/forward
+ * keep working) and moves its own URL, so `useSearchParams`, `refresh()` and
+ * later navigations no longer carry the param.
  */
 export function stripUrlParams(keys: readonly string[]): void {
   if (typeof window === 'undefined') return;
@@ -90,11 +101,7 @@ export function stripUrlParams(keys: readonly string[]): void {
   const present = keys.filter((key) => url.searchParams.has(key));
   if (present.length === 0) return;
   for (const key of present) url.searchParams.delete(key);
-  window.history.replaceState(
-    window.history.state,
-    '',
-    `${url.pathname}${url.search}${url.hash}`
-  );
+  window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
 /** The slice of the replay integration the guard drives. */
@@ -105,41 +112,97 @@ export interface ReplayControl {
 }
 
 let pausedByGuard = false;
-let queue: Promise<void> = Promise.resolve();
 
 /**
  * Stop replay (discarding, never sending, what it holds) while `href` is
- * sensitive; resume buffering with a fresh snapshot once it is clean. Calls
- * are serialised so a quick sensitive → clean change cannot race the async
- * stop. Never throws.
+ * sensitive; resume buffering with a fresh snapshot once it is clean.
+ *
+ * Synchronous: without a flush the SDK's `stop()` disables recording and
+ * drops its buffer before it first awaits (SDK 10.78), so a caller can stop
+ * replay and only then change the URL. Never throws.
  */
 export function syncReplayWithUrl(
   href: string,
   replay: ReplayControl | undefined
-): Promise<void> {
-  queue = queue.then(async () => {
-    if (!replay) return;
-    try {
-      if (hasSensitiveUrlParams(href)) {
-        if (replay.getRecordingMode() !== undefined) {
-          pausedByGuard = true;
-          await replay.stop({ flush: false });
-        }
-      } else if (pausedByGuard) {
-        pausedByGuard = false;
-        replay.startBuffering();
+): void {
+  if (!replay) return;
+  try {
+    if (hasSensitiveUrlParams(href)) {
+      if (replay.getRecordingMode() !== undefined) {
+        pausedByGuard = true;
+        void replay.stop({ flush: false }).catch(() => undefined);
       }
-    } catch {
-      // Replay housekeeping must never break the page.
+    } else if (pausedByGuard) {
+      pausedByGuard = false;
+      replay.startBuffering();
     }
-  });
-  return queue;
+  } catch {
+    // Replay housekeeping must never break the page.
+  }
 }
 
-/** Test hook: forget the guard's pause state and queue. */
+let installed = false;
+let uninstall: (() => void) | undefined;
+
+/**
+ * Check every URL change, then the current URL (GOO-734).
+ *
+ * Call it once, right after `Sentry.init` and before the app hydrates. Next
+ * patches `history.pushState`/`replaceState` when its router mounts and
+ * calls whatever it found, so wrapping them first puts every history change
+ * through this guard: client navigations, `router.refresh()`, Next's own
+ * URL writes and code calling `history` directly. A change TO a sensitive
+ * URL stops replay before the address bar changes; a change to a clean URL
+ * resumes it afterwards. Back/forward arrive as `popstate`.
+ */
+export function installReplayUrlGuard(
+  getReplay: () => ReplayControl | undefined
+): void {
+  if (typeof window === 'undefined' || installed) return;
+  installed = true;
+  const { history } = window;
+  const natives = { pushState: history.pushState, replaceState: history.replaceState };
+  const check = (href: string): void => {
+    try {
+      syncReplayWithUrl(href, getReplay());
+    } catch {
+      // Never break navigation.
+    }
+  };
+  for (const method of ['pushState', 'replaceState'] as const) {
+    const native = history[method].bind(history);
+    history[method] = function guardedHistoryChange(
+      data: unknown,
+      unused: string,
+      url?: string | URL | null
+    ): void {
+      // Relative and unparseable URLs are handled by hasSensitiveUrlParams
+      // (an unparseable one counts as sensitive).
+      if (url !== undefined && url !== null && hasSensitiveUrlParams(String(url))) {
+        check(String(url));
+      }
+      native(data, unused, url);
+      check(window.location.href);
+    };
+  }
+  const onUrlChange = (): void => check(window.location.href);
+  window.addEventListener('popstate', onUrlChange);
+  window.addEventListener('hashchange', onUrlChange);
+  uninstall = () => {
+    history.pushState = natives.pushState;
+    history.replaceState = natives.replaceState;
+    window.removeEventListener('popstate', onUrlChange);
+    window.removeEventListener('hashchange', onUrlChange);
+  };
+  check(window.location.href);
+}
+
+/** Test hook: forget the pause state and undo `installReplayUrlGuard`. */
 export function resetReplayPrivacyForTests(): void {
   pausedByGuard = false;
-  queue = Promise.resolve();
+  uninstall?.();
+  uninstall = undefined;
+  installed = false;
 }
 
 /**

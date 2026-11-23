@@ -6,8 +6,8 @@
 import * as Sentry from '@sentry/browser';
 import {
   REPLAY_PRIVACY_OPTIONS,
+  installReplayUrlGuard,
   stripUrlParams,
-  syncReplayWithUrl,
   type ReplayControl,
 } from '../../src/lib/replay-privacy';
 import {
@@ -18,8 +18,10 @@ import {
 const replay = (): ReplayControl | undefined =>
   Sentry.getReplay() as ReplayControl | undefined;
 
+let probes = 0;
+
 const harness = {
-  init(useGuard: boolean): Promise<void> {
+  init(useGuard: boolean): void {
     Sentry.init({
       dsn: 'https://public@sentry.replay.test/1',
       replaysSessionSampleRate: 0,
@@ -37,21 +39,23 @@ const harness = {
         scrubReplayEventsIntegration(),
       ],
     });
-    return useGuard
-      ? syncReplayWithUrl(window.location.href, replay())
-      : Promise.resolve();
+    // As in instrumentation-client: the guard checks the current URL and
+    // every later history change.
+    if (useGuard) installReplayUrlGuard(replay);
   },
   strip(keys: string[]): void {
     stripUrlParams(keys);
   },
-  sync(): Promise<void> {
-    return syncReplayWithUrl(window.location.href, replay());
+  navigate(path: string): void {
+    window.history.pushState(null, '', path);
   },
   mode(): string | undefined {
     return replay()?.getRecordingMode();
   },
   async fail(): Promise<void> {
-    Sentry.captureException(new Error('replay privacy probe'));
+    // A unique message each time: Sentry's Dedupe drops a repeated error.
+    probes += 1;
+    Sentry.captureException(new Error(`replay privacy probe ${probes}`));
     await Sentry.flush(5000);
   },
 };

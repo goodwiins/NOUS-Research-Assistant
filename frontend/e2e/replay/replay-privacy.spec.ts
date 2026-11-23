@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { resolve } from 'node:path';
-import { gunzipSync, inflateSync } from 'node:zlib';
+import { decodeEnvelope, type Captured } from './envelopes';
 import { build } from 'vite';
 
 /**
@@ -46,56 +46,6 @@ test.beforeAll(async () => {
   harnessJs = chunk.code;
 });
 
-interface Captured {
-  /** Every envelope, decoded to text (recordings decompressed). */
-  text: string[];
-  recordings: string[];
-}
-
-/** Decode a Sentry envelope; replay_recording payloads may be compressed. */
-function decodeEnvelope(body: Buffer, captured: Captured): void {
-  const parts: string[] = [];
-  let offset = body.indexOf(0x0a) + 1; // skip envelope header
-  parts.push(body.subarray(0, offset).toString('utf8'));
-  while (offset < body.length) {
-    const headerEnd = body.indexOf(0x0a, offset);
-    if (headerEnd < 0) break;
-    const headerText = body.subarray(offset, headerEnd).toString('utf8');
-    parts.push(headerText);
-    const header = JSON.parse(headerText) as { type: string; length?: number };
-    const start = headerEnd + 1;
-    const end =
-      header.length !== undefined
-        ? start + header.length
-        : (() => {
-            const next = body.indexOf(0x0a, start);
-            return next < 0 ? body.length : next;
-          })();
-    const payload = body.subarray(start, end);
-    if (header.type === 'replay_recording') {
-      const split = payload.indexOf(0x0a);
-      const meta = payload.subarray(0, split).toString('utf8');
-      const data = payload.subarray(split + 1);
-      let recording: string;
-      try {
-        recording = inflateSync(data).toString('utf8');
-      } catch {
-        try {
-          recording = gunzipSync(data).toString('utf8');
-        } catch {
-          recording = data.toString('utf8');
-        }
-      }
-      captured.recordings.push(recording);
-      parts.push(meta, recording);
-    } else {
-      parts.push(payload.toString('utf8'));
-    }
-    offset = end + 1;
-  }
-  captured.text.push(parts.join('\n'));
-}
-
 async function openPage(page: Page, path: string): Promise<Captured> {
   const captured: Captured = { text: [], recordings: [] };
   await page.route('https://sentry.replay.test/**', async (route) => {
@@ -123,9 +73,9 @@ async function openPage(page: Page, path: string): Promise<Captured> {
 }
 
 type Harness = {
-  init(useGuard: boolean): Promise<void>;
+  init(useGuard: boolean): void;
   strip(keys: string[]): void;
-  sync(): Promise<void>;
+  navigate(path: string): void;
   mode(): string | undefined;
   fail(): Promise<void>;
 };
@@ -133,6 +83,13 @@ const call = <T>(page: Page, fn: (h: Harness) => T | Promise<T>): Promise<T> =>
   page.evaluate(
     `(${fn.toString()})(window.__replayHarness)`
   ) as Promise<T>;
+
+const navigate = (page: Page, path: string): Promise<void> =>
+  page.evaluate(
+    (target) =>
+      (window as unknown as { __replayHarness: Harness }).__replayHarness.navigate(target),
+    path
+  );
 
 async function failAndCollect(page: Page, captured: Captured): Promise<void> {
   await call(page, (h) => h.fail());
@@ -164,8 +121,8 @@ test('stripped URL: replay restarts clean and no token or link target is sent', 
   await call(page, (h) => h.init(true));
   // Sensitive URL: the buffer holding the page-load snapshot is dropped.
   expect(await call(page, (h) => h.mode())).toBeUndefined();
+  // The strip's replaceState passes through the guard, which resumes.
   await call(page, (h) => h.strip(['token_hash', 'type']));
-  await call(page, (h) => h.sync());
   expect(await call(page, (h) => h.mode())).toBe('buffer');
   await failAndCollect(page, captured);
   await expect.poll(() => captured.recordings.length, { timeout: 15_000 }).toBeGreaterThan(0);
@@ -188,12 +145,22 @@ test('a URL that keeps its secret sends no replay of it', async ({ page }) => {
   expect(captured.text.join('\n')).not.toContain(SESSION);
 });
 
-test('search text is dropped from the URL and the replay', async ({ page }) => {
+test('search text stays in the URL; replay is off until the URL is clean', async ({ page }) => {
   const captured = await openPage(page, `/search?q=${QUERY}`);
   await call(page, (h) => h.init(true));
-  await call(page, (h) => h.strip(['q']));
-  await call(page, (h) => h.sync());
-  expect(new URL(page.url()).search).toBe('');
+  expect(await call(page, (h) => h.mode())).toBeUndefined();
+  expect(new URL(page.url()).searchParams.get('q')).toBe(QUERY);
+  await failAndCollect(page, captured);
+  expect(captured.recordings).toEqual([]);
+  expect(captured.text.join('\n')).not.toContain(QUERY);
+
+  // Leaving the query resumes replay with a fresh snapshot of the clean URL.
+  await navigate(page, '/dashboard');
+  expect(await call(page, (h) => h.mode())).toBe('buffer');
+  // A client navigation back to a query stops it before the URL changes.
+  await navigate(page, `/search?q=${QUERY}`);
+  expect(await call(page, (h) => h.mode())).toBeUndefined();
+  await navigate(page, '/dashboard');
   await failAndCollect(page, captured);
   await expect.poll(() => captured.recordings.length, { timeout: 15_000 }).toBeGreaterThan(0);
   expect(captured.text.join('\n')).not.toContain(QUERY);

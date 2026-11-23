@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   hasSensitiveUrlParams,
+  installReplayUrlGuard,
   resetReplayPrivacyForTests,
   stripUrlParams,
   syncReplayWithUrl,
@@ -39,13 +40,17 @@ describe('stripUrlParams', () => {
     window.history.replaceState({ __next: 'state' }, '', '/verify-email?token_hash=abc&type=signup&error=x#frag');
   });
 
-  it('removes only the named params and keeps history state and fragment', () => {
+  it('removes only the named params, keeps the fragment and hands Next a null state', () => {
     const before = window.history.length;
+    const spy = vi.spyOn(window.history, 'replaceState');
     stripUrlParams(['token_hash', 'type']);
     expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(
       '/verify-email?error=x#frag'
     );
-    expect(window.history.state).toEqual({ __next: 'state' });
+    // Not Next's own state: its patched replaceState skips calls carrying
+    // that state and would leave the router on the old URL.
+    expect(spy).toHaveBeenCalledWith(null, '', '/verify-email?error=x#frag');
+    spy.mockRestore();
     // Replaced, not pushed: back still leaves the page.
     expect(window.history.length).toBe(before);
   });
@@ -58,83 +63,69 @@ describe('stripUrlParams', () => {
   });
 });
 
-describe('syncReplayWithUrl', () => {
-  const makeReplay = (
-    mode: 'buffer' | 'session' | 'off' = 'buffer'
-  ): ReplayControl & {
-    getRecordingMode: ReturnType<typeof vi.fn>;
-    stop: ReturnType<typeof vi.fn>;
-    startBuffering: ReturnType<typeof vi.fn>;
-  } => {
-    let current: 'buffer' | 'session' | undefined = mode === 'off' ? undefined : mode;
-    const control = {
-      getRecordingMode: vi.fn(() => current),
-      stop: vi.fn(async () => {
-        current = undefined;
-      }),
-      startBuffering: vi.fn(() => {
-        current = 'buffer';
-      }),
-    } satisfies ReplayControl;
-    return control;
+const makeReplay = (
+  mode: 'buffer' | 'session' | 'off' = 'buffer'
+): ReplayControl & {
+  getRecordingMode: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+  startBuffering: ReturnType<typeof vi.fn>;
+} => {
+  let current: 'buffer' | 'session' | undefined = mode === 'off' ? undefined : mode;
+  const control = {
+    getRecordingMode: vi.fn(() => current),
+    stop: vi.fn(async () => {
+      current = undefined;
+    }),
+    startBuffering: vi.fn(() => {
+      current = 'buffer';
+    }),
   };
+  control.stop.mockImplementation(async () => {
+    current = undefined;
+  });
+  return control as never;
+};
 
+describe('syncReplayWithUrl', () => {
   beforeEach(() => resetReplayPrivacyForTests());
   afterEach(() => resetReplayPrivacyForTests());
 
-  it('discards (never flushes) the buffer on a sensitive URL and resumes once clean', async () => {
+  it('discards (never flushes) the buffer on a sensitive URL and resumes once clean', () => {
     const replay = makeReplay();
-    await syncReplayWithUrl('/verify-email?token_hash=abc', replay);
+    syncReplayWithUrl('/verify-email?token_hash=abc', replay);
     expect(replay.stop).toHaveBeenCalledWith({ flush: false });
     expect(replay.startBuffering).not.toHaveBeenCalled();
-    await syncReplayWithUrl('/verify-email', replay);
+    syncReplayWithUrl('/verify-email', replay);
     expect(replay.startBuffering).toHaveBeenCalledTimes(1);
     // Clean again: nothing more to do.
-    await syncReplayWithUrl('/dashboard', replay);
+    syncReplayWithUrl('/dashboard', replay);
     expect(replay.startBuffering).toHaveBeenCalledTimes(1);
   });
 
-  it('also stops a replay already recording as a session', async () => {
+  it('also stops a replay already recording as a session', () => {
     const replay = makeReplay('session');
-    await syncReplayWithUrl('/search?q=secret', replay);
+    syncReplayWithUrl('/search?q=secret', replay);
     expect(replay.stop).toHaveBeenCalledWith({ flush: false });
   });
 
-  it('never starts a replay it did not stop', async () => {
+  it('never starts a replay it did not stop', () => {
     const replay = makeReplay('off');
-    await syncReplayWithUrl('/search?q=secret', replay);
+    syncReplayWithUrl('/search?q=secret', replay);
     expect(replay.stop).not.toHaveBeenCalled();
-    await syncReplayWithUrl('/search', replay);
+    syncReplayWithUrl('/search', replay);
     expect(replay.startBuffering).not.toHaveBeenCalled();
   });
 
-  it('serialises a fast sensitive → clean change behind the async stop', async () => {
-    const order: string[] = [];
-    let finishStop!: () => void;
-    const replay: ReplayControl = {
-      getRecordingMode: () => 'buffer',
-      stop: vi.fn(
-        () =>
-          new Promise<void>((done) => {
-            finishStop = () => {
-              order.push('stopped');
-              done();
-            };
-          })
-      ),
-      startBuffering: vi.fn(() => order.push('buffering')),
-    };
-    const first = syncReplayWithUrl('/search?q=secret', replay);
-    const second = syncReplayWithUrl('/search', replay);
-    await vi.waitFor(() => expect(replay.stop).toHaveBeenCalled());
-    expect(replay.startBuffering).not.toHaveBeenCalled();
-    finishStop();
-    await Promise.all([first, second]);
-    expect(order).toEqual(['stopped', 'buffering']);
+  it('stops synchronously, before the caller changes the URL', () => {
+    const replay = makeReplay();
+    syncReplayWithUrl('/search?q=secret', replay);
+    // No await: the stop has been requested and recording is off already.
+    expect(replay.stop).toHaveBeenCalledTimes(1);
+    expect(replay.getRecordingMode()).toBeUndefined();
   });
 
-  it('is a no-op without replay and never throws', async () => {
-    await expect(syncReplayWithUrl('/search?q=x', undefined)).resolves.toBeUndefined();
+  it('is a no-op without replay and never throws', () => {
+    expect(() => syncReplayWithUrl('/search?q=x', undefined)).not.toThrow();
     const broken: ReplayControl = {
       getRecordingMode: () => {
         throw new Error('boom');
@@ -142,6 +133,79 @@ describe('syncReplayWithUrl', () => {
       stop: vi.fn(),
       startBuffering: vi.fn(),
     };
-    await expect(syncReplayWithUrl('/search?q=x', broken)).resolves.toBeUndefined();
+    expect(() => syncReplayWithUrl('/search?q=x', broken)).not.toThrow();
+    const rejecting = makeReplay();
+    rejecting.stop.mockRejectedValueOnce(new Error('boom'));
+    expect(() => syncReplayWithUrl('/search?q=x', rejecting)).not.toThrow();
+  });
+});
+
+describe('installReplayUrlGuard', () => {
+  beforeEach(() => {
+    resetReplayPrivacyForTests();
+    window.history.replaceState(null, '', '/');
+  });
+  afterEach(() => {
+    resetReplayPrivacyForTests();
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('checks the current URL on install', () => {
+    window.history.replaceState(null, '', '/cli-auth?session_id=s-1');
+    const replay = makeReplay();
+    installReplayUrlGuard(() => replay);
+    expect(replay.stop).toHaveBeenCalledWith({ flush: false });
+  });
+
+  it('stops replay BEFORE the address bar shows a sensitive URL', () => {
+    const replay = makeReplay();
+    installReplayUrlGuard(() => replay);
+    let hrefWhenStopped = '';
+    replay.stop.mockImplementation(async () => {
+      hrefWhenStopped = window.location.href;
+      replay.getRecordingMode.mockReturnValue(undefined);
+    });
+    window.history.pushState(null, '', '/search?q=secret');
+    expect(replay.stop).toHaveBeenCalledTimes(1);
+    expect(hrefWhenStopped).not.toContain('secret');
+    expect(window.location.search).toBe('?q=secret');
+  });
+
+  it('resumes after a history change to a clean URL, including a wrapping router patch', () => {
+    const replay = makeReplay();
+    installReplayUrlGuard(() => replay);
+    // Like Next: a later patch that calls the function it found.
+    const found = window.history.replaceState.bind(window.history);
+    window.history.replaceState = (data, unused, url) => found(data, unused, url);
+    window.history.pushState(null, '', '/verify-email?token_hash=t');
+    window.history.replaceState({ __NA: true }, '', '/verify-email');
+    expect(replay.startBuffering).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe('/verify-email');
+  });
+
+  it('re-checks on back/forward', () => {
+    const replay = makeReplay();
+    installReplayUrlGuard(() => replay);
+    // The browser moves the URL itself on Back, then fires popstate.
+    const browserMoves = (path: string): void => {
+      History.prototype.replaceState.call(window.history, null, '', path);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    };
+    browserMoves('/search?q=secret');
+    expect(replay.stop).toHaveBeenCalledTimes(1);
+    browserMoves('/dashboard');
+    expect(replay.startBuffering).toHaveBeenCalledTimes(1);
+  });
+
+  it('installs once and never breaks history when the guard throws', () => {
+    const getReplay = vi.fn(() => {
+      throw new Error('boom');
+    });
+    installReplayUrlGuard(getReplay);
+    const wrapped = window.history.pushState;
+    installReplayUrlGuard(getReplay);
+    expect(window.history.pushState).toBe(wrapped);
+    expect(() => window.history.pushState(null, '', '/search?q=x')).not.toThrow();
+    expect(window.location.search).toBe('?q=x');
   });
 });

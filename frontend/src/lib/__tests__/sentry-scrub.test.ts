@@ -476,7 +476,7 @@ describe('Sentry config wiring', () => {
     expect(source).toContain('Sentry.replayIntegration(REPLAY_PRIVACY_OPTIONS)');
     expect(source).toContain('scrubReplayEventsIntegration()');
     // The page-load snapshot is checked right after init (GOO-734).
-    expect(source).toMatch(/syncReplayWithUrl\(\s*window\.location\.href,\s*Sentry\.getReplay\(\)/);
+    expect(source).toMatch(/installReplayUrlGuard\(\(\) => Sentry\.getReplay\(\)/);
     expect(REPLAY_PRIVACY_OPTIONS).toMatchObject({
       maskAllText: true,
       blockAllMedia: true,

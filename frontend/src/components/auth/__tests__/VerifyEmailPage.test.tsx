@@ -54,7 +54,8 @@ describe('verify-email token_hash flow (GOO-734)', () => {
       expect(verifyOtp).toHaveBeenCalledWith({ token_hash: 'tok-123', type: 'signup' })
     );
     expect(window.location.pathname + window.location.search).toBe('/verify-email');
-    expect(window.history.state).toEqual({ kept: true });
+    // Null state: Next's patch copies its own state in (see the router spec).
+    expect(window.history.state).toBeNull();
 
     // A re-render now sees no token in the URL; the read value must survive
     // and the in-flight verification must not be cancelled.

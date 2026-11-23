@@ -53,7 +53,7 @@ function VerifyEmailContent(): React.JSX.Element | null {
 
   const errorCode = searchParams.get('error');
   // Read the one-time token once: it is stripped from the URL below, and
-  // useSearchParams follows that replaceState.
+  // the router (and so useSearchParams) follows the strip.
   const [{ tokenHash, tokenType }] = useState(() => ({
     tokenHash: searchParams.get('token_hash'),
     tokenType: searchParams.get('type'),

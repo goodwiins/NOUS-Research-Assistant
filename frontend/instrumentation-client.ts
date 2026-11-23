@@ -2,7 +2,7 @@ import * as Sentry from '@sentry/nextjs';
 
 import {
   REPLAY_PRIVACY_OPTIONS,
-  syncReplayWithUrl,
+  installReplayUrlGuard,
   type ReplayControl,
 } from './src/lib/replay-privacy';
 import {
@@ -37,11 +37,9 @@ Sentry.init({
 
 // Replay has already taken its first snapshot, whose Meta event records the
 // full URL. If that URL carries a secret or search text, drop the buffer
-// before anything can send it (GOO-734). ReplayUrlGuard re-checks on every
-// client navigation and resumes buffering once the URL is clean.
-void syncReplayWithUrl(
-  window.location.href,
-  Sentry.getReplay() as ReplayControl | undefined
-);
+// before anything can send it, and check every later history change
+// (GOO-734). This must run before the app hydrates, so Next's history patch
+// wraps the guard rather than the other way round.
+installReplayUrlGuard(() => Sentry.getReplay() as ReplayControl | undefined);
 
 export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;

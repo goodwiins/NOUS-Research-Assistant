@@ -9,7 +9,6 @@ import {
   mapSearchResultToChatMessages,
 } from '@/components/chat/shared/messageViewModel';
 import { getAnalytics } from '@/lib/analytics';
-import { stripUrlParams } from '@/lib/replay-privacy';
 import { searchService } from '@/services/searchService';
 import { SearchRequest } from '@/types/search';
 import type { Citation } from '@/utils/citationParser';
@@ -34,8 +33,7 @@ export default function SearchPage() {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  // When the pending answer started; set by runSearch, read by the typing bubble.
-  const [loadingTimestamp, setLoadingTimestamp] = useState(0);
+  const loadingTimestampRef = useRef(Date.now());
 
   const suggestedQueries = [
     {
@@ -133,7 +131,7 @@ export default function SearchPage() {
       setMessages((prev) => [...prev, userMessage]);
       setInput('');
 
-      setLoadingTimestamp(Date.now());
+      loadingTimestampRef.current = Date.now();
       setIsLoading(true);
 
       try {
@@ -201,25 +199,16 @@ export default function SearchPage() {
   );
 
   // Run an initial query passed via ?q= (e.g. from the dashboard quick search).
-  // Read once from window to avoid a useSearchParams Suspense boundary on
-  // this page; the server render has no window and no hand-off.
-  const [handoffQuery] = useState(() =>
-    typeof window === 'undefined'
-      ? null
-      : new URLSearchParams(window.location.search).get('q')
-  );
+  // Read from window to avoid a useSearchParams Suspense boundary on this page.
   useEffect(() => {
-    // The query is the user's own text: keep it out of the address bar,
-    // history and session replay once read (GOO-734).
-    stripUrlParams(['q']);
-    if (!handoffQuery?.trim()) return;
-    // Start after mount, outside the effect body; cleanup cancels the first
-    // StrictMode mount so the search runs once.
-    const timer = window.setTimeout(() => void runSearch(handoffQuery), 0);
-    return () => window.clearTimeout(timer);
+    const q = new URLSearchParams(window.location.search).get('q');
+    if (q && q.trim()) {
+      setInput(q);
+      void runSearch(q);
+    }
     // Mount-only: consume the param once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handoffQuery]);
+  }, []);
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-background">
@@ -297,7 +286,7 @@ export default function SearchPage() {
                     message={{
                       role: 'assistant',
                       content: '',
-                      timestamp: loadingTimestamp,
+                      timestamp: loadingTimestampRef.current,
                     }}
                     index={messages.length}
                     isTyping={true}
