@@ -101,6 +101,26 @@ describe('DashboardPage stat cards (GOO-649)', () => {
     expect(screen.queryByText('Conversations')).not.toBeInTheDocument();
   });
 
+  it('shows an unmeasured average search time as unavailable, not 0 (GOO-745)', async () => {
+    get.mockImplementation(async (url: string) => {
+      if (url.startsWith('/analytics/performance/search-performance')) {
+        // The backend sends null when no search in the window was timed.
+        return { ...searchPerformanceBody, avg_response_time: null };
+      }
+      throw new Error(`404 ${url}`);
+    });
+
+    render(<DashboardPage />);
+
+    // The source itself is fine: its total still shows.
+    await waitFor(() =>
+      expect(statCard('Searches, last 7 days')).toHaveTextContent('120')
+    );
+    const avg = statCard('Avg search time (ms), last 7 days');
+    expect(avg).toHaveTextContent('—');
+    expect(avg).not.toHaveTextContent(/\b0\b/);
+  });
+
   it('Documents waits for the first response instead of showing the default 0 (F3)', async () => {
     // useDocuments' state before any fetch: loading false, total 0.
     docs.state = { total: 0, hasLoaded: false, error: null };
