@@ -387,15 +387,18 @@ const categorizeQueries = (
   return categories;
 };
 
-const generateUsageHeatmap = (searchPatterns: any) => {
-  // Generate heatmap data for usage patterns
-  const { peak_usage_hours } = searchPatterns;
+export const generateUsageHeatmap = (searchPatterns: any) => {
+  // The API only reports which hours are peak hours, not per-hour volume, so
+  // intensity is binary: 1 for a reported peak hour, 0 otherwise. It used to
+  // be Math.random(), which rendered a different made-up chart on every
+  // refetch (GOO-724).
+  const peakHours: unknown[] = Array.isArray(searchPatterns?.peak_usage_hours)
+    ? searchPatterns.peak_usage_hours
+    : [];
   const heatmapData = [];
 
   for (let hour = 0; hour < 24; hour++) {
-    const intensity = peak_usage_hours.includes(hour)
-      ? Math.random() * 0.5 + 0.5
-      : Math.random() * 0.3 + 0.1;
+    const intensity = peakHours.includes(hour) ? 1 : 0;
     heatmapData.push({
       hour,
       intensity,

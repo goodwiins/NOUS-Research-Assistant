@@ -1,4 +1,4 @@
-> **Stale (2026-10-17 review): this README was written for an earlier component set and its feature list is aspirational. The directory currently holds only `AlertList`, `MetricCard`, `PerformanceMetricsDashboard`, `StatusGrid` and `SystemOverviewDashboard`; check those files for real behavior.**
+> **Stale (2026-10-17 review): this README was written for an earlier component set and its feature list is aspirational. The directory currently holds only `AlertList`, `MetricCard` and `StatusGrid`; check those files for real behavior. `SystemOverviewDashboard` and `PerformanceMetricsDashboard` were never mounted, rendered `Math.random()` values, and were deleted in GOO-724 (2026-11-23); the examples below that use them are historical.**
 
 # Monitoring Dashboard Components
 
@@ -17,46 +17,6 @@ This directory contains a comprehensive set of React components for building ent
 - **Internationalization**: Ready for multi-language support
 
 ## 📦 Components
-
-### Core Dashboards
-
-#### SystemOverviewDashboard
-Main system health and status dashboard providing:
-- Overall system health scores
-- Component health grid
-- SLI/SLO metrics
-- Active alerts overview
-- Real-time system trends
-
-```tsx
-import { SystemOverviewDashboard } from '@/components/monitoring';
-
-<SystemOverviewDashboard
-  autoRefresh={true}
-  refreshInterval={30000}
-  showDetails={true}
-  onSystemHealthClick={(health) => console.log(health)}
-  onAlertClick={(alert) => console.log(alert)}
-/>
-```
-
-#### PerformanceMetricsDashboard
-Detailed performance monitoring dashboard featuring:
-- Latency metrics (P50, P90, P95, P99)
-- Throughput analysis
-- Error rate tracking
-- Resource utilization (CPU, memory, disk, network)
-- Database performance metrics
-
-```tsx
-import { PerformanceMetricsDashboard } from '@/components/monitoring';
-
-<PerformanceMetricsDashboard
-  timeRange="24h"
-  showDetails={true}
-  onTimeRangeChange={(range) => console.log(range)}
-/>
-```
 
 ### Reusable Components
 
