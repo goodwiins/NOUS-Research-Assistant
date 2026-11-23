@@ -268,6 +268,86 @@ def _command_line(script: str, command: str) -> tuple[int | None, list[str]]:
     return exact[0], []
 
 
+# `cat <<EOF`, `: <<'X'`, `<<-"X"`; not the `<<<` here-string.
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_]\w*)\1")
+# `exit`/`exec` where a command starts: line start, after `;`, `&&`, `||`,
+# `|`, `{`, `(`, or a `then`/`else`/`do` keyword.
+_SCRIPT_ENDERS = re.compile(
+    r"(?:^|[;&|({]|\bthen|\belse|\bdo)\s*(exit|exec)\b(?:\s+([^\s;&|)]+))?"
+)
+
+
+def _code(line: str) -> str:
+    """``line`` without its quoted strings and trailing comment."""
+    line = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", line)
+    return re.sub(r"(?:^|\s)#.*$", "", line).strip()
+
+
+def line_contexts(script: str) -> list[tuple[str | None, tuple[str, ...]]]:
+    """For each line: the heredoc opener that swallows it (or None), and the
+    headers of the function/brace/subshell groups open around it, outermost
+    first.
+
+    A group opens on a line ending in ``{`` or ``(`` and closes at the next
+    line at the same indentation that starts with ``}`` or ``)``. A heredoc
+    without its terminator, or a group without its closer, encloses the rest
+    of the script, so a malformed wrapper fails closed."""
+    contexts: list[tuple[str | None, tuple[str, ...]]] = []
+    heredoc: tuple[str, str] | None = None  # (terminator, opener line)
+    groups: list[tuple[int, str]] = []
+    for raw in script.splitlines():
+        stripped = raw.strip()
+        if heredoc is not None:
+            contexts.append((heredoc[1], tuple(g for _, g in groups)))
+            if stripped == heredoc[0]:
+                heredoc = None
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if groups and stripped[:1] in ("}", ")") and indent == groups[-1][0]:
+            groups.pop()
+        contexts.append((None, tuple(g for _, g in groups)))
+        if stripped.startswith("#"):
+            continue
+        opener = _HEREDOC.search(raw)
+        if opener:
+            heredoc = (opener.group(2), stripped)
+        if _code(raw).endswith(("{", "(")):
+            groups.append((indent, stripped))
+    return contexts
+
+
+def _execution_problems(script: str, index: int, command: str) -> list[str]:
+    """Problems that stop the exact gate line at ``index`` from executing:
+    a heredoc around it, a function or group around it, or an earlier line
+    that can end the script cleanly (`exit`, `exit 0`, `true || exit 0`,
+    `exec`).
+
+    `exit N` with a literal N > 0 is allowed: it makes the run fail, never
+    pass. Exits inside a `( )` subshell (the migration probes) are contained."""
+    lines = script.splitlines()
+    contexts = line_contexts(script)
+    heredoc, groups = contexts[index]
+    problems = []
+    if heredoc is not None:
+        problems.append(f"{command!r} is inside a heredoc ({heredoc!r}); it never runs")
+    if groups:
+        problems.append(
+            f"{command!r} must run at the top level, not inside {list(groups)}"
+        )
+    for i in range(index):
+        doc, open_groups = contexts[i]
+        if doc is not None or any(g.endswith("(") for g in open_groups):
+            continue
+        for word, status in _SCRIPT_ENDERS.findall(_code(lines[i])):
+            if word == "exit" and status.isdigit() and int(status) > 0:
+                continue
+            problems.append(
+                f"line {i + 1} ({lines[i].strip()!r}) can end the script "
+                f"before {command!r}; only `exit N` with N > 0 may run first"
+            )
+    return problems
+
+
 def _gated_step_problems(
     script: str,
     command: str,
@@ -282,6 +362,7 @@ def _gated_step_problems(
         return problems
     lines = [ln.strip() for ln in script.splitlines()]
     problems += _continuation_problem(lines, index, command)
+    problems += _execution_problems(script, index, command)
     following = next((ln for ln in lines[index + 1 :] if ln), "")
     if following != check:
         problems.append(f"{command!r} must be followed by {check!r}, not {following!r}")
@@ -519,6 +600,60 @@ SCRIPT_PLANTS: dict[str, tuple[str, str]] = {
         '      step "Trigger.dev node tests (blocking)"\n',
         '      step "Trigger.dev node tests (blocking)"\n      while false; do\n',
     ),
+    # GOO-786: the gate's lines stay exact and unconditional, but they are
+    # never executed: swallowed by a heredoc, parked in a function nobody
+    # calls, inside a skipped `{ }` group, or behind an earlier clean exit.
+    "heredoc around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n: <<'DISABLED'\n{ARCHITECTURE_COMMAND}\n"
+        'check $? "backend architecture tests"\nDISABLED\n',
+    ),
+    "architecture step in a function that is never called": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n_architecture_gate() {{\n  {ARCHITECTURE_COMMAND}\n"
+        '  check $? "backend architecture tests"\n}\n',
+    ),
+    "`false && {` group around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\nfalse && {{\n{ARCHITECTURE_COMMAND}\n"
+        'check $? "backend architecture tests"\n}\n',
+    ),
+    "`true || exit 0` before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\ntrue || exit 0\nstep "Backend architecture tests',
+    ),
+    "`exit 0` inside an if before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\nif true; then\n  exit 0\nfi\nstep "Backend architecture tests',
+    ),
+    "bare `exit` early in the script": ("\nFAILED=()\n", "\nFAILED=()\nexit\n"),
+    "`exec` replaces the script before the Trigger tsc": (
+        f"    {_TSC}\n",
+        f"    exec true\n    {_TSC}\n",
+    ),
+    "`exit 0` in a function called before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\n_bail() {\n  exit 0\n}\n_bail\nstep "Backend architecture tests',
+    ),
+    "unterminated heredoc before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\ncat <<EOF\nstep "Backend architecture tests',
+    ),
+}
+# GOO-786 plants must be reported for their own reason, not for an unrelated
+# problem the plant happens to cause elsewhere.
+_PLANT_REASONS = {
+    "heredoc around the architecture step": "inside a heredoc",
+    "unterminated heredoc before the architecture step": "inside a heredoc",
+    "architecture step in a function that is never called": "must run at the top level",
+    "`false && {` group around the architecture step": "must run at the top level",
+    "`true || exit 0` before the architecture step": "('true || exit 0') can end the script",
+    "`exit 0` inside an if before the architecture step": "('exit 0') can end the script",
+    "`exit 0` in a function called before the architecture step": (
+        "('exit 0') can end the script"
+    ),
+    "bare `exit` early in the script": "('exit') can end the script",
+    "`exec` replaces the script before the Trigger tsc": "('exec true') can end the script",
 }
 # Plants that open a block on their anchor and close it after this line.
 _CLOSE_AFTER = {
@@ -535,7 +670,8 @@ _CLOSE_AFTER = {
 
 @pytest.mark.parametrize("name", sorted(SCRIPT_PLANTS))
 def test_a_planted_script_divergence_is_reported(name: str) -> None:
-    """Mutation guard for the script-side checks (GOO-764 review plants)."""
+    """Mutation guard for the script-side checks (GOO-764, GOO-782 and
+    GOO-786 review plants)."""
     old, new = SCRIPT_PLANTS[name]
     script = _script()
     assert script.count(old) == 1, f"plant anchor for {name!r} is stale"
@@ -545,7 +681,10 @@ def test_a_planted_script_divergence_is_reported(name: str) -> None:
         check, closer = _CLOSE_AFTER[name]
         assert planted.count(check) == 1, f"close anchor for {name!r} is stale"
         planted = planted.replace(check, check + closer, 1)
-    assert script_problems(_workflow(), planted), name
+    problems = script_problems(_workflow(), planted)
+    assert problems, name
+    if name in _PLANT_REASONS:
+        assert any(_PLANT_REASONS[name] in p for p in problems), problems
 
 
 def test_a_dropped_local_variable_is_reported() -> None:
