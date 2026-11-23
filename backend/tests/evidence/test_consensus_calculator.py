@@ -494,3 +494,28 @@ class TestConsensusCalculator:
             consensus_calculator.get_consensus_emoji(ConsensusLevel.INSUFFICIENT_DATA)
             == "⚪"
         )
+
+
+def test_failed_classifications_are_counted_as_partial(
+    consensus_calculator, sample_claim, sample_classifications_strong_agreement
+):
+    meter = consensus_calculator.calculate_consensus(
+        claim=sample_claim,
+        classifications=[*sample_classifications_strong_agreement, None, None],
+        classifier_version="test-classifier",
+    )
+
+    assert meter.failed_sources == 2
+    assert meter.total_sources == len(sample_classifications_strong_agreement)
+
+
+def test_complete_meter_reports_no_failed_sources(
+    consensus_calculator, sample_claim, sample_classifications_strong_agreement
+):
+    meter = consensus_calculator.calculate_consensus(
+        claim=sample_claim,
+        classifications=sample_classifications_strong_agreement,
+        classifier_version="test-classifier",
+    )
+
+    assert meter.failed_sources == 0

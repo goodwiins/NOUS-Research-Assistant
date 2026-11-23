@@ -421,6 +421,126 @@ class TestEvidenceMeterEndpoint:
             assert data["consensus_level"] == "moderate_agreement"
             assert data["average_confidence"] == 0.85
             assert data["publication_retraction_check"] == "not_performed"
+            assert data["failed_sources"] == 0
+            mock_cache.set_evidence_meter.assert_awaited_once()
+
+            payloads = mock_classifier.classify_sources_batch.await_args.kwargs[
+                "sources"
+            ]
+            assert payloads[0]["excerpt"] in seeded_documents[0].content_text
+            assert "Mock excerpt" not in payloads[0]["excerpt"]
+            assert payloads[0]["content_hash"] == seeded_documents[0].checksum_sha256
+        finally:
+            db.close()
+
+    @patch("src.api.evidence.router.stance_classifier")
+    @patch("src.api.evidence.router.consensus_calculator")
+    @patch("src.api.evidence.router.cache_service")
+    def test_partial_evidence_meter_is_returned_but_never_cached(
+        self,
+        mock_cache,
+        mock_consensus,
+        mock_classifier,
+        test_client,
+        mock_auth,
+    ):
+        """A meter with failed classifications must not outlive the outage in cache."""
+        set_active_user(MockUser())
+        db = TestingSessionLocal()
+        seeded_documents = [
+            seed_document(
+                db,
+                title="First real source",
+                content_text="First partial-meter source text supports the test claim.",
+            ),
+            seed_document(
+                db,
+                title="Second real source",
+                content_text="Second partial-meter source text gives additional evidence.",
+            ),
+            seed_document(
+                db,
+                title="Third real source",
+                content_text="Third partial-meter source text opposes the test claim.",
+            ),
+        ]
+        source_ids = [str(document.id) for document in seeded_documents]
+
+        # Mock cache miss (async method)
+        mock_cache.get_evidence_meter = AsyncMock(return_value=None)
+        mock_cache.set_evidence_meter = AsyncMock(return_value=None)
+
+        # Mock stance classifications
+        mock_classifications = [
+            {
+                "source_id": source_ids[0],
+                "stance": "supporting",
+                "confidence": 0.90,
+                "justification_excerpt": "Strong supporting evidence",
+                "model_version": "gpt-4o-mini-2024-07-18",
+                "source_content_hash": seeded_documents[0].checksum_sha256,
+            },
+            {
+                "source_id": source_ids[1],
+                "stance": "supporting",
+                "confidence": 0.85,
+                "justification_excerpt": "Additional support",
+                "model_version": "gpt-4o-mini-2024-07-18",
+                "source_content_hash": seeded_documents[1].checksum_sha256,
+            },
+            {
+                "source_id": source_ids[2],
+                "stance": "opposing",
+                "confidence": 0.80,
+                "justification_excerpt": "Contradictory findings",
+                "model_version": "gpt-4o-mini-2024-07-18",
+                "source_content_hash": seeded_documents[2].checksum_sha256,
+            },
+        ]
+        mock_classifier.classify_sources_batch = AsyncMock(
+            return_value=mock_classifications
+        )
+        mock_classifier.model_version = "gpt-4o-mini-2024-07-18"
+
+        # Mock consensus calculation
+        from src.api.evidence.schemas import ConsensusLevel, EvidenceMeter
+
+        mock_meter = EvidenceMeter(
+            claim="Test claim",
+            claim_hash="abc123",
+            total_sources=3,
+            supporting=2,
+            opposing=1,
+            neutral=0,
+            not_addressed=0,
+            consensus_level=ConsensusLevel.MODERATE_AGREEMENT,
+            average_confidence=0.85,
+            retracted_sources=0,
+            failed_sources=1,
+            cached=False,
+            reproducibility_hash="test_hash",
+        )
+        mock_consensus.calculate_consensus.return_value = mock_meter
+        mock_consensus._generate_claim_hash.return_value = "abc123"
+
+        try:
+            # Make request
+            response = test_client.get(
+                "/api/v1/evidence/meter",
+                params={"claim": "Test claim", "source_ids": ",".join(source_ids)},
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["claim"] == "Test claim"
+            assert data["total_sources"] == 3
+            assert data["supporting"] == 2
+            assert data["opposing"] == 1
+            assert data["consensus_level"] == "moderate_agreement"
+            assert data["average_confidence"] == 0.85
+            assert data["failed_sources"] == 1
+            mock_cache.set_evidence_meter.assert_not_awaited()
 
             payloads = mock_classifier.classify_sources_batch.await_args.kwargs[
                 "sources"

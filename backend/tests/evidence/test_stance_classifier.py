@@ -545,3 +545,56 @@ class TestStanceClassifier:
                 await stance_classifier.classify_sources_batch(
                     sample_claim, "test_hash", sources
                 )
+
+
+@pytest.mark.parametrize(
+    ("stance", "accepted"),
+    [("not_addressed", True), ("supporting", False), ("neutral", False)],
+)
+async def test_blank_justification_is_valid_only_for_not_addressed(
+    stance_classifier, stance, accepted
+):
+    stance_classifier._classify_with_fallback = AsyncMock(
+        return_value=StanceClassificationResult(
+            stance=stance,
+            confidence=0.9,
+            justification_excerpt="",
+            model_version=stance_classifier.primary_model,
+        )
+    )
+
+    result = await stance_classifier.classify_stance(
+        "claim", "hash", uuid4(), "unrelated source text", "content-hash"
+    )
+
+    assert (result is not None) is accepted
+    if accepted:
+        assert result["stance"] == "not_addressed"
+
+
+async def test_batch_classification_bounds_concurrent_provider_calls(
+    stance_classifier,
+):
+    stance_classifier.max_concurrent_classifications = 3
+    in_flight = 0
+    peak = 0
+
+    async def _classify(**kwargs):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return {"source_id": str(kwargs["source_id"]), "stance": "neutral"}
+
+    stance_classifier.classify_stance = _classify
+    sources = [
+        {"source_id": uuid4(), "excerpt": f"excerpt {i}", "content_hash": f"h{i}"}
+        for i in range(10)
+    ]
+
+    results = await stance_classifier.classify_sources_batch("claim", "hash", sources)
+
+    assert len(results) == 10
+    assert all(result is not None for result in results)
+    assert peak == 3

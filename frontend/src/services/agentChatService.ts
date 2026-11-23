@@ -485,7 +485,15 @@ async function consumeSse(
           break;
       }
     } catch (err) {
-      console.warn('[Chat] Malformed SSE data line, skipping:', dataLine, err);
+      // Never log `dataLine` or the error message: the try wraps every
+      // callback, so either can carry tool args, tool results or approval
+      // payloads, and console.warn is forwarded to Sentry (GOO-638). The
+      // event name, frame size and error class are enough to debug with.
+      console.warn('[Chat] Skipped an SSE frame that failed to dispatch', {
+        event: ev,
+        length: dataLine.length,
+        errorType: err instanceof Error ? err.name : typeof err,
+      });
     }
   };
 

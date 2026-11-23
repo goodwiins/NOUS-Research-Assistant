@@ -59,6 +59,15 @@ export function DailyResearchBriefSetup({
     notes: stringValue(initialParameters.notes),
   }));
   const [confirmed, setConfirmed] = useState(false);
+  // The criteria textareas keep the raw text the user typed. Only the emitted
+  // parameters are split and trimmed; deriving the textarea value from the
+  // trimmed list ate spaces and newlines on every keystroke (FR-5).
+  const [inclusionText, setInclusionText] = useState(() =>
+    stringList(initialParameters.inclusion_criteria).join('\n')
+  );
+  const [exclusionText, setExclusionText] = useState(() =>
+    stringList(initialParameters.exclusion_criteria).join('\n')
+  );
 
   const researchQuestion = stringValue(parameters.research_question);
   const inclusionCriteria = stringList(parameters.inclusion_criteria);
@@ -142,12 +151,13 @@ export function DailyResearchBriefSetup({
         </label>
         <textarea
           id="daily-brief-include"
-          value={inclusionCriteria.join('\n')}
-          onChange={(event) =>
+          value={inclusionText}
+          onChange={(event) => {
+            setInclusionText(event.target.value);
             updateParameters({
               inclusion_criteria: criteriaFromText(event.target.value),
-            })
-          }
+            });
+          }}
           disabled={disabled}
           rows={3}
           placeholder="One criterion per line"
@@ -164,12 +174,13 @@ export function DailyResearchBriefSetup({
         </label>
         <textarea
           id="daily-brief-exclude"
-          value={exclusionCriteria.join('\n')}
-          onChange={(event) =>
+          value={exclusionText}
+          onChange={(event) => {
+            setExclusionText(event.target.value);
             updateParameters({
               exclusion_criteria: criteriaFromText(event.target.value),
-            })
-          }
+            });
+          }}
           disabled={disabled}
           rows={3}
           placeholder="One criterion per line"

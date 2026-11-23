@@ -1,24 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
+import { buildCsp } from '../../src/lib/csp';
 import { buildHtmlPreviewDocument } from '../../src/components/chat/artifact-panel/InteractiveHtmlPreview';
 
 const nonce = 'browser-preview-nonce-12345';
 const scriptNonce = 'dHJ1c3RlZC1hcHAtbm9uY2UtMTIzNDU=';
-// Production proxy.ts policy, including inherited nonce/strict-dynamic.
-const parentCsp = [
-  "default-src 'self'",
-  "base-uri 'self'",
-  "object-src 'none'",
-  "frame-src 'self' blob:",
-  "frame-ancestors 'none'",
-  "form-action 'self'",
-  `script-src 'self' 'nonce-${scriptNonce}' 'strict-dynamic'`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https:",
-  "font-src 'self' data:",
-  "connect-src 'self' https: wss:",
-  "worker-src 'self' blob:",
-  'upgrade-insecure-requests',
-].join('; ');
+// The exact production policy (src/lib/csp.ts); previews add no exemptions.
+const parentCsp = buildCsp(scriptNonce, { NODE_ENV: 'production' });
 async function mount(page: Page, source: string): Promise<string[]> {
   const requests: string[] = [];
   const wrapper = buildHtmlPreviewDocument(source, nonce, scriptNonce);
