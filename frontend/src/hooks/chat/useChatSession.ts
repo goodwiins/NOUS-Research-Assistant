@@ -996,6 +996,14 @@ export function useChatSession(): UseChatSessionReturn {
       parked.delete(oldest);
     }
   };
+  // Park the outgoing thread's overlay when it holds something the server
+  // will not give back on return: an in-flight turn, or a send the server
+  // rejected (GOO-772). A rejected send streams nothing, and its text may
+  // exist only in that bubble.
+  const shouldParkOverlay = (outgoingThreadId: string): boolean =>
+    messagesRef.current.length > 0 &&
+    (useChatStore.getState().streamingThreadId === outgoingThreadId ||
+      messagesRef.current.some((message) => message.sendFailed !== undefined));
   // An account switch (A -> B without sign-out) keeps isAuthenticated true and
   // this page mounted. Drop every piece of the previous account's local state:
   // workspace, sidebar list and pagination, transcript overlay, parked
@@ -1022,11 +1030,7 @@ export function useChatSession(): UseChatSessionReturn {
     if (!activeThreadId) {
       // "New chat" mid-turn: park the outgoing thread's overlay too, so
       // returning to it restores the in-flight turn like any other switch.
-      if (
-        outgoingThreadId &&
-        messagesRef.current.length > 0 &&
-        useChatStore.getState().streamingThreadId === outgoingThreadId
-      ) {
+      if (outgoingThreadId && shouldParkOverlay(outgoingThreadId)) {
         parkOverlay(outgoingThreadId, messagesRef.current);
       }
       localMessagesThreadIdRef.current = null;
@@ -1045,11 +1049,7 @@ export function useChatSession(): UseChatSessionReturn {
       return;
     }
 
-    if (
-      outgoingThreadId &&
-      messagesRef.current.length > 0 &&
-      useChatStore.getState().streamingThreadId === outgoingThreadId
-    ) {
+    if (outgoingThreadId && shouldParkOverlay(outgoingThreadId)) {
       // Must go through parkOverlay, not a bare `.set` — this is the ordinary
       // switch-away path and therefore the one that actually parks a thread the
       // user may then delete mid-stream (round-3 L4). A raw set here left the

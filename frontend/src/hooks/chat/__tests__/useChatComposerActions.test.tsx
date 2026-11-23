@@ -171,6 +171,108 @@ describe('useChatComposerActions', () => {
     }
   );
 
+  it('resends an unsent PDF turn as a follow-up on the current branch head (GOO-772)', async () => {
+    useChatStore.setState({
+      currentThreadId: 'branch-thread',
+      messageFreshness: { 'branch-thread': 'fresh' },
+      messagePagination: {
+        'branch-thread': {
+          hasMore: false,
+          loadingOlder: false,
+          loadedCount: 2,
+          message_branching: true,
+          branch_document_id: 'pdf',
+          selected_message_id: 'answer',
+        },
+      },
+    });
+    const history = [
+      makeChatPageMessage({
+        id: 'user',
+        clientMessageId: 'runtime-user',
+        role: 'user',
+        content: 'Original',
+        parentMessageId: null,
+      }),
+      makeChatPageMessage({ id: 'answer', role: 'assistant', content: 'A' }),
+    ];
+    // The server never accepted it: no id, no parent, no client id.
+    const unsent = {
+      ...makeChatPageMessage({ role: 'user', content: 'Unsent' }),
+      id: undefined,
+      clientMessageId: undefined,
+      parentMessageId: undefined,
+      source: 'local-only' as const,
+      sendFailed: { message: 'Not sent.' },
+    };
+    const { result, handleSubmit } = setup({
+      displayedMessages: [...history, unsent],
+    });
+
+    act(() => result.current.handleEditUserMessage(2, 'Unsent'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(handleSubmit).toHaveBeenCalledWith(
+      'Unsent',
+      history,
+      undefined,
+      undefined,
+      undefined
+    );
+  });
+
+  it('retrying an earlier unsent turn keeps the later unsent turns, in order (GOO-772)', async () => {
+    const unsentTurn = (
+      content: string
+    ): ReturnType<typeof makeChatPageMessage> => ({
+      ...makeChatPageMessage({ role: 'user', content }),
+      id: undefined,
+      clientMessageId: undefined,
+      parentMessageId: undefined,
+      source: 'local-only' as const,
+      sendFailed: { message: 'Not sent.' },
+    });
+    const first = makeChatPageMessage({
+      id: 'user',
+      clientMessageId: 'runtime-user',
+      role: 'user',
+      content: 'Original',
+    });
+    const answer = makeChatPageMessage({
+      id: 'answer',
+      role: 'assistant',
+      content: 'A',
+    });
+    const unsentOne = unsentTurn('Unsent one');
+    const unsentTwo = unsentTurn('Unsent two');
+    const later = makeChatPageMessage({
+      id: 'later',
+      role: 'assistant',
+      content: 'Later reply',
+    });
+    const { result, handleSubmit } = setup({
+      displayedMessages: [first, answer, unsentOne, unsentTwo, later],
+    });
+
+    act(() => result.current.handleEditUserMessage(2, 'Unsent one'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The server never stored it, so nothing after it is truncated: the turn
+    // goes out on the current head, and the other unsent turn stays.
+    expect(handleSubmit).toHaveBeenCalledWith(
+      'Unsent one',
+      [first, answer, unsentTwo, later],
+      undefined,
+      undefined,
+      undefined
+    );
+  });
+
   it('handleRegenerate refuses with a toast while a turn is busy', async () => {
     const { result, handleSubmit } = setup({ isBusy: true });
 
