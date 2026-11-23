@@ -61,6 +61,7 @@ vi.mock('@/services/entityService', () => ({
     getEntities: vi.fn(),
     getAllRelationships: vi.fn(),
     deleteEntity: vi.fn(),
+    createRelationship: vi.fn(),
   },
 }));
 
@@ -72,8 +73,32 @@ const record =
   };
 
 vi.mock('@/components/entities/RelationshipForm', () => ({
-  RelationshipForm: ({ sourceEntityId }: { sourceEntityId?: string }) => (
-    <div data-testid="relationship-form" data-source={sourceEntityId} />
+  RelationshipForm: ({
+    sourceEntityId,
+    onSubmit,
+    onCancel,
+  }: {
+    sourceEntityId?: string;
+    onSubmit: (data: Record<string, unknown>) => Promise<void>;
+    onCancel: () => void;
+  }) => (
+    <div data-testid="relationship-form" data-source={sourceEntityId}>
+      <button
+        type="button"
+        onClick={() =>
+          void onSubmit({
+            source_entity_id: sourceEntityId,
+            target_entity_id: 'e2',
+            relationship_type: 'ENCODES',
+          })
+        }
+      >
+        Save relationship
+      </button>
+      <button type="button" onClick={onCancel}>
+        Cancel relationship
+      </button>
+    </div>
   ),
 }));
 vi.mock('@/components/entities/EntityList', () => ({
@@ -132,6 +157,7 @@ beforeEach(() => {
   for (const key of Object.keys(last)) delete last[key];
   for (const fn of Object.values(service)) fn.mockReset();
   toastError.mockReset();
+  (toast.success as unknown as Mock).mockReset();
   permissions.canCreate = true;
   auth.handleAuthError = vi.fn();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -154,8 +180,6 @@ describe('Add relationship from the entity detail dialog (GOO-767)', () => {
 
     expect(await screen.findByText('New relationship')).toBeInTheDocument();
     expect(screen.getByTestId('relationship-form')).toHaveAttribute('data-source', 'e1');
-    // The detail dialog hands over instead of stacking under the new one.
-    expect(screen.queryByText('Entity details')).toBeNull();
   });
 
   it('is disabled while the relationship types are loading', async () => {
@@ -193,6 +217,67 @@ describe('Add relationship from the entity detail dialog (GOO-767)', () => {
       expect(screen.queryByText('Loading relationship types…')).toBeNull()
     );
     expect(addRelationship()).toBeDisabled();
+  });
+});
+
+/** Open the relationship dialog through the real control. */
+const openRelationshipDialog = async (
+  user: ReturnType<typeof render>['user']
+): Promise<void> => {
+  await viewGene();
+  await waitFor(() => expect(addRelationship()).toBeEnabled());
+  await user.click(addRelationship());
+  await screen.findByTestId('relationship-form');
+};
+
+describe('focus returns to "Add relationship" when the relationship dialog closes (GOO-767, WCAG 2.4.3)', () => {
+  it.each([
+    ['Escape', async (user: ReturnType<typeof render>['user']) => user.keyboard('{Escape}')],
+    ['Cancel', async (user: ReturnType<typeof render>['user']) =>
+      user.click(screen.getByRole('button', { name: 'Cancel relationship' }))],
+    ['a successful save', async (user: ReturnType<typeof render>['user']) =>
+      user.click(screen.getByRole('button', { name: 'Save relationship' }))],
+  ])('after %s', async (_how, close) => {
+    service.createRelationship.mockResolvedValue({});
+    const { user } = render(<EntityManagementPage />);
+    await openRelationshipDialog(user);
+
+    await close(user);
+
+    await waitFor(() => expect(screen.queryByTestId('relationship-form')).toBeNull());
+    // The detail dialog stayed open underneath, so the trigger still exists.
+    expect(screen.getByText('Entity details')).toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(addRelationship()));
+  });
+});
+
+describe('a failed relationship create (#2327 review)', () => {
+  it('signs out on a 401 without a toast, and keeps the form open', async () => {
+    const failure = expired();
+    service.createRelationship.mockRejectedValue(failure);
+    const { user } = render(<EntityManagementPage />);
+    await openRelationshipDialog(user);
+
+    await user.click(screen.getByRole('button', { name: 'Save relationship' }));
+
+    await waitFor(() => expect(auth.handleAuthError).toHaveBeenCalledWith(failure));
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByTestId('relationship-form')).toBeInTheDocument();
+  });
+
+  it('shows the generic error on any other failure, and keeps the form open', async () => {
+    service.createRelationship.mockRejectedValue(
+      new APIErrorClass({ message: 'neo4j exploded at line 7', status_code: 500, type: 'http_error' })
+    );
+    const { user } = render(<EntityManagementPage />);
+    await openRelationshipDialog(user);
+
+    await user.click(screen.getByRole('button', { name: 'Save relationship' }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith('Failed to create relationship'));
+    expect(auth.handleAuthError).not.toHaveBeenCalled();
+    expect(screen.getByTestId('relationship-form')).toBeInTheDocument();
   });
 });
 

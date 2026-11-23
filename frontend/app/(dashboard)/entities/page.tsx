@@ -175,6 +175,10 @@ function EntityManagementContent() {
   const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const entitiesRequestToken = useRef(0);
+  // The relationship dialog has no Radix trigger, so on close Radix would drop
+  // focus to <body> (WCAG 2.4.3). It opens over the detail dialog, which stays
+  // mounted, so focus goes back to this button instead (GOO-767).
+  const addRelationshipTriggerRef = useRef<HTMLButtonElement>(null);
   const relationshipsRequestToken = useRef(0);
 
   // Dynamic types from API
@@ -1242,7 +1246,9 @@ function EntityManagementContent() {
                 />
                 {/* The only entry point to the relationship dialog (GOO-767).
                     Disabled until the graph's own relationship types load:
-                    the form has nothing to offer without them (GOO-756). */}
+                    the form has nothing to offer without them (GOO-756).
+                    This dialog stays open underneath, so closing the
+                    relationship dialog returns the user here. */}
                 <div className="mt-4 flex items-center justify-end gap-3 border-t border-border pt-4">
                   {relationshipTypeList.status !== 'loaded' && (
                     <span
@@ -1255,6 +1261,7 @@ function EntityManagementContent() {
                     </span>
                   )}
                   <Button
+                    ref={addRelationshipTriggerRef}
                     size="sm"
                     variant="outline"
                     disabled={
@@ -1265,10 +1272,7 @@ function EntityManagementContent() {
                         ? 'add-relationship-status'
                         : undefined
                     }
-                    onClick={() => {
-                      setDetailDialogOpen(false);
-                      handleAddRelationship(selectedEntity.id);
-                    }}
+                    onClick={() => handleAddRelationship(selectedEntity.id)}
                   >
                     <Plus aria-hidden="true" className="h-4 w-4 mr-1.5" />
                     Add relationship
@@ -1290,7 +1294,16 @@ function EntityManagementContent() {
             if (!open) setSourceEntityId(null);
           }}
         >
-          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto bg-card border-border text-foreground">
+          <DialogContent
+            className="max-w-2xl max-h-[90vh] overflow-y-auto bg-card border-border text-foreground"
+            onCloseAutoFocus={(event) => {
+              const trigger = addRelationshipTriggerRef.current;
+              if (trigger?.isConnected) {
+                event.preventDefault();
+                trigger.focus();
+              }
+            }}
+          >
             <DialogHeader className="border-b border-border pb-4">
               <DialogTitle className="text-lg font-semibold">
                 New relationship
