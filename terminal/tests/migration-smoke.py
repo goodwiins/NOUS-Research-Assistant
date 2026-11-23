@@ -284,6 +284,20 @@ def check() -> None:
                 f"{key}={value!r} (have {saved().get(key)!r}).\n{screen()}"
             )
 
+        def wait_request(content: str) -> None:
+            """Wait until the fake server has the chat request for `content`.
+            The reply text alone is not enough: a redraw can repeat the
+            previous reply before the new request is sent."""
+            end = time.monotonic() + STEP_BOUND
+            while time.monotonic() < end and not any(
+                r["messages"][-1]["content"] == content for r in requests
+            ):
+                drain()
+            assert any(r["messages"][-1]["content"] == content for r in requests), (
+                f"Timed out after {STEP_BOUND:.0f}s waiting for the chat request "
+                f"{content!r}; got {[r['messages'][-1]['content'] for r in requests]}."
+            )
+
         def saved() -> dict[str, Any]:
             data: dict[str, Any] = json.loads(Path(config, "config.json").read_text())
             return data
@@ -325,6 +339,7 @@ def check() -> None:
             command("/help", "Edits and retries create")
             send("\x1b")
             command("hi", "Handoff succeeded")
+            wait_request("hi")
             assert len(requests) == 1, requests
             assert requests[0]["messages"][-1]["content"] == "hi", requests
             assert requests[0]["thread_id"] == "thread-2", requests
@@ -349,6 +364,7 @@ def check() -> None:
             command("/edit 1", "Edit message")
             send("\x1b")
             command("after cancelling edit", "Handoff succeeded")
+            wait_request("after cancelling edit")
             assert (
                 requests[-1]["messages"][-1]["content"] == "after cancelling edit"
             ), requests
@@ -363,11 +379,13 @@ def check() -> None:
                 }
             ], confirmations
             Handler.project_gate = threading.Event()
+            wait_idle()  # The approval reply's command must have finished.
             send("/projects")
             send("\r")
-            assert Handler.project_started.wait(timeout=5), output.decode(
-                errors="replace"
-            )[-5000:]
+            assert Handler.project_started.wait(timeout=STEP_BOUND), (
+                f"/projects did not request the project list within "
+                f"{STEP_BOUND:.0f}s.\n{screen()}"
+            )
             send("\x1b")
             command("/help", "Edits and retries create")
             start = len(output)
@@ -376,6 +394,7 @@ def check() -> None:
             drain(0.3)
             assert b"Pick a project" not in output[start:], "Dismissed menu reopened"
             send("\x1b")
+            wait_idle()
             send("line one")
             send("\x0a")
             command("line two", "Handoff succeeded")
@@ -391,6 +410,8 @@ def check() -> None:
             assert (
                 requests[-1]["messages"][-1]["content"] == "line one\nline two"
             ), requests
+            # Ctrl+C cancels a reply that is still streaming instead of exiting.
+            wait_idle()
             send("unsent draft")
             send("\x03")
             proc.wait(timeout=5)
