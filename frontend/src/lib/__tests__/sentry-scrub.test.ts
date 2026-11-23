@@ -9,7 +9,6 @@ import {
   TRUNCATED_KEYS,
   OBJECT_PLACEHOLDER,
   isSensitiveKey,
-  looksSecret,
   minimalEvent,
   safeBeforeBreadcrumb,
   safeBeforeSend,
@@ -493,8 +492,7 @@ describe('tuning: ordinary error messages stay readable', () => {
     'Basic authentication required',
     'authorization: required',
     'cookie: not set',
-    'Cookie: missing, falling back to header',
-    'data: loaded 5 rows',
+    'Cookie: missing',
     'Invalid data: expected a number',
   ])('keeps %j', (message) => {
     expect(scrubString(message)).toBe(message);
@@ -519,18 +517,18 @@ describe('tuning: ordinary error messages stay readable', () => {
     expect(scrubString(`authorization: ${tokenValue}`)).toBe('Authorization: [Filtered]');
     expect(scrubString('cookie: sid=abc123; theme=dark')).toBe('Cookie: [Filtered]');
   });
-
-  it('looksSecret separates words from credentials', () => {
-    for (const word of ['undefined', 'validation', 'authentication', 'required']) {
-      expect(looksSecret(word), word).toBe(false);
-    }
-    for (const value of [BASIC, 'abc123', 'AbCdEfGhIjKlMn', 'q'.repeat(32)]) {
-      expect(looksSecret(value), value).toBe(true);
-    }
-  });
 });
 
 describe('tuning: secrets that used to pass', () => {
+  it('does not treat a word ending in "key" as a key id', () => {
+    for (const key of ['monkeyId', 'hockeyIds', 'turkeyID']) {
+      expect(isSensitiveKey(key), key).toBe(false);
+    }
+    for (const key of ['keyId', 'key_id', 'apiKeyID', 'signing_key_ids']) {
+      expect(isSensitiveKey(key), key).toBe(true);
+    }
+  });
+
   it('denies session and key identifiers but keeps other ids', () => {
     for (const key of ['sessionId', 'session_id', 'apiKeyId', 'api_key_id', 'keyIds']) {
       expect(isSensitiveKey(key), key).toBe(true);
@@ -656,5 +654,87 @@ describe('tuning: robustness', () => {
     const start = performance.now();
     scrubData(wide);
     expect(performance.now() - start).toBeLessThan(50);
+  });
+});
+
+describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-R7)', () => {
+  // Credential shapes, assembled at runtime.
+  const letters = ['xQ', 'pLmN', 'oRtz'].join('');
+  const hex = ['9f8e', '7d6c', '5b4a', '3921'].join('');
+  const uuid = ['3f2a1b4c', '9d8e', '4f7a', 'b6c5', 'd4e3f2a1b0c9'].join('-');
+  const b64 = Buffer.from('svc:letmein-now').toString('base64');
+  const SHAPES = [letters, letters.toLowerCase(), hex, uuid, b64, JWT.split('.')[2]];
+
+  const expectFiltered = (input: string, secret: string): void => {
+    const out = scrubString(input);
+    expect(out, input).not.toContain(secret);
+    expect(out, input).toContain(FILTERED);
+  };
+
+  it.each(['ApiKey', 'Key', 'SSWS', 'OAuth', 'DPoP', 'Custom', 'Bearer', 'Basic'])(
+    'R1: Authorization with the %s scheme is filtered for every credential shape',
+    (scheme) => {
+      for (const cred of SHAPES) {
+        expectFiltered(`Authorization: ${scheme} ${cred}`, cred);
+        expectFiltered(`proxy-authorization=${scheme} ${cred}`, cred);
+      }
+    }
+  );
+
+  it('R2: a bare letters-only Authorization value is filtered', () => {
+    for (const cred of [letters, letters.toLowerCase(), 'abcdefghijklmnopqrstuvwxyzabcde']) {
+      expectFiltered(`Authorization: ${cred}`, cred);
+      expectFiltered(`Proxy-Authorization: ${cred}`, cred);
+    }
+    // Only a single prose word stays.
+    expect(scrubString('Authorization: required')).toBe('Authorization: required');
+    expectFiltered('Authorization: required abcdefgh', 'abcdefgh');
+  });
+
+  it('R3: a letters-only credential after Token or Basic is filtered', () => {
+    for (const cred of [letters, letters.toLowerCase(), 'qwertyuiopasdf']) {
+      expectFiltered(`Token ${cred}`, cred);
+      expectFiltered(`basic ${cred}`, cred);
+    }
+  });
+
+  it('R4: any value after cookie:, Set-Cookie: or cookie= is filtered', () => {
+    for (const prefix of ['cookie: ', 'Cookie:', 'COOKIE: ', 'Set-Cookie: ', 'set-cookie:', 'cookie=']) {
+      for (const cred of SHAPES) expectFiltered(`${prefix}${cred}`, cred);
+    }
+  });
+
+  it.each([
+    'sid = v4lue',
+    '; sid=v4lue',
+    '     sid=v4lue',
+    'sid:v4lue',
+    '{sid: v4lue}',
+    'missing, sid=v4lue',
+    'not set; sid=v4lue',
+  ])('R5: Cookie: %j is filtered', (value) => {
+    expectFiltered(`Cookie: ${value}`, 'v4lue');
+  });
+
+  it.each([
+    `data: ${letters}`,
+    `data:${letters}`,
+    `   data: ${letters}`,
+    `event: message\ndata: ${letters}`,
+    `id: 7\ndata: ${letters}`,
+  ])('R6: a plain-text SSE frame %j is filtered', (input) => {
+    expectFiltered(input, letters);
+  });
+
+  it('R7: SSE frames carrying message content are filtered', () => {
+    expectFiltered('data: my password is hunter-two', 'hunter-two');
+    expectFiltered('data: user said my diagnosis is bipolar', 'diagnosis');
+  });
+
+  it('keeps the readability fixes only for exact prose', () => {
+    expect(scrubString('Unexpected token undefined in JSON')).toBe('Unexpected token undefined in JSON');
+    expect(scrubString('basic authentication failed')).toBe('basic authentication failed');
+    expect(scrubString('cookie: not set')).toBe('cookie: not set');
+    expect(scrubString('Invalid data: expected a number')).toBe('Invalid data: expected a number');
   });
 });

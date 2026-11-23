@@ -97,13 +97,22 @@ const SENSITIVE_KEYS = new Set([
 
 // Suffixes that mark credentials or personal data regardless of prefix
 // (accessToken, supabaseToken, userEmail, clientSecret, ...).
-// Identifiers of sessions and keys are bearer-like, unlike thread or span ids.
+// Identifiers of sessions are bearer-like, unlike thread or span ids.
 const SENSITIVE_SUFFIX =
-  /(token|secret|password|cookie|authorization|email|apikey|jwt|credentials|sessionids?|keyids?)$/;
+  /(token|secret|password|cookie|authorization|email|apikey|jwt|credentials|sessionids?)$/;
+// Key ids (keyId, key_id, api_key_id, apiKeyId), but not a word that ends in
+// "key" (monkeyId, hockeyIds): "key" starts the key, follows a separator, or
+// is a capitalised camel-case word. Case-sensitive on purpose.
+const KEY_ID_KEY =
+  /(?:^|[_.\-\s])[Kk]ey[_.\-\s]?(?:id|ids|Id|Ids|ID|IDs)$|[a-z0-9]Key(?:Id|Ids|ID|IDs|_id|_ids)$/;
 
 export function isSensitiveKey(key: string): boolean {
   const normalized = normalizeKey(key);
-  return SENSITIVE_KEYS.has(normalized) || SENSITIVE_SUFFIX.test(normalized);
+  return (
+    SENSITIVE_KEYS.has(normalized) ||
+    SENSITIVE_SUFFIX.test(normalized) ||
+    KEY_ID_KEY.test(key)
+  );
 }
 
 // Technical fields whose string values are kept (still pattern-scrubbed).
@@ -153,51 +162,51 @@ function classifyKey(key: string): KeyClass {
 
 type Replacement = string | ((match: string, ...groups: string[]) => string);
 
-/**
- * Does `value` look like a credential rather than a word? A digit or token
- * punctuation, mixed case over 12+ characters, or 32+ characters.
- * "undefined", "validation" and "authentication" do not.
- */
-export function looksSecret(value: string): boolean {
-  if (/[0-9+/=_~.-]/.test(value)) return true;
-  if (value.length >= 12 && /[a-z]/.test(value) && /[A-Z]/.test(value)) return true;
-  return value.length >= 32;
-}
+// Fail closed (GOO-735): a credential-shaped position is filtered unless what
+// follows is exactly one word from these short prose lists. Nothing the
+// scrubber caught before this change may pass.
+const AUTH_PROSE = new Set(['required', 'missing', 'failed', 'invalid', 'expired', 'header']);
+// After "Token" / "Basic" (8+ characters, as before).
+const SCHEME_PROSE = new Set([
+  'undefined', 'validation', 'authentication', 'authorization', 'required',
+  'verification', 'expiration', 'exchange', 'refresh', 'rejected',
+]);
+const COOKIE_PROSE = /^(?:not set|missing|none|empty|required|disabled|blocked|invalid|expired)[ \t.!]*$/i;
 
-const AUTH_SCHEME = /^(?:Bearer|Basic|Digest|Token|Negotiate|NTLM|AWS4-HMAC-SHA256)[ \t]/i;
+const isProseWord = (words: ReadonlySet<string>, value: string): boolean =>
+  words.has(value.trim().replace(/[.!]+$/, '').toLowerCase());
 
 const REDACTIONS: Array<[RegExp, Replacement]> = [
-  // SSE frames: `data:` followed by a JSON payload is user/tool content.
-  // Plain text after `data:` ("data: loaded 5 rows") is left alone; JSON
-  // inside it is caught by the inline-JSON rule.
+  // SSE frames: the payload after `data:` is user/tool content. Matches a
+  // line that starts with `data:`, or `data:` followed by JSON anywhere;
+  // plain prose such as "Invalid data: x" is left alone.
+  [/(^|\n)[ \t]{0,16}data:[^\n]{0,4096}/g, '$1data: [Filtered]'],
   [/\bdata:[ \t]{0,4}[{[][^\n]{0,4096}/g, 'data: [Filtered]'],
   // Inline JSON objects/arrays: everything from `{"` / `["` to end of line.
   [/[{[][ \t]{0,4}"[^\n]{0,4096}/g, OBJECT_PLACEHOLDER],
-  // Authorization header: a scheme + credential, or a secret-looking value.
-  // "authorization: required" is prose and stays.
+  // Authorization header: everything after it, whatever the scheme, except
+  // a single prose word ("authorization: required").
   [
-    /\b((?:proxy-)?authorization)\b[ \t]{0,4}[:=][ \t]{0,4}([^\n,;]{1,1024})/gi,
-    (match, _name: string, value: string) =>
-      AUTH_SCHEME.test(value) || looksSecret(value.split(/[ \t]/)[0] ?? '')
-        ? 'Authorization: [Filtered]'
-        : match,
+    /\b(?:proxy-)?authorization\b[ \t]{0,4}[:=][ \t]{0,4}([^\n,;]{1,1024})/gi,
+    (match, value: string) =>
+      isProseWord(AUTH_PROSE, value) ? match : 'Authorization: [Filtered]',
   ],
-  // Cookie headers carry name=value pairs; "cookie: not set" is prose.
+  // Cookie headers: everything after them, except known prose
+  // ("cookie: not set").
   [
     /\b(?:set-)?cookie\b[ \t]{0,4}[:=][ \t]{0,4}([^\n]{1,4096})/gi,
-    (match, value: string) =>
-      /^[^\s;=]{1,256}=/.test(value) ? 'Cookie: [Filtered]' : match,
+    (match, value: string) => (COOKIE_PROSE.test(value) ? match : 'Cookie: [Filtered]'),
   ],
   [/\bsb-[A-Za-z0-9-]{1,128}=[^;\s"']{1,4096}/g, 'sb-[cookie]=[Filtered]'],
-  // Scheme + credential. "Bearer" is never prose; after the English words
-  // "Basic" and "Token" only a credential-looking value is filtered
-  // ("token undefined", "basic authentication failed" stay readable).
+  // Scheme + credential. After "Bearer" always; after the English words
+  // "Basic" and "Token" unless the value is a single prose word
+  // ("Unexpected token undefined", "basic authentication failed").
   [
     /\b(Bearer|Basic|Token)\s{1,4}([A-Za-z0-9._~+/=-]{8,4096})/gi,
     (match, scheme: string, value: string) =>
-      scheme.toLowerCase() === 'bearer' || looksSecret(value)
-        ? `${scheme} [Filtered]`
-        : match,
+      scheme.toLowerCase() !== 'bearer' && isProseWord(SCHEME_PROSE, value)
+        ? match
+        : `${scheme} [Filtered]`,
   ],
   // JSON Web Tokens: full (dots raw or URL-encoded), then any fragment left
   // by truncation or an encoding the first pattern does not know.
@@ -234,6 +243,8 @@ export function scrubString(value: string, maxLength = MAX_STRING_LENGTH): strin
     out = out.slice(0, MAX_SCAN_LENGTH).replace(/\S{0,256}$/, '');
   }
   for (const [pattern, replacement] of REDACTIONS) {
+    // Two branches because String.replace has separate overloads for a
+    // string and a function replacement.
     out =
       typeof replacement === 'string'
         ? out.replace(pattern, replacement)
