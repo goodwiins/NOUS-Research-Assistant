@@ -10,7 +10,10 @@ import { Activity, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import type { ReactElement, ReactNode } from 'react';
 
-import type { CommandAction, CommandOutput } from '@/components/chat/commandOutput';
+import type {
+  CommandAction,
+  CommandOutput,
+} from '@/components/chat/commandOutput';
 import type { ChatPageMessage } from '@/components/chat/shared/cloudMessageView';
 import type { Citation } from '@/utils/citationParser';
 
@@ -49,6 +52,9 @@ function TranscriptSkeleton(): ReactElement {
 
 interface ChatTranscriptStateProps {
   isAuthenticated: boolean;
+  /** Signed out in the store, but no login redirect is coming: the profile is
+   * still loading, or it is unavailable for a verified user (GOO-752). */
+  isAuthPending?: boolean;
   isInitializing: boolean;
   initError: string | null;
   isLoadingMessages: boolean;
@@ -102,6 +108,7 @@ function ScrollFrame({ children }: { children: ReactNode }): ReactElement {
  */
 export function ChatTranscriptState({
   isAuthenticated,
+  isAuthPending = false,
   isInitializing,
   initError,
   isLoadingMessages,
@@ -132,7 +139,9 @@ export function ChatTranscriptState({
               className="text-sm text-(--nous-fg-3) mt-2"
               style={{ fontFamily: 'var(--nous-font-ui)' }}
             >
-              Authentication required. Redirecting...
+              {isAuthPending
+                ? 'Loading your account…'
+                : 'Authentication required. Redirecting...'}
             </p>
           </div>
         </div>
@@ -228,8 +237,14 @@ export function ChatTranscriptState({
       commandOutputs={commandOutputs}
       onCommandItemAction={onCommandItemAction}
       isRetrievingRag={isStreamingThisThread ? storeIsRetrievingRag : false}
-      onLoadOlder={activeThreadId ? () => onLoadOlder(activeThreadId) : undefined}
-      hasMore={activeThreadId ? (messagePagination?.[activeThreadId]?.hasMore ?? false) : false}
+      onLoadOlder={
+        activeThreadId ? () => onLoadOlder(activeThreadId) : undefined
+      }
+      hasMore={
+        activeThreadId
+          ? (messagePagination?.[activeThreadId]?.hasMore ?? false)
+          : false
+      }
       isLoadingOlder={
         activeThreadId
           ? (messagePagination?.[activeThreadId]?.loadingOlder ?? false)

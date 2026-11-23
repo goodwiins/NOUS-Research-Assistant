@@ -97,6 +97,9 @@ export interface UseChatSessionReturn {
     message: import('@/types/workspace').ChatMessage
   ) => void;
   isAuthenticated: boolean;
+  /** Signed out in the store, but the profile is still resolving or only
+   * /auth/me is unavailable for a verified user: no login redirect. */
+  isAuthPending: boolean;
 
   // Derived
   activeThreadId: string | null;
@@ -170,9 +173,21 @@ export function useChatSession(): UseChatSessionReturn {
   const unavailableInitialUrlThreadRef = useRef<string | null>(null);
 
   // ---- Auth ----
-  const { isAuthenticated, user } = useAuthStore(
-    useShallow((s) => ({ isAuthenticated: s.isAuthenticated, user: s.user }))
-  );
+  const { isAuthenticated, user, isAuthLoading, profileUnavailable } =
+    useAuthStore(
+      useShallow((s) => ({
+        isAuthenticated: s.isAuthenticated,
+        user: s.user,
+        isAuthLoading: s.isLoading,
+        profileUnavailable: s.profileUnavailable,
+      }))
+    );
+  // GOO-752: the profile is still resolving (first load, or /auth/me retries
+  // after a transient failure), or getUser() verified the user and only
+  // /auth/me is unavailable. Neither is a signed-out state, so the page must
+  // not redirect to login while it lasts.
+  const isAuthPending =
+    !isAuthenticated && (isAuthLoading || profileUnavailable);
   const userId = user?.id ?? null;
 
   // ---- Store bindings ----
@@ -341,9 +356,11 @@ export function useChatSession(): UseChatSessionReturn {
     }
   }, [isAuthenticated]);
 
-  // Redirect to login if not authenticated
+  // Redirect to login only on a real signed-out state: no verified user, or
+  // a token /auth/me rejected (401/403). Both settle isLoading false with
+  // profileUnavailable false.
   useEffect(() => {
-    if (!isAuthenticated && !isInitializing) {
+    if (!isAuthenticated && !isAuthPending && !isInitializing) {
       const timer = setTimeout(() => {
         router.push(
           getLoginPathWithRedirect(
@@ -353,7 +370,7 @@ export function useChatSession(): UseChatSessionReturn {
       }, 1500); // Short delay to show the "Redirecting..." state
       return () => clearTimeout(timer);
     }
-  }, [isAuthenticated, isInitializing, router, threadFromUrl]);
+  }, [isAuthenticated, isAuthPending, isInitializing, router, threadFromUrl]);
 
   // Thread-scoped load-failure signal. The toast fires only when the failed
   // thread is the one on screen, and — unlike the old loading-flag transition
@@ -1080,6 +1097,7 @@ export function useChatSession(): UseChatSessionReturn {
     storeMessages: activeThreadMessages,
     addMessageToStore,
     isAuthenticated,
+    isAuthPending,
 
     // Derived
     activeThreadId,

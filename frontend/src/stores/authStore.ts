@@ -53,6 +53,13 @@ interface AuthState {
    * never arrive. Set when that shape is detected.
    */
   pendingSignupPossiblyExisting: boolean;
+  /**
+   * GOO-752: getUser() verified this user, but /auth/me kept failing with a
+   * transient error (5xx, network) after every retry. The session is not
+   * dead, so page guards must not redirect to login; the shell shows a
+   * non-blocking banner with a retry instead.
+   */
+  profileUnavailable: boolean;
 
   // Actions
   signIn: (email: string, password: string) => Promise<void>;
@@ -67,6 +74,8 @@ interface AuthState {
   invalidateRejectedSession: (expectedUserId: string | null) => void;
   resetPassword: (email: string) => Promise<void>;
   fetchProfile: () => Promise<void>;
+  /** Re-runs the profile fetch, with its retries, after it settled unavailable. */
+  retryProfile: () => Promise<void>;
   updateUser: (user: Partial<User>) => void;
   clearPendingEmailConfirmation: () => void;
   clearError: () => void;
@@ -103,8 +112,19 @@ let authStateListenerRegistered = false;
 // FL2E-2: a transient /auth/me failure after getUser() verified the user is
 // retried on this schedule, with isLoading held so the shell does not settle
 // into signed-out and redirect, before it settles as "profile unavailable".
+// The count belongs to one identity revision (GOO-752): an account change or
+// a new sign-in starts the next identity with its full budget, and only one
+// retry timer is ever pending.
 const PROFILE_RETRY_DELAYS_MS = [1000, 3000] as const;
 let profileRetryAttempt = 0;
+let profileRetryRevision = -1;
+let profileRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function resetProfileRetries(): void {
+  profileRetryAttempt = 0;
+  if (profileRetryTimer !== null) clearTimeout(profileRetryTimer);
+  profileRetryTimer = null;
+}
 
 // The latest explicit login or signup owns its profile request. signIn fetches /auth/me itself
 // with the freshly issued access token, so the SIGNED_IN the same call emits
@@ -196,7 +216,7 @@ function clearUserScopedClientState(): void {
 function clearSession(): void {
   authRevision += 1;
   profileFetchInFlight = null;
-  profileRetryAttempt = 0;
+  resetProfileRetries();
   sessionUserId = null;
   activeSignIn = null;
   clearUserScopedClientState();
@@ -206,6 +226,7 @@ function clearSession(): void {
     isAuthenticated: false,
     isLoading: false,
     error: null,
+    profileUnavailable: false,
     ...CLEARED_PENDING_CONFIRMATION,
   });
 }
@@ -236,6 +257,7 @@ function observeIdentity(userId: string): void {
   if (previousId !== userId) {
     authRevision += 1;
     profileFetchInFlight = null;
+    resetProfileRetries();
     clearUserScopedClientState();
     useAuthStore.setState({
       user: null,
@@ -243,6 +265,7 @@ function observeIdentity(userId: string): void {
       isAuthenticated: false,
       isLoading: true,
       error: null,
+      profileUnavailable: false,
       ...CLEARED_PENDING_CONFIRMATION,
     });
   }
@@ -309,6 +332,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   isAuthenticated: false,
   isLoading: true,
   error: null,
+  profileUnavailable: false,
   ...CLEARED_PENDING_CONFIRMATION,
 
   signIn: async (email: string, password: string) => {
@@ -361,6 +385,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
           organization: profileData.organization ?? null,
           isAuthenticated: true,
           isLoading: false,
+          profileUnavailable: false,
           ...CLEARED_PENDING_CONFIRMATION,
         });
       } else {
@@ -610,13 +635,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         if (revision !== authRevision) return;
         observeIdentity(profileData.user.id);
         publishVerifiedAccount(profileData.user.id);
-        profileRetryAttempt = 0;
+        resetProfileRetries();
 
         set({
           user: profileData.user,
           organization: profileData.organization ?? null,
           isAuthenticated: true,
           isLoading: false,
+          error: null,
+          profileUnavailable: false,
           ...CLEARED_PENDING_CONFIRMATION,
         });
       } catch (error) {
@@ -645,15 +672,23 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // with the error. A later fetchProfile (TOKEN_REFRESHED, a reload)
         // can still recover.
         if (!tokenRejected && verifiedUserId !== null) {
+          if (profileRetryRevision !== authRevision) {
+            resetProfileRetries();
+            profileRetryRevision = authRevision;
+          }
           const delay = PROFILE_RETRY_DELAYS_MS[profileRetryAttempt];
           if (delay === undefined) {
-            profileRetryAttempt = 0;
-            set({ isLoading: false, error: message });
+            resetProfileRetries();
+            set({ isLoading: false, error: message, profileUnavailable: true });
             return;
           }
           profileRetryAttempt += 1;
           const retryRevision = authRevision;
-          setTimeout(() => {
+          // An outside fetch that fails while a retry is pending replaces
+          // that retry rather than starting a second chain.
+          if (profileRetryTimer !== null) clearTimeout(profileRetryTimer);
+          profileRetryTimer = setTimeout(() => {
+            profileRetryTimer = null;
             if (
               retryRevision === authRevision &&
               !activeSignIn &&
@@ -677,6 +712,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     } finally {
       if (profileFetchInFlight === request) profileFetchInFlight = null;
     }
+  },
+
+  retryProfile: async () => {
+    if (get().isAuthenticated) return;
+    set({ isLoading: true });
+    await get().fetchProfile();
   },
 
   updateUser: (userData: Partial<User>) => {

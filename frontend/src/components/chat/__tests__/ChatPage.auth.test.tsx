@@ -108,6 +108,21 @@ describe('ChatPage auth states', () => {
     expect(screen.queryByText('Initializing...')).not.toBeInTheDocument();
   });
 
+  it('says the account is loading, not redirecting, while auth is pending (GOO-752)', () => {
+    mockUseChatSession.mockReturnValue({
+      ...mockUseChatSession(),
+      isAuthenticated: false,
+      isAuthPending: true,
+    });
+
+    render(<ChatPage />);
+
+    expect(screen.getByText('Loading your account…')).toBeInTheDocument();
+    expect(
+      screen.queryByText('Authentication required. Redirecting...')
+    ).not.toBeInTheDocument();
+  });
+
   it('shows the cold-init skeleton before session data loads, even once authenticated', () => {
     mockUseChatSession.mockReturnValue({
       ...mockUseChatSession(),
