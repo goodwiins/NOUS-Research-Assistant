@@ -34,7 +34,7 @@ vi.mock('@/stores/authStore', () => {
 
 import { AuthProvider, useAuth } from '../useAuth';
 
-const wrapper = ({ children }: { children: ReactNode }) => (
+const wrapper = ({ children }: { children: ReactNode }): JSX.Element => (
   <AuthProvider>{children}</AuthProvider>
 );
 

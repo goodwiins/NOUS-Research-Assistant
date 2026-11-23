@@ -166,19 +166,27 @@ describe('useDocuments.deleteDocuments', () => {
     expect(result.current.selectedCount).toBe(1);
   });
 
-  it('drops a failed id from the selection once it no longer exists', async () => {
-    mockDelete.mockRejectedValue(new Error('timeout'));
+  it('keeps a failed id selected even when it is off the current page', async () => {
+    mockDelete.mockImplementation((path: string) =>
+      path === '/documents/off-page'
+        ? Promise.reject(new Error('timeout'))
+        : Promise.resolve(undefined)
+    );
     const { result } = renderHook(() => useDocuments({ autoFetch: false }));
     act(() => {
-      result.current.selectDocument('gone');
+      result.current.selectDocument('on-page');
+      result.current.selectDocument('off-page');
     });
 
+    // The refetch returns a page that does not contain the failed id.
     await act(async () => {
-      await result.current.deleteDocuments(['gone']).catch(() => undefined);
+      await result.current
+        .deleteDocuments(['on-page', 'off-page'])
+        .catch(() => undefined);
     });
 
-    // The refetch (empty list) shows it was deleted after all.
-    expect(result.current.selectedDocuments.has('gone')).toBe(false);
+    expect(result.current.selectedDocuments.has('on-page')).toBe(false);
+    expect(result.current.selectedDocuments.has('off-page')).toBe(true);
   });
 
   it('stops the loop on a mid-batch auth failure, skips the rest, and calls handleAuthError once', async () => {

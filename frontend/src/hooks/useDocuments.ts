@@ -610,14 +610,14 @@ export const useDocuments = (
 
       await fetchDocuments();
 
-      // Deselect what was deleted; keep failed and skipped ids that still
-      // exist selected so the user can retry them in one step (GOO-727).
+      // Deselect only what was deleted. Failed and skipped ids stay
+      // selected, whether or not they are on the current page, so the user
+      // can retry them in one step (GOO-727).
       const failedIds = new Set(failures.map(({ id }) => id));
       setState((prev) => {
-        const present = new Set(prev.documents.map((d) => d.id));
         const newSelected = new Set(prev.selectedDocuments);
         for (const id of documentIds) {
-          if (!failedIds.has(id) || !present.has(id)) newSelected.delete(id);
+          if (!failedIds.has(id)) newSelected.delete(id);
         }
         return { ...prev, selectedDocuments: newSelected };
       });

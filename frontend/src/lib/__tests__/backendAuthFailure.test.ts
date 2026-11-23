@@ -56,7 +56,11 @@ describe('isBackendSessionFailure', () => {
 
   it('rejects non-401s, missing URLs and plain errors', () => {
     expect(
-      isBackendSessionFailure(apiError(403, '/api/v1/documents'), '/api/v1', PAGE)
+      isBackendSessionFailure(
+        apiError(403, '/api/v1/documents'),
+        '/api/v1',
+        PAGE
+      )
     ).toBe(false);
     expect(isBackendSessionFailure(apiError(401), '/api/v1', PAGE)).toBe(false);
     expect(
@@ -92,27 +96,104 @@ describe('APIClient records the request URL on errors', () => {
     vi.unstubAllGlobals();
   });
 
-  async function caught(url: string): Promise<APIErrorClass> {
+  // vi.resetModules() gives the client a fresh APIErrorClass, so the check
+  // must come from the same fresh module graph for `instanceof` to hold.
+  async function caught(
+    url: string
+  ): Promise<{
+    error: APIErrorClass;
+    isBackend: typeof isBackendSessionFailure;
+  }> {
     const { APIClient } = await import('@/services/api-client');
     const { APIErrorClass: Fresh } = await import('@/types/api');
+    const { isBackendSessionFailure: isBackend } =
+      await import('../backendAuthFailure');
     const error = await new APIClient('https://api.example/api/v1')
       .get(url, { retries: 0 })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Fresh);
-    return error as APIErrorClass;
+    return { error: error as APIErrorClass, isBackend };
   }
 
   it('for a backend path', async () => {
-    expect((await caught('/documents')).requestUrl).toBe(
-      'https://api.example/api/v1/documents'
-    );
+    const { error, isBackend } = await caught('/documents');
+    expect(error.requestUrl).toBe('https://api.example/api/v1/documents');
+    expect(isBackend(error, 'https://api.example/api/v1', PAGE)).toBe(true);
   });
 
   it('for an absolute third-party URL', async () => {
-    const error = await caught('https://other.example/x');
+    const { error, isBackend } = await caught('https://other.example/x');
     expect(error.requestUrl).toBe('https://other.example/x');
-    expect(
-      isBackendSessionFailure(error, 'https://api.example/api/v1', PAGE)
-    ).toBe(false);
+    expect(isBackend(error, 'https://api.example/api/v1', PAGE)).toBe(false);
+  });
+});
+
+describe('APIClient records the request URL on XHR upload errors', () => {
+  const originalXhr = globalThis.XMLHttpRequest;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doMock('@/lib/supabase/client', () => ({
+      createClient: () => ({
+        auth: {
+          getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+        },
+      }),
+    }));
+    class Unauthorized401Xhr {
+      upload = { onprogress: null as ((e: ProgressEvent) => void) | null };
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      status = 401;
+      statusText = 'Unauthorized';
+      responseText = JSON.stringify({ detail: 'Not authenticated' });
+      open(): void {}
+      setRequestHeader(): void {}
+      abort(): void {}
+      send(): void {
+        this.onload?.();
+      }
+    }
+    globalThis.XMLHttpRequest =
+      Unauthorized401Xhr as unknown as typeof XMLHttpRequest;
+  });
+
+  afterEach(() => {
+    globalThis.XMLHttpRequest = originalXhr;
+  });
+
+  async function uploadError(
+    endpoint: string
+  ): Promise<{
+    error: APIErrorClass;
+    isBackend: typeof isBackendSessionFailure;
+  }> {
+    const { APIClient } = await import('@/services/api-client');
+    const { APIErrorClass: Fresh } = await import('@/types/api');
+    const { isBackendSessionFailure: isBackend } =
+      await import('../backendAuthFailure');
+    const file = new File(['pdf'], 'paper.pdf', { type: 'application/pdf' });
+    const error = await new APIClient('https://api.example/api/v1')
+      .upload(endpoint, file, { onProgress: () => {} })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Fresh);
+    return { error: error as APIErrorClass, isBackend };
+  }
+
+  it('a 401 from a backend upload is a session failure', async () => {
+    const { error, isBackend } = await uploadError('/documents/upload');
+    expect(error.requestUrl).toBe(
+      'https://api.example/api/v1/documents/upload'
+    );
+    expect(isBackend(error, 'https://api.example/api/v1', PAGE)).toBe(true);
+  });
+
+  it('a 401 from an upload to another origin is not', async () => {
+    const { error, isBackend } = await uploadError(
+      'https://uploads.other.example/put'
+    );
+    expect(error.requestUrl).toBe('https://uploads.other.example/put');
+    expect(isBackend(error, 'https://api.example/api/v1', PAGE)).toBe(false);
   });
 });
