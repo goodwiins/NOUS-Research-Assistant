@@ -527,6 +527,11 @@ describe('tuning: ordinary error messages stay readable', () => {
       expect(scrubString(`Token ${word}.`), word).toBe(`Token ${word}.`);
       expect(scrubString(`Bearer ${word}.`), word).toBe('Bearer [Filtered]');
     }
+    // "refresh" is not prose: with its dot it reaches the rule's 8
+    // characters and is filtered ("Token refresh" alone is below them).
+    for (const text of ['Token refresh.', 'Basic refreshed']) {
+      expect(scrubString(text), text).toMatch(/^(Token|Basic) \[Filtered\]$/);
+    }
   });
 
   it('stays linear on a long run of dots after a scheme (#2278 delta review)', () => {
@@ -556,11 +561,14 @@ describe('tuning: secrets that used to pass', () => {
     }
   });
 
-  it('does not treat a word ending in "key" as a key id', () => {
-    for (const key of ['monkeyId', 'hockeyIds', 'turkeyID']) {
-      expect(isSensitiveKey(key), key).toBe(false);
-    }
-    for (const key of ['keyId', 'key_id', 'apiKeyID', 'signing_key_ids']) {
+  it('filters every key that ends in a key id, ordinary words included (#2278 review)', () => {
+    // No exception list: "monkeyId" is over-scrubbed so that camel-case
+    // splits such as "monKeyId" can never slip through.
+    for (const key of [
+      'keyId', 'key_id', 'apiKeyID', 'signing_key_ids',
+      'monKeyId', 'monkeyId', 'commonKeyId', 'adHocKeyId', 'turKeyId',
+      'user.monKeyId', 'hockeyIds',
+    ]) {
       expect(isSensitiveKey(key), key).toBe(true);
     }
   });

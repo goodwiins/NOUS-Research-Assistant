@@ -102,17 +102,18 @@ const SENSITIVE_SUFFIX =
   /(token|secret|password|cookie|authorization|email|apikey|jwt|credentials|sessionids?)$/;
 // Key ids in any case and separator style (keyId, KEY_ID, apiKey.id,
 // X-API-KEY-ID, AWS_ACCESS_KEY_ID, passkeyId): fail closed, as before this
-// change. The only exceptions are ordinary words that end in "key"
-// (monkeyId, hockeyIds), listed explicitly.
+// change. No exceptions on purpose: an exception list for ordinary words
+// that end in "key" (monkeyId) could not tell them from camel-case splits
+// (monKeyId, commonKeyId, adHocKeyId), and over-scrubbing a rare harmless
+// value costs far less than letting a key id through.
 const KEY_ID_KEY = /key[_.\-\s]?ids?$/i;
-const NOT_A_KEY_ID = /(?:^|[^a-z])(?:mon|hoc|tur|don|joc|whis|lac)key[_.\-\s]?ids?$/i;
 
 export function isSensitiveKey(key: string): boolean {
   const normalized = normalizeKey(key);
   return (
     SENSITIVE_KEYS.has(normalized) ||
     SENSITIVE_SUFFIX.test(normalized) ||
-    (KEY_ID_KEY.test(key) && !NOT_A_KEY_ID.test(key))
+    KEY_ID_KEY.test(key)
   );
 }
 
