@@ -1329,9 +1329,12 @@ class ChatService:
         # Count messages. Deliberately NOT filtered on
         # ``superseded_by_message_id``: this is analytics — an edit-and-resend
         # tombstones a turn for display, it does not un-happen it.
+        # The onclause is explicit: ``threads`` also points back at
+        # ``chat_messages`` (PDF-chat branch columns), so a bare join is
+        # ambiguous and fails to compile.
         msg_count_stmt = (
             select(func.count(ChatMessage.id))
-            .join(Thread)
+            .join(Thread, ChatMessage.thread_id == Thread.id)
             .join(Conversation)
             .where(
                 Conversation.workspace_id == workspace_id,

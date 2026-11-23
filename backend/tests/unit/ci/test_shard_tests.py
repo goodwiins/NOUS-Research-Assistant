@@ -4,6 +4,7 @@ The Integration Tests job runs one matrix leg per shard. The legs must cover
 every test file exactly once, or a test silently stops running in CI.
 """
 
+import ast
 import importlib.util
 import os
 import re
@@ -11,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import cast
+from xml.etree import ElementTree
 
 import pytest
 import yaml  # type: ignore[import-untyped]  # CI lint gate installs no types-PyYAML
@@ -155,13 +157,115 @@ def test_integration_job_enrolls_retention_purge_regression() -> None:
     assert "RETENTION_PURGE_TEST_DATABASE_URL" in source
 
 
-# ---- the unit-tree PostgreSQL lane (GOO-702) --------------------------------
+# ---- the PostgreSQL lane outside backend/tests/integration (GOO-702/731) ----
 
 _POSTGRES_LANE = "Run ingestion recovery PostgreSQL tests"
-# A test file that reads a PostgreSQL URL from the environment.
-_READS_PG_URL = re.compile(
-    r"""(?:getenv|environ\.get|environ\[)\(?\s*["']([A-Z0-9_]*_TEST_DATABASE_URL)["']"""
+_TESTS = REPO_ROOT / "backend" / "tests"
+# Trees with PostgreSQL lanes of their own (integration shards), never
+# collected (norecursedirs), or this directory, whose strings name the URLs.
+_NOT_LANE_SCOPE = (
+    "integration",
+    "performance",
+    "templates",
+    "standalone",
+    "scaffolding",
+    "unit/ci",
 )
+# Names a PostgreSQL URL variable in a string: read directly, or through a
+# constant (``_ENV = "..._TEST_DATABASE_URL"``, then ``os.getenv(_ENV)``).
+_URL_NAME = r"[A-Z0-9_]*_TEST_DATABASE_URL"
+_NAMES_PG_URL = re.compile(rf"""["']({_URL_NAME})["']""")
+# Imports PostgreSQL fixtures: backend/tests/db/conftest.py or any *_postgres
+# module (the stuck_recovery files import theirs from one, GOO-703).
+_IMPORTS_PG_FIXTURES = re.compile(
+    r"^\s*(?:from|import)\s+tests\.(?:db\.conftest|[\w.]*_postgres)\b", re.M
+)
+_CLEAN_ENV_DROPS = ("CI", "REQUIRE_POSTGRES_TESTS", "TEST_PG_ADMIN_DSN")
+_CLEAN_ENV_DROP_SUFFIX = ("_TEST_DATABASE_URL", "_PG_ASYNC_URL")
+
+
+def _in_lane_scope(path: Path) -> bool:
+    rel = path.relative_to(_TESTS).as_posix()
+    return not any(rel == p or rel.startswith(p + "/") for p in _NOT_LANE_SCOPE)
+
+
+def _reaches_pg(path: Path) -> bool:
+    text = path.read_text(encoding="utf-8")
+    return bool(_NAMES_PG_URL.search(text) or _IMPORTS_PG_FIXTURES.search(text))
+
+
+def _postgres_candidates() -> tuple[set[Path], set[Path]]:
+    """Return (files that may hold a PostgreSQL test, the direct subset).
+
+    Direct files are *_postgres.py files and test files that name a database
+    URL or import PostgreSQL fixtures themselves. The rest reach a PostgreSQL
+    fixture through a directory conftest (backend/tests/api/agent imports
+    tests.db.conftest, for one). Collection then tells which tests in them
+    really use one: backend/tests/conftest.py marks those requires_postgres.
+    """
+    fixture_dirs = {_TESTS / "db"} | {
+        conftest.parent
+        for conftest in _TESTS.rglob("conftest.py")
+        if conftest.parent != _TESTS
+        and _in_lane_scope(conftest)
+        and _reaches_pg(conftest)
+    }
+    direct: set[Path] = set()
+    reached: set[Path] = set()
+    for path in _TESTS.rglob("test_*.py"):
+        if not _in_lane_scope(path):
+            continue
+        if path.name.endswith("_postgres.py") or _reaches_pg(path):
+            direct.add(path)
+        if fixture_dirs.intersection(path.parents):
+            reached.add(path)
+    return direct | reached, direct
+
+
+def _clean_env(**extra: str) -> dict[str, str]:
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _CLEAN_ENV_DROPS and not k.endswith(_CLEAN_ENV_DROP_SUFFIX)
+    }
+    return {**env, "ENVIRONMENT": "testing", **extra}
+
+
+def _pytest(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *args,
+            "-c",
+            "backend/pytest.ini",
+            "--color=no",
+            "-p",
+            "no:cacheprovider",
+            "-p",
+            "no:xdist",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _collect_postgres_tests(paths: set[Path]) -> set[str]:
+    """Node ids (relative to backend/) the PostgreSQL mark selects."""
+    result = _pytest(
+        *sorted(p.relative_to(REPO_ROOT).as_posix() for p in paths),
+        "--collect-only",
+        "-qq",  # pytest.ini adds -v
+        "-m",
+        "requires_postgres",
+        env=_clean_env(),
+    )
+    assert result.returncode in (0, 5), result.stdout[-4000:] + result.stderr
+    return {line.strip() for line in result.stdout.splitlines() if "::" in line}
 
 
 def _postgres_lane_step() -> dict:
@@ -190,40 +294,179 @@ def _postgres_lane_files(step: dict) -> set[str]:
     return set(result.stdout.split())
 
 
-def test_postgres_lane_collects_every_unit_test_that_reads_a_pg_url() -> None:
+def _covered_by(node_file: str, lane: set[str]) -> bool:
+    path = "backend/" + node_file
+    return any(
+        path == entry or path.startswith(entry.rstrip("/") + "/") for entry in lane
+    )
+
+
+def test_postgres_lane_runs_every_postgres_test() -> None:
     """Unit Tests has no database, so a PostgreSQL test the lane misses never
-    runs anywhere (it skips). The lane globs *_postgres.py; a file named
-    otherwise must be listed in it explicitly."""
-    collected = _postgres_lane_files(_postgres_lane_step())
-    unit = REPO_ROOT / "backend" / "tests" / "unit"
-    reading = {
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in unit.rglob("test_*.py")
-        if "ci" not in path.relative_to(unit).parts[:1]
-        and _READS_PG_URL.search(path.read_text(encoding="utf-8"))
-    }
+    runs anywhere: it skips there, or is deselected as integration (GOO-731:
+    the 108 tests on the tests/db fixtures ran nowhere). Which tests are
+    PostgreSQL tests comes from collection, not from reading source, so a
+    fixture imported from a *_postgres module or a URL read through a
+    constant counts too (GOO-703)."""
+    step = _postgres_lane_step()
+    lane = _postgres_lane_files(step)
+    for name in lane:
+        assert (REPO_ROOT / name).exists(), f"{name} is listed but does not exist"
 
-    assert reading, "the scan found no PostgreSQL tests; the pattern is stale"
-    assert reading <= collected, sorted(reading - collected)
-    for name in collected:
-        assert (REPO_ROOT / name).is_file(), f"{name} is listed but does not exist"
+    candidates, _ = _postgres_candidates()
+    postgres_tests = _collect_postgres_tests(candidates)
+    assert len(postgres_tests) > 250, "the scan found too few tests; it is stale"
+    for expected in (
+        "tests/unit/services/threads/test_thread_service.py::",
+        "tests/api/agent/test_edit_resend_tombstone.py::",
+        "tests/api/threads/test_messages_order_param.py::",
+        "tests/db/test_chat_messages_client_uuid_uniqueness.py::",
+        "tests/unit/tasks/test_stuck_processing_recovery.py::",
+    ):
+        assert any(n.startswith(expected) for n in postgres_tests), expected
+
+    missing = sorted(
+        n for n in postgres_tests if not _covered_by(n.split("::", 1)[0], lane)
+    )
+    assert not missing, (
+        "PostgreSQL tests outside the lane's postgres_tests list in "
+        f".github/workflows/test-pipeline.yml: {missing[:20]}"
+    )
 
 
-def test_postgres_lane_files_select_their_postgres_tests() -> None:
-    """The lane runs ``-m "integration or requires_postgres"``; a collected
-    file with neither marker would be deselected and count for nothing."""
-    for name in _postgres_lane_files(_postgres_lane_step()):
-        source = (REPO_ROOT / name).read_text(encoding="utf-8")
-        assert (
-            "pytest.mark.integration" in source
-            or "pytest.mark.requires_postgres" in source
-        ), name
-
-
-def test_postgres_lane_turns_skips_into_failures() -> None:
+def test_postgres_lane_selects_by_the_postgres_mark() -> None:
+    """The lane's -m must be the mark collection uses above, or a test the
+    coverage check counts could still be deselected in CI."""
     step = _postgres_lane_step()
     assert step["env"]["REQUIRE_POSTGRES_TESTS"] == "1"
-    assert '-m "integration or requires_postgres"' in step["run"]
+    assert re.search(r"-m\s+requires_postgres\s", step["run"]), step["run"]
+    assert "-m " not in step["run"].replace("-m requires_postgres", "")
+
+
+def test_no_unmarked_postgres_test_hides_in_a_postgres_file(tmp_path: Path) -> None:
+    """GOO-703: the lane drops the tests of its files that are not marked
+    requires_postgres. Run exactly those without a database: a PostgreSQL
+    test among them would skip, and is reported here instead of vanishing.
+    (The account suites' sqlite halves and pure-logic tests pass.)"""
+    _, direct = _postgres_candidates()
+    report = tmp_path / "unmarked.xml"
+    result = _pytest(
+        *sorted(p.relative_to(REPO_ROOT).as_posix() for p in direct),
+        "-m",
+        "not requires_postgres",
+        "-q",
+        f"--junitxml={report}",
+        env=_clean_env(),
+    )
+    out = result.stdout[-4000:] + result.stderr[-2000:]
+    if result.returncode == 5:  # every test in these files is marked
+        return
+    assert result.returncode == 0, out
+    skipped = [
+        f"{case.get('classname')}::{case.get('name')}"
+        for case in ElementTree.parse(report).iter("testcase")
+        if any(
+            child.tag == "skipped" and child.get("type") != "pytest.xfail"
+            for child in case
+        )
+    ]
+    assert not skipped, (
+        "Unmarked tests skip without a database; mark them requires_postgres "
+        f"so the PostgreSQL lane runs them: {skipped}"
+    )
+
+
+_SKIP_CALLS = {"skip", "fail", "xfail", "exit", "importorskip"}
+
+
+def _stops_the_test(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, ast.Raise):
+        return True
+    call = stmt.value if isinstance(stmt, ast.Expr) else None
+    if isinstance(call, ast.Await):
+        call = call.value
+    if not isinstance(call, ast.Call):
+        return False
+    func = call.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+    return name in _SKIP_CALLS
+
+
+def _is_test_or_fixture(func: ast.AST) -> bool:
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    if func.name.startswith("test_"):
+        return True
+    return any("fixture" in ast.unparse(d) for d in func.decorator_list)
+
+
+def _early_returns_without_a_database(path: Path) -> list[str]:
+    """Tests or fixtures that `return` when the database URL is missing.
+
+    Such a test passes having checked nothing, and no skip guard sees it
+    (GOO-703). They must call pytest.skip (or fail) instead."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    url_constants = {
+        target.id
+        for node in tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        and re.fullmatch(_URL_NAME, node.value.value)
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    }
+
+    def reads_url(node: ast.AST, names: set[str]) -> bool:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                if re.fullmatch(_URL_NAME, sub.value):
+                    return True
+            if isinstance(sub, ast.Name) and sub.id in names:
+                return True
+        return False
+
+    found = []
+    for func in ast.walk(tree):
+        if not _is_test_or_fixture(func):
+            continue
+        assert isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+        names = set(url_constants)
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign) and reads_url(node.value, names):
+                names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                if reads_url(node.value, names) and isinstance(node.target, ast.Name):
+                    names.add(node.target.id)
+        for node in ast.walk(func):
+            if not isinstance(node, ast.If) or not reads_url(node.test, names):
+                continue
+            for stmt in node.body:
+                if _stops_the_test(stmt):
+                    break
+                if isinstance(stmt, ast.Return):
+                    found.append(f"{path.relative_to(REPO_ROOT)}:{stmt.lineno}")
+                    break
+    return found
+
+
+def test_postgres_tests_skip_rather_than_return_without_a_database() -> None:
+    candidates, direct = _postgres_candidates()
+    sources = direct | {
+        conftest
+        for conftest in _TESTS.rglob("conftest.py")
+        if _in_lane_scope(conftest) and _reaches_pg(conftest)
+    }
+    sources.add(_TESTS / "db" / "conftest.py")
+    found = [
+        hit
+        for path in sorted(sources)
+        for hit in _early_returns_without_a_database(path)
+    ]
+    assert not found, (
+        "These return early when the database URL is missing, so the test "
+        f"passes having checked nothing; call pytest.skip instead: {found}"
+    )
 
 
 _GUARD_SAMPLE = Path(__file__).with_name("postgres_guard_sample.py")
@@ -259,8 +502,16 @@ def test_ci_postgres_lane_fails_a_skipped_postgres_test() -> None:
 
     out = result.stdout + result.stderr
     assert result.returncode == 1, out
-    assert "1 failed, 1 skipped" in out, out
-    assert "PostgreSQL test skipped in a CI step that requires PostgreSQL" in out
+    # The marker skips during setup, so pytest counts that one as an error.
+    summary = out.strip().splitlines()[-1]
+    for count in ("1 failed", "1 error", "1 skipped"):
+        assert count in summary, out
+    # A runtime skip and a skip marker get different explanations (GOO-703):
+    # only the first one points at the database.
+    assert "PostgreSQL test skipped at runtime" in out, out
+    assert "the database is most likely missing or unreachable" in out, out
+    assert "PostgreSQL test skipped by a skip/skipif marker" in out, out
+    assert "The database is not the cause" in out, out
 
 
 @pytest.mark.parametrize(
@@ -275,7 +526,7 @@ def test_postgres_skips_stay_skips_outside_the_lane(env: dict[str, str]) -> None
 
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
-    assert "2 skipped" in out, out
+    assert "3 skipped" in out, out
 
 
 @pytest.mark.parametrize(
