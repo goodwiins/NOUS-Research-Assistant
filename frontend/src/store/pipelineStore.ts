@@ -34,6 +34,34 @@ interface PipelineStore {
 // per-mutation ordering (ledger RS-B2, accepted).
 let pipelineRequestToken: object | null = null;
 
+/**
+ * GOO-762: the loaded pipeline belongs to one project. A step mutation for
+ * another project must not build its update from it (the update would carry
+ * the old project's steps), so it is refused.
+ */
+function pipelineFor(
+  pipeline: PipelineState | null,
+  projectId: string
+): PipelineState | null {
+  return pipeline && pipeline.project_id === projectId ? pipeline : null;
+}
+
+/**
+ * Loading another project drops the previous project's pipeline at once, so
+ * nothing of it shows (or is edited) under the new project while it loads,
+ * nor after its load fails. A reload of the same project keeps it on screen.
+ */
+function startLoad(
+  current: PipelineState | null,
+  projectId: string
+): Pick<PipelineStore, 'pipeline' | 'loading' | 'error'> {
+  return {
+    pipeline: pipelineFor(current, projectId),
+    loading: true,
+    error: null,
+  };
+}
+
 export const usePipelineStore = create<PipelineStore>((set, get) => ({
   pipeline: null,
   loading: false,
@@ -42,10 +70,14 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   fetchPipeline: async (projectId: string) => {
     const requestToken = {};
     pipelineRequestToken = requestToken;
-    set({ loading: true, error: null });
+    set(startLoad(get().pipeline, projectId));
     try {
       const pipeline = await scispaceService.getPipeline(projectId);
-      if (pipelineRequestToken !== requestToken) return; // superseded
+      if (
+        pipelineRequestToken !== requestToken ||
+        pipeline.project_id !== projectId
+      )
+        return; // superseded
       set({ pipeline, loading: false });
     } catch (err) {
       if (pipelineRequestToken !== requestToken) return; // superseded
@@ -59,7 +91,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     // Snapshot only — this action doesn't own the token slot, the last
     // fetch/reset does. See pipelineRequestToken comment above.
     const requestToken = pipelineRequestToken;
-    const { pipeline } = get();
+    const pipeline = pipelineFor(get().pipeline, projectId);
     if (!pipeline) return;
 
     const currentStep = pipeline.current_step;
@@ -94,7 +126,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
 
   skipStep: async (projectId: string) => {
     const requestToken = pipelineRequestToken;
-    const { pipeline } = get();
+    const pipeline = pipelineFor(get().pipeline, projectId);
     if (!pipeline) return;
 
     const currentStep = pipeline.current_step;
@@ -125,7 +157,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
 
   goToStep: async (projectId: string, step: number) => {
     const requestToken = pipelineRequestToken;
-    const { pipeline } = get();
+    const pipeline = pipelineFor(get().pipeline, projectId);
     if (!pipeline) return;
 
     try {
@@ -152,7 +184,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     data: Record<string, unknown>
   ) => {
     const requestToken = pipelineRequestToken;
-    const { pipeline } = get();
+    const pipeline = pipelineFor(get().pipeline, projectId);
     if (!pipeline) return;
 
     try {
@@ -177,7 +209,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     // Owns loading, so it installs a new token like fetchPipeline does.
     const requestToken = {};
     pipelineRequestToken = requestToken;
-    set({ loading: true, error: null });
+    set(startLoad(get().pipeline, projectId));
     try {
       const pipeline = await scispaceService.resetPipeline(projectId);
       if (

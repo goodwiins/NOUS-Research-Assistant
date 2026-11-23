@@ -46,6 +46,8 @@ const getPipeline = scispaceService.getPipeline as unknown as ReturnType<
   typeof vi.fn
 >;
 const pipeline = {
+  // The store drops a response for another project (GOO-762).
+  project_id: 'p1',
   current_step: 0,
   completed_steps: [],
   skipped_steps: [],
@@ -74,6 +76,9 @@ describe('ResearchPipeline first-load failure', () => {
     expect(await screen.findByText('collect-step')).toBeInTheDocument();
     expect(getPipeline).toHaveBeenCalledTimes(2);
     expect(getPipeline).toHaveBeenLastCalledWith('p1');
+    // The retry cleared the failure, not just hid it behind the pipeline.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(usePipelineStore.getState().error).toBeNull();
   });
 
   it('shows the spinner again while a retry is in flight', async () => {
