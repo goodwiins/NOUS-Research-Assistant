@@ -25,9 +25,6 @@ const FRONTEND_ROOT = resolve(HERE, '../../../..');
 const ALLOWED: Record<string, string> = {
   'src/components/ui/sidebar.tsx': 'skeleton placeholder width',
   'src/components/ui/agent-plan.tsx': 'demo-only status toggle, no metric',
-  'src/components/citations/CitationGraph.tsx': 'node layout shuffle',
-  'src/components/citations/CitationGraphSkeleton.tsx':
-    'skeleton placeholder size',
 };
 
 const isTestFile = (path: string): boolean =>
