@@ -48,6 +48,11 @@ function statCard(label: string): HTMLElement {
   return card;
 }
 
+/** The big figure on a stat card, without its label. */
+function statValue(label: string): string | null {
+  return statCard(label).querySelector('.tabular-nums')?.textContent ?? null;
+}
+
 describe('DashboardPage stat cards (GOO-649)', () => {
   beforeEach(() => {
     get.mockReset();
@@ -101,7 +106,7 @@ describe('DashboardPage stat cards (GOO-649)', () => {
     expect(screen.queryByText('Conversations')).not.toBeInTheDocument();
   });
 
-  it('shows an unmeasured average search time as unavailable, not 0 (GOO-745)', async () => {
+  it('shows an unmeasured average search time as not measured, not 0 (GOO-745, GOO-768)', async () => {
     get.mockImplementation(async (url: string) => {
       if (url.startsWith('/analytics/performance/search-performance')) {
         // The backend sends null when no search in the window was timed.
@@ -117,8 +122,29 @@ describe('DashboardPage stat cards (GOO-649)', () => {
       expect(statCard('Searches, last 7 days')).toHaveTextContent('120')
     );
     const avg = statCard('Avg search time (ms), last 7 days');
-    expect(avg).toHaveTextContent('—');
-    expect(avg).not.toHaveTextContent(/\b0\b/);
+    expect(statValue('Avg search time (ms), last 7 days')).toBe('—');
+    // Not measured is not an outage (GOO-768).
+    expect(avg).toHaveTextContent('Not measured yet');
+    expect(avg).not.toHaveTextContent('Unavailable right now');
+  });
+
+  it('shows a measured 0 ms average search time as 0, not "—" (GOO-768)', async () => {
+    get.mockImplementation(async (url: string) => {
+      if (url.startsWith('/analytics/performance/search-performance')) {
+        return { ...searchPerformanceBody, avg_response_time: 0 };
+      }
+      throw new Error(`404 ${url}`);
+    });
+
+    render(<DashboardPage />);
+
+    await waitFor(() =>
+      expect(statCard('Searches, last 7 days')).toHaveTextContent('120')
+    );
+    expect(statValue('Avg search time (ms), last 7 days')).toBe('0');
+    expect(statCard('Avg search time (ms), last 7 days')).not.toHaveTextContent(
+      'Not measured yet'
+    );
   });
 
   it('Documents waits for the first response instead of showing the default 0 (F3)', async () => {
