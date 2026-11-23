@@ -157,6 +157,24 @@ def _failed_run(errors: List[str], warnings: List[str]) -> Dict[str, Any]:
     return {"success": False, "errors": list(errors), "warnings": list(warnings)}
 
 
+def _try_fail_job(job: Any, error_msg: str, document_id: Any) -> bool:
+    """Mark ``job`` FAILED; on error, log it and return False (GOO-776).
+
+    The caller is already handling a failure: a ``fail_job`` exception must not
+    replace that original error, so the caller re-raises the original instead.
+    """
+    try:
+        job.fail_job(error_msg)
+    except Exception:
+        logger.error(
+            "fail_job raised while recording the failure of document %s",
+            document_id,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
 def _record_warnings(document: Document, warnings: List[str], partial: bool) -> None:
     """Write this run's warnings, replacing any earlier run's. ``partial`` is
     set only for a document that completed with warnings."""
@@ -312,7 +330,10 @@ class MultimodalProcessingService:
                         # This branch returns before update_document_with_results
                         # (the only other place that sets doc status), so without
                         # this the document would be stranded in PROCESSING.
-                        job.fail_job(error_msg)
+                        if not _try_fail_job(job, error_msg, document_id):
+                            # The outer handler still ends the document FAILED,
+                            # then re-raises this step's error (GOO-776).
+                            raise
                         try:
                             document.update_processing_status(
                                 ProcessingStatus.FAILED, error_msg
@@ -363,8 +384,11 @@ class MultimodalProcessingService:
 
             return processing_results
 
-        except Exception:
+        except Exception as exc:
             error_msg = "Document processing failed"
+            # processing_results may be the finalized copy, which already says
+            # success=True: a crash after that point is still a failure (GOO-776).
+            processing_results["success"] = False
             processing_results["errors"].append(error_msg)
             # The failure may be the session itself (a rejected flush), which
             # expires every loaded attribute: roll back before reading any,
@@ -375,7 +399,7 @@ class MultimodalProcessingService:
                 logger.warning("rollback after a failed run failed", exc_info=True)
             logger.exception("Document processing failed for document %s", document_id)
 
-            job.fail_job(error_msg)
+            job_failed = _try_fail_job(job, error_msg, document_id)
             # End terminal: a document left in PROCESSING is never retried.
             document.processing_status = ProcessingStatus.FAILED
             document.processing_error = error_msg
@@ -402,6 +426,11 @@ class MultimodalProcessingService:
                 )
                 self.db.rollback()
 
+            if not job_failed:
+                # The job could not be marked FAILED, so the returned dict
+                # would be the only record of the failure: surface the real
+                # error to the caller instead (GOO-776).
+                raise exc
             return processing_results
 
     def get_processing_pipeline(
