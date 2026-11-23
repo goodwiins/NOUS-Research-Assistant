@@ -4,9 +4,12 @@ import { describe, expect, it } from 'vitest';
 import type { Breadcrumb, ErrorEvent, Log } from '@sentry/nextjs';
 import {
   FILTERED,
+  MAX_KEYS,
   MAX_STRING_LENGTH,
+  TRUNCATED_KEYS,
   OBJECT_PLACEHOLDER,
   isSensitiveKey,
+  looksSecret,
   minimalEvent,
   safeBeforeBreadcrumb,
   safeBeforeSend,
@@ -476,5 +479,182 @@ describe('Sentry config wiring', () => {
     expect(source).toContain('scrubReplayEventsIntegration()');
     expect(source).toContain('maskAllText: true');
     expect(source).toContain('blockAllMedia: true');
+  });
+});
+
+// GOO-735: tuning from the #2265 review. Credentials are assembled at
+// runtime (see the note at the top of the file).
+describe('tuning: ordinary error messages stay readable', () => {
+  it.each([
+    'Unexpected token undefined in JSON at position 0',
+    'token validation failed',
+    'Token expired, please sign in again',
+    'basic authentication failed',
+    'Basic authentication required',
+    'authorization: required',
+    'cookie: not set',
+    'Cookie: missing, falling back to header',
+    'data: loaded 5 rows',
+    'Invalid data: expected a number',
+  ])('keeps %j', (message) => {
+    expect(scrubString(message)).toBe(message);
+  });
+
+  it('keeps http.route and next.route span attributes', () => {
+    const span = {
+      span_id: 's',
+      trace_id: 't',
+      start_timestamp: 1,
+      data: { 'http.route': '/chat/[threadId]', 'next.route': '/api/threads/[id]' },
+    };
+    expect(safeBeforeSendSpan(span as never).data).toEqual(span.data);
+  });
+
+  it('still filters a JSON SSE frame and real credentials after those words', () => {
+    expect(scrubString(SSE_LINE)).toBe('data: [Filtered]');
+    const tokenValue = ['tok', 'A1b2C3d4E5f6'].join('_');
+    expect(scrubString(`Token ${tokenValue}`)).toBe('Token [Filtered]');
+    expect(scrubString(`Basic ${BASIC}`)).toBe('Basic [Filtered]');
+    expect(scrubString('Bearer abcdefghijklmnop')).toBe('Bearer [Filtered]');
+    expect(scrubString(`authorization: ${tokenValue}`)).toBe('Authorization: [Filtered]');
+    expect(scrubString('cookie: sid=abc123; theme=dark')).toBe('Cookie: [Filtered]');
+  });
+
+  it('looksSecret separates words from credentials', () => {
+    for (const word of ['undefined', 'validation', 'authentication', 'required']) {
+      expect(looksSecret(word), word).toBe(false);
+    }
+    for (const value of [BASIC, 'abc123', 'AbCdEfGhIjKlMn', 'q'.repeat(32)]) {
+      expect(looksSecret(value), value).toBe(true);
+    }
+  });
+});
+
+describe('tuning: secrets that used to pass', () => {
+  it('denies session and key identifiers but keeps other ids', () => {
+    for (const key of ['sessionId', 'session_id', 'apiKeyId', 'api_key_id', 'keyIds']) {
+      expect(isSensitiveKey(key), key).toBe(true);
+    }
+    const out = scrubData({
+      sessionId: 'sess-1',
+      apiKeyId: 'key-1',
+      threadId: 'th-1',
+      threadID: 'th-2',
+      span_id: 'sp-1',
+      paid: 'yes-paid',
+      valid: 'valid-text',
+    });
+    expect(out).toEqual({
+      sessionId: FILTERED,
+      apiKeyId: FILTERED,
+      threadId: 'th-1',
+      threadID: 'th-2',
+      span_id: 'sp-1',
+      paid: FILTERED,
+      valid: FILTERED,
+    });
+  });
+
+  it('filters x-api-key, password, api_key and client_secret written name: value', () => {
+    const secret = ['s3cr', 'et-', 'v4lue'].join('');
+    const out = scrubString(
+      [
+        `x-api-key: ${secret}`,
+        `X-API-KEY:${secret}`,
+        `password: "${secret}"`,
+        `api_key: ${secret}`,
+        `client_secret: ${secret}`,
+      ].join('\n')
+    );
+    expectNoLeak(out, [secret]);
+    expect(out).toContain('x-api-key: [Filtered]');
+    expect(out).toContain('password: [Filtered]');
+    expect(out).toContain('api_key: [Filtered]');
+    // Passwords are often plain words, so the name alone is enough here.
+    expect(scrubString(`password: ${'sunflower'}`)).toBe('password: [Filtered]');
+  });
+
+  it('filters credentials in a URL', () => {
+    const pass = ['hun', 'ter2', '-x'].join('');
+    const url = ['https://', 'deploy', ':', pass, '@db.example.test/app'].join('');
+    const out = scrubString(`connect failed: ${url}`);
+    expectNoLeak(out, [pass, 'deploy:']);
+    expect(out).toBe('connect failed: https://[Filtered]@db.example.test/app');
+    const pg = ['postgres://', 'admin', ':', pass, '@10.0.0.5:5432/db'].join('');
+    expect(scrubString(pg)).toBe('postgres://[Filtered]@10.0.0.5:5432/db');
+    expect(scrubString('see https://example.test:8443/path')).toBe(
+      'see https://example.test:8443/path'
+    );
+  });
+
+  it('keeps only known technical strings in device, app and os contexts', () => {
+    const event = {
+      event_id: 'e',
+      contexts: {
+        device: { name: "Alice's iPhone", model: 'iPhone15,2', family: 'iOS', memory_size: 4096 },
+        os: { name: 'macOS', version: '15.1', raw: 'Mozilla/5.0 (custom alice build)' },
+        app: { app_name: 'NOUS', app_version: '1.2.3', device_app_hash: 'free text alice' },
+        browser: { name: 'Chrome', version: '131' },
+      },
+    };
+    const out = JSON.parse(dump(scrubEvent(event as never)));
+    expect(out.contexts.device).toEqual({ model: 'iPhone15,2', family: 'iOS', memory_size: 4096 });
+    expect(out.contexts.os).toEqual({ name: 'macOS', version: '15.1' });
+    expect(out.contexts.app).toEqual({ app_name: 'NOUS', app_version: '1.2.3' });
+    expect(out.contexts.browser).toEqual({ name: 'Chrome', version: '131' });
+    expectNoLeak(out, ['alice', 'Alice']);
+  });
+});
+
+describe('tuning: robustness', () => {
+  const boom = (): never => {
+    throw new Error('boom');
+  };
+
+  it('reads each span field safely in the fallback', () => {
+    const span = Object.defineProperties(
+      { trace_id: 't', start_timestamp: 1, op: 'http' },
+      {
+        span_id: { enumerable: true, get: boom },
+        description: { enumerable: true, get: boom },
+      }
+    );
+    expect(safeBeforeSendSpan(span as never)).toEqual({
+      span_id: '',
+      trace_id: 't',
+      start_timestamp: 1,
+      op: 'http',
+      data: {},
+    });
+  });
+
+  it(`scans at most ${MAX_KEYS} keys per object and counts the rest`, () => {
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < MAX_KEYS + 25; i += 1) wide[`k${i}`] = i;
+    const out = scrubData(wide);
+    expect(Object.keys(out)).toHaveLength(MAX_KEYS + 1);
+    expect(out[TRUNCATED_KEYS]).toBe(25);
+    expect(out.k0).toBe(0);
+    expect(out[`k${MAX_KEYS}`]).toBeUndefined();
+  });
+
+  it.each([
+    ['5 MB of scheme-like text', 'ab://cd:'.repeat(625_000)],
+    ['5 MB of password: prefixes', 'password: '.repeat(500_000)],
+    ['5 MB of Token words', 'Token abcdefgh '.repeat(333_334)],
+    ['5 MB of cookie: prose', 'cookie: not set '.repeat(312_500)],
+  ])('scrubs %s in well under 50 ms', (_label, input) => {
+    scrubString('warm up');
+    const start = performance.now();
+    scrubString(input);
+    expect(performance.now() - start).toBeLessThan(50);
+  });
+
+  it('scrubs a 100k-key object quickly', () => {
+    const wide: Record<string, string> = {};
+    for (let i = 0; i < 100_000; i += 1) wide[`title${i}`] = 'x';
+    const start = performance.now();
+    scrubData(wide);
+    expect(performance.now() - start).toBeLessThan(50);
   });
 });
