@@ -117,6 +117,10 @@ class ConsensusCalculator:
         claim_hash = self._generate_claim_hash(claim)
         retracted_ids = set(retracted_source_ids or [])
 
+        # A None entry is a source the classifier failed on. Count it so the
+        # meter can say it is partial instead of passing for a smaller sample.
+        failed_sources = sum(1 for c in classifications if c is None)
+
         # Filter out retracted sources and None classifications
         valid_classifications = [
             c
@@ -184,6 +188,7 @@ class ConsensusCalculator:
             consensus_level=consensus_level,
             average_confidence=average_confidence,
             retracted_sources=len(retracted_ids),
+            failed_sources=failed_sources,
             cached=False,  # Will be set by caller if from cache
             reproducibility_hash=reproducibility_hash,
         )
