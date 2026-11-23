@@ -12,6 +12,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Try to import psutil, use fallback if not available
@@ -27,6 +29,67 @@ from src.cache.analytics_cache import CacheTTL, get_analytics_cache
 from src.core.database import get_async_session
 
 logger = logging.getLogger(__name__)
+
+# Only these mean "the metrics store is unreachable right now". Anything else
+# (a wrong column, bad SQL, a TypeError) is a bug and must surface, not be
+# reported as "no data" (GOO-732; same rule as GOO-653).
+# asyncpg raises raw OSErrors on connect (ConnectionRefusedError, socket.gaierror
+# for DNS) and asyncio.TimeoutError when the connect times out; SQLAlchemy does
+# not wrap them, so they are listed here too.
+_TRANSIENT_DB_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    DisconnectionError,
+    PoolTimeoutError,
+    OSError,
+    asyncio.TimeoutError,
+)
+
+
+_NO_HOST_METRICS: Dict[str, Any] = {
+    "cpu_usage": None,
+    "memory_usage": None,
+    "disk_usage": None,
+    "network_io": None,
+    "uptime": None,
+}
+
+
+def _host_metrics() -> Dict[str, Any]:
+    """Real psutil readings, or None per field when psutil can't give them."""
+    if not PSUTIL_AVAILABLE:
+        return dict(_NO_HOST_METRICS)
+    try:
+        network = psutil.net_io_counters()
+        return {
+            # Non-blocking: the average since the previous call.
+            "cpu_usage": psutil.cpu_percent(interval=None),
+            "memory_usage": psutil.virtual_memory().percent,
+            "disk_usage": psutil.disk_usage("/").percent,
+            "network_io": {
+                "bytes_sent": float(network.bytes_sent),
+                "bytes_recv": float(network.bytes_recv),
+                "packets_sent": float(network.packets_sent),
+                "packets_recv": float(network.packets_recv),
+            },
+            "uptime": time.time() - psutil.boot_time(),
+        }
+    except (OSError, psutil.Error):
+        logger.warning("Host metrics unavailable", exc_info=True)
+        return dict(_NO_HOST_METRICS)
+
+
+class MetricsUnavailable(Exception):
+    """The metrics store could not be reached; callers report "unavailable"."""
+
+
+def chart_granularity(time_range: "MetricTimeRange") -> str:
+    """The bucket size ``get_metric_chart_data`` really uses for a range."""
+    if time_range in (MetricTimeRange.LAST_HOUR, MetricTimeRange.LAST_24H):
+        return "hour"
+    if time_range == MetricTimeRange.LAST_7D:
+        return "day"
+    return "week"
 
 
 class MetricTimeRange(Enum):
@@ -78,15 +141,20 @@ class DashboardMetric:
 class SystemHealthMetrics:
     """System health metrics"""
 
-    cpu_usage: float
-    memory_usage: float
-    disk_usage: float
-    network_io: Dict[str, float]
-    response_time_p50: float
-    response_time_p95: float
-    error_rate: float
-    active_connections: int
-    uptime: float
+    # None everywhere means "not measured": psutil missing or failing for the
+    # host fields, the database unreachable (or no timed searches) for the rest.
+    # Never a made-up 0 (GOO-732, the GOO-649/GOO-724 rule).
+    cpu_usage: Optional[float]
+    memory_usage: Optional[float]
+    disk_usage: Optional[float]
+    network_io: Optional[Dict[str, float]]
+    response_time_p50: Optional[float]
+    response_time_p95: Optional[float]
+    # Nothing records failed searches, so there is no error rate to report (it
+    # used to be a literal 0).
+    error_rate: Optional[float]
+    active_connections: Optional[int]
+    uptime: Optional[float]
     timestamp: datetime
 
 
@@ -95,7 +163,7 @@ class SearchPerformanceMetrics:
     """Search performance metrics"""
 
     total_searches: int
-    avg_response_time: float
+    avg_response_time: Optional[float]  # None when no search was timed
     p95_response_time: float
     success_rate: float
     no_results_rate: float
@@ -216,80 +284,23 @@ class PerformanceDashboardService:
         if db is None:
             async with get_async_session() as db:
                 return await self.get_system_health_metrics(db=db)
-        try:
-            if PSUTIL_AVAILABLE:
-                # Non-blocking CPU check (returns since-last-call average)
-                cpu_percent = psutil.cpu_percent(interval=None)
-                memory = psutil.virtual_memory()
-                disk = psutil.disk_usage("/")
-                network = psutil.net_io_counters()
-
-                memory_percent = memory.percent
-                disk_percent = disk.percent
-
-                # Get uptime
-                boot_time = psutil.boot_time()
-                uptime = time.time() - boot_time
-
-                network_io = {
-                    "bytes_sent": float(network.bytes_sent),
-                    "bytes_recv": float(network.bytes_recv),
-                    "packets_sent": float(network.packets_sent),
-                    "packets_recv": float(network.packets_recv),
-                }
-            else:
-                # Fallback metrics when psutil is not available
-                cpu_percent = 0.0
-                memory_percent = 0.0
-                disk_percent = 0.0
-                uptime = 0.0
-                network_io = {
-                    "bytes_sent": 0.0,
-                    "bytes_recv": 0.0,
-                    "packets_sent": 0.0,
-                    "packets_recv": 0.0,
-                }
-
-            # Fetch response times, error rate, and connections in one session
-            # to avoid opening 3 concurrent DB sessions inside an already-parallel gather.
-            db_metrics = await self._get_db_health_metrics(db=db)
-            response_times = {"p50": db_metrics["p50"], "p95": db_metrics["p95"]}
-            error_rate = db_metrics["error_rate"]
-            active_connections = db_metrics["active_connections"]
-
-            return SystemHealthMetrics(
-                cpu_usage=cpu_percent,
-                memory_usage=memory_percent,
-                disk_usage=disk_percent,
-                network_io=network_io,
-                response_time_p50=response_times["p50"],
-                response_time_p95=response_times["p95"],
-                error_rate=error_rate,
-                active_connections=active_connections,
-                uptime=uptime,
-                timestamp=datetime.utcnow(),
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to get system health metrics: {e}")
-            # Return default values if system monitoring fails
-            return SystemHealthMetrics(
-                cpu_usage=0.0,
-                memory_usage=0.0,
-                disk_usage=0.0,
-                network_io={
-                    "bytes_sent": 0.0,
-                    "bytes_recv": 0.0,
-                    "packets_sent": 0.0,
-                    "packets_recv": 0.0,
-                },
-                response_time_p50=0.0,
-                response_time_p95=0.0,
-                error_rate=0.0,
-                active_connections=0,
-                uptime=0.0,
-                timestamp=datetime.utcnow(),
-            )
+        # A database failure must not throw away the real host values: an
+        # unreachable database leaves only the DB-derived fields null, and any
+        # other error is a bug that surfaces (no zero-filled fallback object).
+        host = _host_metrics()
+        db_metrics = await self._get_db_health_metrics(db=db)
+        return SystemHealthMetrics(
+            cpu_usage=host["cpu_usage"],
+            memory_usage=host["memory_usage"],
+            disk_usage=host["disk_usage"],
+            network_io=host["network_io"],
+            response_time_p50=db_metrics["p50"],
+            response_time_p95=db_metrics["p95"],
+            error_rate=db_metrics["error_rate"],
+            active_connections=db_metrics["active_connections"],
+            uptime=host["uptime"],
+            timestamp=datetime.utcnow(),
+        )
 
     async def get_search_performance_metrics(
         self,
@@ -374,7 +385,11 @@ class PerformanceDashboardService:
 
             # Calculate metrics
             total_searches = search_data.total_searches or 0
-            avg_response_time = float(search_data.avg_response_time or 0)
+            avg_response_time = (
+                float(search_data.avg_response_time)
+                if search_data.avg_response_time is not None
+                else None
+            )
             p95_response_time = float(response_times or 0)
             no_results_rate = (
                 (search_data.no_results_count / total_searches)
@@ -397,7 +412,11 @@ class PerformanceDashboardService:
                     {
                         "query": q.query,
                         "count": q.search_count,
-                        "avg_response_time": float(q.avg_response_time or 0),
+                        "avg_response_time": (
+                            float(q.avg_response_time)
+                            if q.avg_response_time is not None
+                            else None
+                        ),
                     }
                     for q in top_queries
                 ],
@@ -642,107 +661,118 @@ class PerformanceDashboardService:
         time_range: MetricTimeRange,
         granularity: str = "hour",
     ) -> List[Dict[str, Any]]:
-        """Get time-series data for metric charts"""
+        """Get time-series data for metric charts.
 
+        The bucket size follows ``time_range`` (``chart_granularity``); the
+        ``granularity`` argument is ignored, so callers must report
+        ``chart_granularity(time_range)``, not what they asked for.
+
+        Raises ``MetricsUnavailable`` when the database cannot be reached, so
+        an outage is never shown as an empty chart. Any other error is a bug
+        and propagates.
+        """
+        try:
+            return await self._metric_chart_rows(
+                organization_id, metric_name, time_range
+            )
+        except _TRANSIENT_DB_ERRORS as exc:
+            logger.warning(
+                "Metric chart data unavailable (%s)",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            raise MetricsUnavailable() from exc
+
+    async def _metric_chart_rows(
+        self, organization_id: str, metric_name: str, time_range: MetricTimeRange
+    ) -> List[Dict[str, Any]]:
         async with get_async_session() as db:
-            try:
-                cutoff_date = self._get_cutoff_date(time_range)
+            cutoff_date = self._get_cutoff_date(time_range)
+            granularity = chart_granularity(time_range)
 
-                # Determine granularity based on time range
-                if time_range in [MetricTimeRange.LAST_HOUR, MetricTimeRange.LAST_24H]:
-                    granularity = "hour"
-                elif time_range == MetricTimeRange.LAST_7D:
-                    granularity = "day"
-                else:
-                    granularity = "week"
-
-                # Get aggregated metric data
-                if metric_name == "search_volume":
-                    result = await db.execute(
-                        text(  # nosec: B608 - granularity constrained to enum-derived literal values
-                            f"""
-                        SELECT
-                            DATE_TRUNC('{granularity}', created_at) as period,
-                            COUNT(id) as value
-                        FROM search_queries
-                        WHERE organization_id = CAST(:org_id AS UUID)
-                            AND created_at >= :cutoff_date
-                        GROUP BY period
-                        ORDER BY period
-                    """
-                        ),
-                        {"org_id": organization_id, "cutoff_date": cutoff_date},
-                    )
-                elif metric_name == "response_time":
-                    result = await db.execute(
-                        text(  # nosec: B608 - granularity constrained to enum-derived literal values
-                            f"""
-                        SELECT
-                            DATE_TRUNC('{granularity}', created_at) as period,
-                            AVG(search_duration_ms) as value
-                        FROM search_queries
-                        WHERE organization_id = CAST(:org_id AS UUID)
-                            AND created_at >= :cutoff_date
-                            AND search_duration_ms IS NOT NULL
-                        GROUP BY period
-                        ORDER BY period
-                    """
-                        ),
-                        {"org_id": organization_id, "cutoff_date": cutoff_date},
-                    )
-                elif metric_name == "quality_score":
-                    result = await db.execute(
-                        text(  # nosec: B608 - granularity constrained to enum-derived literal values
-                            f"""
-                        SELECT
-                            DATE_TRUNC('{granularity}', qm.created_at) as period,
-                            AVG(qm.value) as value
-                        FROM quality_metrics qm
-                        WHERE qm.organization_id = CAST(:org_id AS UUID)
-                            AND qm.created_at >= :cutoff_date
-                            AND qm.metric_type = 'relevance'
-                        GROUP BY period
-                        ORDER BY period
-                    """
-                        ),
-                        {"org_id": organization_id, "cutoff_date": cutoff_date},
-                    )
-                else:
-                    # Default to system metrics
-                    result = await db.execute(
-                        text(  # nosec: B608 - granularity constrained to enum-derived literal values
-                            f"""
-                        SELECT
-                            DATE_TRUNC('{granularity}', sm.created_at) as period,
-                            AVG(sm.metric_value) as value
-                        FROM system_metrics sm
-                        WHERE sm.organization_id = CAST(:org_id AS UUID)
-                            AND sm.created_at >= :cutoff_date
-                            AND sm.metric_name = :metric_name
-                        GROUP BY period
-                        ORDER BY period
-                    """
-                        ),
-                        {
-                            "org_id": organization_id,
-                            "cutoff_date": cutoff_date,
-                            "metric_name": metric_name,
-                        },
-                    )
-
-                data = result.fetchall()
-
-                return [
+            # Get aggregated metric data
+            if metric_name == "search_volume":
+                result = await db.execute(
+                    text(  # nosec: B608 - granularity constrained to enum-derived literal values
+                        f"""
+                    SELECT
+                        DATE_TRUNC('{granularity}', created_at) as period,
+                        COUNT(id) as value
+                    FROM search_queries
+                    WHERE organization_id = CAST(:org_id AS UUID)
+                        AND created_at >= :cutoff_date
+                    GROUP BY period
+                    ORDER BY period
+                """
+                    ),
+                    {"org_id": organization_id, "cutoff_date": cutoff_date},
+                )
+            elif metric_name == "response_time":
+                result = await db.execute(
+                    text(  # nosec: B608 - granularity constrained to enum-derived literal values
+                        f"""
+                    SELECT
+                        DATE_TRUNC('{granularity}', created_at) as period,
+                        AVG(search_duration_ms) as value
+                    FROM search_queries
+                    WHERE organization_id = CAST(:org_id AS UUID)
+                        AND created_at >= :cutoff_date
+                        AND search_duration_ms IS NOT NULL
+                    GROUP BY period
+                    ORDER BY period
+                """
+                    ),
+                    {"org_id": organization_id, "cutoff_date": cutoff_date},
+                )
+            elif metric_name == "quality_score":
+                result = await db.execute(
+                    text(  # nosec: B608 - granularity constrained to enum-derived literal values
+                        f"""
+                    SELECT
+                        DATE_TRUNC('{granularity}', qm.created_at) as period,
+                        AVG(qm.value) as value
+                    FROM quality_metrics qm
+                    WHERE qm.organization_id = CAST(:org_id AS UUID)
+                        AND qm.created_at >= :cutoff_date
+                        AND qm.metric_type = 'relevance'
+                    GROUP BY period
+                    ORDER BY period
+                """
+                    ),
+                    {"org_id": organization_id, "cutoff_date": cutoff_date},
+                )
+            else:
+                # Default to system metrics
+                result = await db.execute(
+                    text(  # nosec: B608 - granularity constrained to enum-derived literal values
+                        f"""
+                    SELECT
+                        DATE_TRUNC('{granularity}', sm.created_at) as period,
+                        AVG(sm.metric_value) as value
+                    FROM system_metrics sm
+                    WHERE sm.organization_id = CAST(:org_id AS UUID)
+                        AND sm.created_at >= :cutoff_date
+                        AND sm.metric_name = :metric_name
+                    GROUP BY period
+                    ORDER BY period
+                """
+                    ),
                     {
-                        "timestamp": row.period.isoformat(),
-                        "value": float(row.value or 0),
-                    }
-                    for row in data
-                ]
+                        "org_id": organization_id,
+                        "cutoff_date": cutoff_date,
+                        "metric_name": metric_name,
+                    },
+                )
 
-            except Exception as e:
-                logger.error(f"Failed to get metric chart data: {e}")
-                return []
+            data = result.fetchall()
+
+            return [
+                {
+                    "timestamp": row.period.isoformat(),
+                    "value": float(row.value or 0),
+                }
+                for row in data
+            ]
 
     async def create_dashboard_widgets(
         self, organization_id: str, widget_configs: List[Dict[str, Any]]
@@ -770,6 +800,10 @@ class PerformanceDashboardService:
 
                 widgets.append(widget)
 
+            except MetricsUnavailable:
+                # An outage is not "this widget has no data": fail the
+                # request so the client shows unavailable.
+                raise
             except Exception as e:
                 logger.error(
                     f"Failed to create widget {config.get('title', 'unknown')}: {e}"
@@ -906,13 +940,6 @@ class PerformanceDashboardService:
                 """))
             rt_row = rt_result.fetchone()
 
-            err_result = await db.execute(text("""
-                    SELECT 0 as errors, COUNT(*) as total
-                    FROM search_queries
-                    WHERE created_at >= NOW() - INTERVAL '1 hour'
-                """))
-            err_row = err_result.fetchone()
-
             conn_result = await db.execute(text("""
                     SELECT COUNT(DISTINCT session_id) as active_sessions
                     FROM search_sessions
@@ -921,25 +948,30 @@ class PerformanceDashboardService:
                 """))
             conn_row = conn_result.fetchone()
 
-            p50 = float(rt_row.p50) if rt_row and rt_row.p50 is not None else 0.0
-            p95 = float(rt_row.p95) if rt_row and rt_row.p95 is not None else 0.0
-            error_rate = (
-                (err_row.errors / err_row.total) * 100
-                if err_row and err_row.total > 0
-                else 0.0
-            )
+            # No timed search in the window: no percentile (not 0 ms).
+            p50 = float(rt_row.p50) if rt_row and rt_row.p50 is not None else None
+            p95 = float(rt_row.p95) if rt_row and rt_row.p95 is not None else None
             active_connections = conn_row.active_sessions or 0 if conn_row else 0
 
             return {
                 "p50": p50,
                 "p95": p95,
-                "error_rate": error_rate,
+                # No measurement: nothing records failed searches. The old
+                # query divided a literal 0 by the search count.
+                "error_rate": None,
                 "active_connections": active_connections,
             }
 
-        except Exception as e:
-            logger.error(f"Failed to get DB health metrics: {e}")
-            return {"p50": 0.0, "p95": 0.0, "error_rate": 0.0, "active_connections": 0}
+        except _TRANSIENT_DB_ERRORS as exc:
+            logger.warning(
+                "DB health metrics unavailable (%s)", type(exc).__name__, exc_info=True
+            )
+            return {
+                "p50": None,
+                "p95": None,
+                "error_rate": None,
+                "active_connections": None,
+            }
 
     async def _calculate_quality_trends(
         self,
