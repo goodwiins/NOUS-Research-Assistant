@@ -179,7 +179,9 @@ export async function fetchAnalyticsDashboard(
   const documentsIndexed = fileStats
     ? fileStats.files_by_type.reduce((sum, item) => sum + item.count, 0)
     : null;
-  // Admin-only figures: `undefined` hides them for other roles.
+  // Admin-only figures: `undefined` hides them for other roles (the backend
+  // leaves `user_engagement` out for them, GOO-633); `null` for an admin whose
+  // overview failed or came back without the section.
   const adminFigure = (value: number | undefined): Figure | undefined =>
     isAdmin ? (value ?? null) : undefined;
 
@@ -189,8 +191,8 @@ export async function fetchAnalyticsDashboard(
         documentsIndexed,
         searches24h: overview ? overview.totalSearches : null,
         avgSearchTimeMs24h: overview ? overview.avgSearchTimeMs : null,
-        activeUsers24h: adminFigure(overview?.activeUsers),
-        searchSessions24h: adminFigure(overview?.searchSessions),
+        activeUsers24h: adminFigure(overview?.engagement?.activeUsers),
+        searchSessions24h: adminFigure(overview?.engagement?.searchSessions),
       },
       summary: {
         documents: documentsIndexed,
@@ -198,7 +200,7 @@ export async function fetchAnalyticsDashboard(
         inFlight: fileStats
           ? countInFlightDocuments(fileStats.processing_stats)
           : null,
-        activeUsers24h: adminFigure(overview?.activeUsers),
+        activeUsers24h: adminFigure(overview?.engagement?.activeUsers),
       },
       fileStatsAvailable: fileStats !== null,
       documents: documentsResponse

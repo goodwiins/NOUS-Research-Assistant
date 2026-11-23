@@ -9,7 +9,9 @@ import {
   userBehaviorApi,
 } from '@/services/documentAnalyticsApi';
 import {
-  dashboardOverviewBody,
+  adminOverviewBody,
+  memberOverviewBody,
+  operatorOverviewBody,
   organizationTrendsBody,
   searchAnalyticsBody,
   searchPerformanceBody,
@@ -77,8 +79,9 @@ describe('getDashboardOverview reads the nested backend shape (GOO-649)', () => 
     get.mockReset();
   });
 
-  it('maps search_performance and user_engagement from /overview', async () => {
-    route({ '/analytics/performance/overview': dashboardOverviewBody });
+  // The three shapes `_scope_overview_for` sends on develop (GOO-633).
+  it('member: reads search_performance and reports engagement as absent', async () => {
+    route({ '/analytics/performance/overview': memberOverviewBody });
 
     const overview = await performanceApi.getDashboardOverview();
 
@@ -89,17 +92,30 @@ describe('getDashboardOverview reads the nested backend shape (GOO-649)', () => 
       timeRange: '24h',
       totalSearches: 37,
       avgSearchTimeMs: 212.4,
-      activeUsers: 5,
-      searchSessions: 11,
+      engagement: null,
     });
   });
 
-  it('never passes host metrics through (GOO-633)', async () => {
-    route({ '/analytics/performance/overview': dashboardOverviewBody });
+  it('org admin: also maps user_engagement', async () => {
+    route({ '/analytics/performance/overview': adminOverviewBody });
 
     const overview = await performanceApi.getDashboardOverview();
 
-    expect(JSON.stringify(overview)).not.toMatch(/cpu|memory|disk|uptime/i);
+    expect(overview).toEqual({
+      timeRange: '24h',
+      totalSearches: 37,
+      avgSearchTimeMs: 212.4,
+      engagement: { activeUsers: 5, searchSessions: 11 },
+    });
+  });
+
+  it('platform operator: maps the same figures and never passes host metrics through', async () => {
+    route({ '/analytics/performance/overview': operatorOverviewBody });
+
+    const overview = await performanceApi.getDashboardOverview();
+
+    expect(overview.engagement).toEqual({ activeUsers: 5, searchSessions: 11 });
+    expect(JSON.stringify(overview)).not.toMatch(/cpu|memory|disk|uptime|network/i);
   });
 
   it('rejects a flat body instead of reading zeros from it', async () => {
@@ -117,10 +133,23 @@ describe('getDashboardOverview reads the nested backend shape (GOO-649)', () => 
     );
   });
 
-  it('rejects when a nested figure is missing', async () => {
+  it('rejects a member body whose search_performance is malformed', async () => {
     route({
       '/analytics/performance/overview': {
-        ...dashboardOverviewBody,
+        ...memberOverviewBody,
+        search_performance: { avg_response_time: 1 },
+      },
+    });
+
+    await expect(performanceApi.getDashboardOverview()).rejects.toThrow(
+      /total_searches/
+    );
+  });
+
+  it('rejects a present but malformed user_engagement', async () => {
+    route({
+      '/analytics/performance/overview': {
+        ...adminOverviewBody,
         user_engagement: { total_sessions: 11 },
       },
     });

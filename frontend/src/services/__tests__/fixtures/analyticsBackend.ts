@@ -1,13 +1,18 @@
 /**
  * Success-path response bodies for the analytics routes, copied from the
- * backend producers (these routes have no response_model, so openapi.json
- * types them as `{}`). Keep each in step with the file named above it.
+ * backend producers at origin/develop 9cb10c452 (these routes have no
+ * response_model, so openapi.json types them as `{}`). Keep each in step with
+ * the file named above it.
  */
 
 // backend/src/services/quality/performance_dashboard_service.py:
 // PerformanceDashboardService.get_dashboard_overview, each section `asdict()`
-// of its dataclass. Served as-is by GET /analytics/performance/overview.
-export const dashboardOverviewBody = {
+// of its dataclass. GET /analytics/performance/overview then passes it through
+// `_scope_overview_for` (backend/src/api/quality/performance_dashboard.py),
+// which drops `system_health` unless the caller is a platform operator and
+// `user_engagement` unless the caller is an org admin. The three scoped
+// shapes a caller can receive are exported below.
+const unscopedOverviewBody = {
   timestamp: '2026-11-23T05:00:00',
   time_range: '24h',
   system_health: {
@@ -59,6 +64,24 @@ export const dashboardOverviewBody = {
   },
   alerts: [],
 };
+
+const {
+  system_health: _systemHealth,
+  user_engagement: _userEngagement,
+  ...memberSections
+} = unscopedOverviewBody;
+
+/** A member: neither `system_health` nor `user_engagement`. */
+export const memberOverviewBody = memberSections;
+
+/** An org admin who is not a platform operator: `user_engagement` only. */
+export const adminOverviewBody = {
+  ...memberSections,
+  user_engagement: _userEngagement,
+};
+
+/** A platform operator who is also an org admin: both sections. */
+export const operatorOverviewBody = unscopedOverviewBody;
 
 // backend/src/api/quality/performance_dashboard.py: get_search_performance_metrics
 // (GET /analytics/performance/search-performance).

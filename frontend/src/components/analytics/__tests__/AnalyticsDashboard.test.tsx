@@ -5,7 +5,8 @@ import { render } from '@/test/test-utils';
 import { AnalyticsDashboard } from '@/components/analytics/AnalyticsDashboard';
 import { api } from '@/services/api-client';
 import {
-  dashboardOverviewBody,
+  adminOverviewBody,
+  memberOverviewBody,
   organizationTrendsBody,
   searchPerformanceBody,
   searchVolumeChartBody,
@@ -42,14 +43,14 @@ const documentListBody = {
   },
 };
 
-const healthyRoutes: Record<string, unknown> = {
+const routesFor = (overviewBody: unknown): Record<string, unknown> => ({
   '/files/stats': fileStatsBody,
   '/documents': documentListBody,
   '/analytics/performance/search-performance': searchPerformanceBody,
-  '/analytics/performance/overview': dashboardOverviewBody,
+  '/analytics/performance/overview': overviewBody,
   '/analytics/performance/charts/search_volume': searchVolumeChartBody,
   '/analytics/behavior/organization/trends': organizationTrendsBody,
-};
+});
 
 function route(table: Record<string, unknown>): void {
   get.mockImplementation(async (url: string) => {
@@ -84,7 +85,8 @@ describe('AnalyticsDashboard (GOO-649)', () => {
   });
 
   it('renders the backend figures for a member and never asks for admin trends', async () => {
-    route(healthyRoutes);
+    // On develop a member's /overview has no user_engagement (GOO-633).
+    route(routesFor(memberOverviewBody));
 
     render(<AnalyticsDashboard />);
 
@@ -95,6 +97,8 @@ describe('AnalyticsDashboard (GOO-649)', () => {
       screen.getByText('Active-user trends are available to organization admins.')
     ).toBeInTheDocument();
     expect(screen.queryByText(/Some data couldn.t be loaded/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Unavailable right now')).not.toBeInTheDocument();
+    expect(screen.queryByText('Active users, last 24 hours')).not.toBeInTheDocument();
     expect(requested().some((url) => url.startsWith('/analytics/behavior'))).toBe(false);
     expect(requested()).toContain(
       '/analytics/performance/charts/search_volume?time_range=30d&granularity=day'
@@ -103,7 +107,7 @@ describe('AnalyticsDashboard (GOO-649)', () => {
 
   it('requests organization trends with days_back for an admin', async () => {
     auth.role = 'admin';
-    route(healthyRoutes);
+    route(routesFor(adminOverviewBody));
 
     render(<AnalyticsDashboard />);
 
@@ -116,5 +120,10 @@ describe('AnalyticsDashboard (GOO-649)', () => {
     expect(
       screen.queryByText('Active-user trends are available to organization admins.')
     ).not.toBeInTheDocument();
+    // user_engagement.active_users from the admin-scoped overview.
+    expect(
+      screen.getByText('Active users, last 24 hours').closest('.rounded-xl')
+    ).toHaveTextContent('5');
+    expect(screen.queryByText(/Some data couldn.t be loaded/)).not.toBeInTheDocument();
   });
 });

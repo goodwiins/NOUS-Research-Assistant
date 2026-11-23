@@ -498,16 +498,19 @@ class UserBehaviorApiService {
 
 /**
  * GET /analytics/performance/overview. Built by
- * PerformanceDashboardService.get_dashboard_overview: each section is a
- * dataclass passed through `asdict`. `system_health` (host CPU, memory and
- * disk) is also in the response but is platform-operator data (GOO-633), so it
- * is deliberately not typed or read here.
+ * PerformanceDashboardService.get_dashboard_overview (each section is a
+ * dataclass passed through `asdict`), then scoped per caller by
+ * `_scope_overview_for` in api/quality/performance_dashboard.py (GOO-633):
+ * `user_engagement` is sent only to org admins, and `system_health` (host CPU,
+ * memory and disk) only to platform operators. `system_health` is deliberately
+ * not typed or read here.
  */
 export interface DashboardOverviewResponse {
   timestamp: string;
   time_range: string;
   search_performance: SearchPerformanceResponse;
-  user_engagement: {
+  /** Org admins only; absent for other roles. */
+  user_engagement?: {
     active_users: number;
     total_sessions: number;
     avg_session_duration: number;
@@ -522,10 +525,16 @@ export interface DashboardOverview {
   timeRange: string;
   totalSearches: number;
   avgSearchTimeMs: number;
-  /** Distinct users who searched in the window. */
-  activeUsers: number;
-  /** Distinct search sessions in the window (not chat conversations). */
-  searchSessions: number;
+  /**
+   * `null` when the backend left `user_engagement` out, which it does by design
+   * for callers who are not org admins.
+   */
+  engagement: {
+    /** Distinct users who searched in the window. */
+    activeUsers: number;
+    /** Distinct search sessions in the window (not chat conversations). */
+    searchSessions: number;
+  } | null;
 }
 
 /**
@@ -536,20 +545,34 @@ class PerformanceApiService {
 
   /**
    * Get the organization overview for the last 24 hours. Reads the nested
-   * `search_performance` and `user_engagement` sections the backend returns.
+   * `search_performance` section, which every caller gets and which must be
+   * well formed, and `user_engagement` when the backend includes it (org
+   * admins only). A missing `user_engagement` is not an error; a malformed one
+   * is.
    */
   async getDashboardOverview(): Promise<DashboardOverview> {
     const response = await api.get<DashboardOverviewResponse>(
       `${this.basePath}/overview?time_range=24h`
     );
     const search = requireObject(response?.search_performance, 'search_performance');
-    const engagement = requireObject(response?.user_engagement, 'user_engagement');
+    const rawEngagement = response.user_engagement;
+    const engagement =
+      rawEngagement === undefined || rawEngagement === null
+        ? null
+        : requireObject(rawEngagement, 'user_engagement');
     return {
       timeRange: String(response.time_range ?? '24h'),
       totalSearches: requireNumber(search.total_searches, 'total_searches'),
       avgSearchTimeMs: requireNumber(search.avg_response_time, 'avg_response_time'),
-      activeUsers: requireNumber(engagement.active_users, 'active_users'),
-      searchSessions: requireNumber(engagement.total_sessions, 'total_sessions'),
+      engagement: engagement
+        ? {
+            activeUsers: requireNumber(engagement.active_users, 'active_users'),
+            searchSessions: requireNumber(
+              engagement.total_sessions,
+              'total_sessions'
+            ),
+          }
+        : null,
     };
   }
 
