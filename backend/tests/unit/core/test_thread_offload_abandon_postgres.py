@@ -100,15 +100,26 @@ async def test_an_abandoned_write_lands_only_if_its_commit_was_in_flight(
 
     abandoned = {i for i, h in handoffs.items() if h is not None and h._abandoned}
     in_flight = {i for i in abandoned if handoffs[i].abandoned_mid_commit}
-    outside_bound = sorted((abandoned & landed) - in_flight)
+    # GOO-783: the bound is "no COMMIT is admitted after the abandon", so a
+    # landed write is allowed when its COMMIT was admitted before the abandon,
+    # in flight *or already done*. Checking in_flight alone false-failed: the
+    # COMMIT can return (after_commit clears _committing) a few microseconds
+    # before the thread calls finish(), and an abandon in that gap found the
+    # thread unfinished but nothing in flight. That write was sent while the
+    # caller still waited, so allowing it is safe; a COMMIT admitted after the
+    # abandon still counts against the bound, since admitted_before_abandon is
+    # captured at the abandon, under the same lock admit_commit takes.
+    admitted = {i for i in abandoned if handoffs[i].admitted_before_abandon}
+    outside_bound = sorted((abandoned & landed) - admitted)
     refused = abandoned - landed
     print(
         f"runs={_RUNS} abandoned={len(abandoned)} refused={len(refused)} "
-        f"landed_after_abandon={len(abandoned & landed)} in_flight={len(in_flight)}"
+        f"landed_after_abandon={len(abandoned & landed)} in_flight={len(in_flight)} "
+        f"admitted_before_abandon={len(admitted)}"
     )
     assert not outside_bound, (
         f"{len(outside_bound)} abandoned writes landed although no COMMIT was "
-        f"in flight when the abandon was decided: {outside_bound[:20]}"
+        f"admitted when the abandon was decided: {outside_bound[:20]}"
     )
     # The stress really reaches the abandon path and the gate refuses.
     assert len(refused) >= 5, "too few abandons were refused to exercise the gate"

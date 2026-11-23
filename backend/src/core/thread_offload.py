@@ -33,6 +33,18 @@ already on its way to the database and cannot be called back: that write may
 land, and the abandon logs a warning saying so. This is the only way an
 abandoned thread's write lands.
 
+Scope of the gate (GOO-783). The two checks are keyed differently:
+
+* ``before_commit`` is per Session: it refuses any commit on the Session
+  passed as ``guard_session`` once it is abandoned, from whatever thread.
+* The engine ``commit`` gate is per thread: it reads the ``_Handoff`` stored
+  in a thread-local (``_offloaded``) by the offloaded call's own thread, and
+  applies to every COMMIT that thread sends on any connection, whether it
+  comes from the guarded Session or another one. A COMMIT sent from a
+  different thread (work the offloaded function hands to its own pool, say)
+  carries no handoff and is not gated: only the ``before_commit`` check on
+  the guarded Session covers it.
+
 Whether the thread is abandoned or still returns its result to the caller is
 decided under one lock (``_Handoff``), so exactly one side does the cleanup.
 """
@@ -132,9 +144,13 @@ class _Handoff:
         self._finished = False
         self._abandoned = False
         self._committing = False
+        self._admitted = False
         self._session = guard_session
         # Set when the abandon found a COMMIT already admitted (in flight).
         self.abandoned_mid_commit = False
+        # Set when any COMMIT was admitted before the abandon was decided,
+        # in flight or already done: the only writes an abandon may let land.
+        self.admitted_before_abandon = False
 
     def abandon(self) -> bool:
         """Caller side: give the outcome to the thread, unless it is done."""
@@ -145,6 +161,7 @@ class _Handoff:
             if self._session is not None:
                 self._session.info[_ABANDONED_KEY] = True
             self.abandoned_mid_commit = self._committing
+            self.admitted_before_abandon = self._admitted
             return True
 
     def admit_commit(self) -> bool:
@@ -153,9 +170,12 @@ class _Handoff:
             if self._abandoned:
                 return False
             self._committing = True
+            self._admitted = True
             return True
 
     def commit_done(self) -> None:
+        """Thread side: the admitted COMMIT returned (``after_commit``, or the
+        work ended); an abandon from now on finds none in flight."""
         with self._lock:
             self._committing = False
 
