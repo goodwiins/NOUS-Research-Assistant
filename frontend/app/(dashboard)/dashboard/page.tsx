@@ -117,7 +117,10 @@ export default function DashboardPage() {
       .getCombinedSearchAnalytics()
       .then((data) => {
         setTotalSearches(data.totalSearches);
-        setAvgSearchTimeMs(Math.round(data.avgResponseTimeMs));
+        // null = no search was timed: shown as unavailable, never 0.
+        setAvgSearchTimeMs(
+          data.avgResponseTimeMs === null ? null : Math.round(data.avgResponseTimeMs)
+        );
       })
       .catch(() => {
         setTotalSearches(null);

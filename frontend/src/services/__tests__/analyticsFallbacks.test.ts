@@ -86,6 +86,67 @@ describe('analytics services never fabricate data', () => {
   });
 });
 
+describe('an unmeasured search time stays null, never 0 (GOO-745)', () => {
+  beforeEach(() => {
+    get.mockReset();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  it('overview: a null avg_response_time maps to null', async () => {
+    route({
+      '/analytics/performance/overview': {
+        ...memberOverviewBody,
+        search_performance: {
+          ...memberOverviewBody.search_performance,
+          avg_response_time: null,
+        },
+      },
+    });
+
+    const overview = await performanceApi.getDashboardOverview();
+
+    expect(overview.avgSearchTimeMs).toBeNull();
+    expect(overview.totalSearches).toBe(37);
+  });
+
+  it('combined: a null performance average stays null and does not fall back', async () => {
+    route({
+      '/analytics/performance/search-performance': {
+        ...searchPerformanceBody,
+        avg_response_time: null,
+        top_queries: [{ query: 'q', count: 2, avg_response_time: null }],
+      },
+      '/search/analytics': searchAnalyticsBody,
+    });
+
+    const combined = await searchAnalyticsApi.getCombinedSearchAnalytics();
+
+    expect(combined.avgResponseTimeMs).toBeNull();
+    expect(combined.topQueries[0].avgResponseTimeMs).toBeNull();
+    expect(combined.totalSearches).toBe(searchPerformanceBody.total_searches);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['a string', '12'],
+    ['NaN', Number.NaN],
+  ])('still rejects an avg_response_time that is %s', async (_label, value) => {
+    route({
+      '/analytics/performance/overview': {
+        ...memberOverviewBody,
+        search_performance: {
+          ...memberOverviewBody.search_performance,
+          avg_response_time: value,
+        },
+      },
+    });
+    await expect(performanceApi.getDashboardOverview()).rejects.toThrow(
+      /avg_response_time/
+    );
+  });
+});
+
 describe('getDashboardOverview reads the nested backend shape (GOO-649)', () => {
   beforeEach(() => {
     get.mockReset();
