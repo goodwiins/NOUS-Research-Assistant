@@ -98,3 +98,60 @@ def test_the_walk_rejects_set_null_on_a_not_null_column() -> None:
     )
     _, unruled = _walk(metadata)
     assert unruled == ["notes.thread_id -> threads.id (SET NULL on NOT NULL)"]
+
+
+def _leading_index_columns(table: Table) -> set[str]:
+    """Columns that lead some index, unique constraint or primary key."""
+    leading: set[str] = set()
+    for index in table.indexes:
+        columns = list(index.columns)
+        if columns:
+            leading.add(columns[0].name)
+    for constraint in table.constraints:
+        columns = list(getattr(constraint, "columns", []))
+        if columns and type(constraint).__name__ in (
+            "UniqueConstraint",
+            "PrimaryKeyConstraint",
+        ):
+            leading.add(columns[0].name)
+    for column in table.columns:
+        if column.index or column.unique or column.primary_key:
+            leading.add(column.name)
+    return leading
+
+
+def _unindexed(metadata: MetaData = Base.metadata) -> list[str]:
+    """FKs into a table the purge deletes from whose column leads no index.
+
+    PostgreSQL checks each such FK per deleted row with
+    ``WHERE <fk column> = $1``; without a leading index that is a sequential
+    scan of the referencing table for every purged message or thread
+    (GOO-655, audit MS-1)."""
+    reached, _ = _walk(metadata)
+    missing: list[str] = []
+    for table in metadata.tables.values():
+        leading = _leading_index_columns(table)
+        for fk in table.foreign_keys:
+            if fk.column.table.name in reached and fk.parent.name not in leading:
+                missing.append(f"{table.name}.{fk.parent.name} -> {fk.target_fullname}")
+    return sorted(missing)
+
+
+def test_every_fk_a_thread_delete_reaches_is_indexed() -> None:
+    assert _unindexed() == []
+
+
+def test_the_index_check_reports_an_unindexed_fk() -> None:
+    # Guards the guard: an FK into chat_messages with no index is reported,
+    # and the same FK with index=True is not.
+    metadata = MetaData()
+    Table("threads", metadata, Column("id", Integer, primary_key=True))
+    Table("chat_messages", metadata, Column("id", Integer, primary_key=True))
+    Table(
+        "notes",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("message_id", ForeignKey("chat_messages.id", ondelete="SET NULL")),
+        Column("thread_id", ForeignKey("threads.id", ondelete="CASCADE"), index=True),
+    )
+    assert _unindexed(metadata) == ["notes.message_id -> chat_messages.id"]

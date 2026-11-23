@@ -95,10 +95,16 @@ class AgentRun(Base):
     # Transcript linkage — the committed user turn that started the run and
     # (once terminal) the assistant message it projected.
     user_message_id = Column(
-        GUID(), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     assistant_message_id = Column(
-        GUID(), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     # Frozen tool registry + approved skill versions for the whole run;

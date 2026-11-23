@@ -189,6 +189,7 @@ class ChatMessage(BaseModel):
             "'superseded' — every display / model-context / export read filters "
             "IS NULL; by-id, idempotency and analytics reads deliberately do not."
         ),
+        index=True,
     )
     tool_executions = Column(JSONB, nullable=True)  # Agent tool execution details
 
