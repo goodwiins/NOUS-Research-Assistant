@@ -456,12 +456,12 @@ describe('useDocuments', () => {
       });
 
       act(() => {
-        result.current.updateFilters({ file_types: ['pdf'] });
+        result.current.updateFilters({ file_type: 'pdf' });
       });
 
       expect(result.current.filters).toEqual({
         search_term: 'test',
-        file_types: ['pdf'],
+        file_type: 'pdf',
       });
     });
 
@@ -496,7 +496,7 @@ describe('useDocuments', () => {
       let secondRequestedUrl = '';
       act(() => {
         result.current.updateFilters({ search_term: 'transformers' });
-        result.current.updateFilters({ file_types: ['pdf'] });
+        result.current.updateFilters({ file_type: 'pdf' });
         secondRequestedUrl = mockGet.mock.calls[1]?.[0] as string;
       });
 
@@ -569,7 +569,7 @@ describe('useDocuments', () => {
 
       const { result } = renderHook(() => useDocuments({ autoFetch: false }));
       act(() => {
-        result.current.updateFilters({ file_types: ['pdf'] });
+        result.current.updateFilters({ file_type: 'pdf' });
       });
       mockGet.mockClear();
 
