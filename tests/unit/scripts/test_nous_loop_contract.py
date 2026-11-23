@@ -164,18 +164,25 @@ def test_workflow_contract_tests_run_in_blocking_local_and_hosted_gates() -> Non
         assert "--no-cov" in command
 
     nous_gate_start = local_ci.index('  step "NOUS workflow contract tests (blocking)"')
-    backend_gate_start = local_ci.index('  step "Unit tests (blocking)"')
+    backend_gate_start = local_ci.index('  step "Unit tests (blocking')
     nous_gate = local_ci[nous_gate_start:backend_gate_start]
     backend_gate = local_ci[backend_gate_start:]
 
     assert '"$PY" -m pytest tests/unit/scripts/' in nous_gate
     assert "cd backend" not in nous_gate
+    # The backend suite runs from the repo root, as the hosted unit-tests job
+    # does (GOO-738); backend_pytest adds -c backend/pytest.ini and the markers.
+    assert "cd backend" not in backend_gate.split("\nfi\n", 1)[0]
     assert re.search(
-        r'\(\s*cd backend\s*&&\s*"\$PY"\s+-m\s+pytest\s+tests/\s+-c\s+pytest\.ini\s+\\\s*'
-        r'-m\s+"unit or not \(integration or e2e or slow\)"\s+\\\s*'
-        r"-q\s+-p\s+no:cacheprovider\s+--no-cov\s*\)\s*"
-        r'check\s+\$\?\s+"pytest"',
+        r"backend_pytest\s+backend/tests/\s+--ignore=backend/tests/unit/architecture"
+        r'\s+check\s+\$\?\s+"pytest"',
         backend_gate,
+    )
+    assert re.search(
+        r'"\$PY"\s+-P\s+-m\s+pytest\s+"\$@"\s+-c\s+backend/pytest\.ini\s+'
+        r'-m\s+"\$BACKEND_UNIT_MARKERS"\s+\\\s*'
+        r"-q\s+-p\s+no:cacheprovider\s+--no-cov",
+        local_ci,
     )
 
 
@@ -272,8 +279,19 @@ case "$1" in
 esac
 """,
     )
-    for command in ("ruff", "black", "isort", "mypy", "node", "pnpm"):
+    for command in ("ruff", "black", "isort", "mypy", "node"):
         write_executable(command_dir / command, "#!/usr/bin/env bash\nexit 0\n")
+    # `pnpm test:coverage` writes the summary the coverage ratchet reads.
+    (fake_root / "frontend" / "coverage").mkdir()
+    write_executable(
+        command_dir / "pnpm",
+        """#!/usr/bin/env bash
+if [ "$1" = "test:coverage" ]; then
+  printf '{}\\n' > coverage/coverage-summary.json
+fi
+exit 0
+""",
+    )
     write_executable(
         command_dir / "docker",
         """#!/usr/bin/env bash
@@ -317,7 +335,9 @@ exit 1
         "import socket,sys;",
         "import socket; s=socket.socket();",
         "tests/unit/scripts/ --confcutdir=tests/unit/scripts",
-        "tests/ -c pytest.ini",
+        "-P -m pytest backend/tests/unit/architecture -c backend/pytest.ini",
+        "-P -m pytest backend/tests/ --ignore=backend/tests/unit/architecture "
+        "-c backend/pytest.ini",
         "scripts/ci/check_tsconfig_exclusions.py --base origin/develop",
     ):
         assert any(argument in invocation for invocation in invocations), invocations
