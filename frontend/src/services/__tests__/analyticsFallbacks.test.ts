@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { api } from '@/services/api-client';
 import {
@@ -29,6 +29,24 @@ vi.mock('@/services/api-client', () => ({
 }));
 
 const get = api.get as Mock;
+
+/**
+ * Run the enclosing describe block in `zone`. CI runners are UTC, where a
+ * local-time bug gives the same answer as the UTC code, so tests that guard
+ * against local-time parsing or day cuts pin a non-UTC zone (Node applies a
+ * runtime `process.env.TZ` change to Date).
+ */
+function pinTimeZone(zone: string): void {
+  let previous: string | undefined;
+  beforeAll(() => {
+    previous = process.env.TZ;
+    process.env.TZ = zone;
+  });
+  afterAll(() => {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  });
+}
 
 /** "Now" for the windowed chart: D is 2026-11-23 UTC, so D-6 is 11-17. */
 const NOW = new Date('2026-11-23T05:00:00Z');
@@ -185,6 +203,14 @@ describe('getDashboardOverview reads the nested backend shape (GOO-649)', () => 
 });
 
 describe('trend getters call valid routes with the right parameters (GOO-649)', () => {
+  // Behind UTC: a period read as local time, or labelled with the local date,
+  // lands on the previous day here.
+  pinTimeZone('America/Los_Angeles');
+
+  it('the pin is in effect: midnight UTC is the previous local day', () => {
+    expect(new Date('2026-11-21T00:00:00Z').getDate()).toBe(20);
+  });
+
   beforeEach(() => {
     get.mockReset();
   });
@@ -288,23 +314,33 @@ describe('trend getters call valid routes with the right parameters (GOO-649)', 
     expect(points.map((p) => p.name)).toEqual(['2026-11-17']);
   });
 
-  it('late in the UTC day the window is still D-6..D, whatever the local date', async () => {
-    // 23:30Z is already the 24th in Europe/Paris: a local-day cut would drop 11-17.
-    route({
-      '/analytics/performance/charts/search_volume': {
-        ...searchVolumeChartBody,
-        data: [
-          { timestamp: '2026-11-17T00:00:00+00:00', value: 3.0 },
-          { timestamp: '2026-11-23T00:00:00+00:00', value: 5.0 },
-        ],
-      },
+  // CI runners are UTC, where a local-day cut equals the UTC one. Pin a zone
+  // ahead of UTC so a local-day cut gives a different answer on every machine.
+  describe('with the viewer in Europe/Paris', () => {
+    pinTimeZone('Europe/Paris');
+
+    it('the pin is in effect: 23:30Z is already the next local day', () => {
+      expect(new Date('2026-11-23T23:30:00Z').getDate()).toBe(24);
     });
 
-    const points = await performanceApi.getSearchVolumeTrend(
-      new Date('2026-11-23T23:30:00Z')
-    );
+    it('late in the UTC day the window is still D-6..D, whatever the local date', async () => {
+      // 23:30Z is already the 24th in Europe/Paris: a local-day cut would drop 11-17.
+      route({
+        '/analytics/performance/charts/search_volume': {
+          ...searchVolumeChartBody,
+          data: [
+            { timestamp: '2026-11-17T00:00:00+00:00', value: 3.0 },
+            { timestamp: '2026-11-23T00:00:00+00:00', value: 5.0 },
+          ],
+        },
+      });
 
-    expect(points.map((p) => p.name)).toEqual(['2026-11-17', '2026-11-23']);
+      const points = await performanceApi.getSearchVolumeTrend(
+        new Date('2026-11-23T23:30:00Z')
+      );
+
+      expect(points.map((p) => p.name)).toEqual(['2026-11-17', '2026-11-23']);
+    });
   });
 
   it('rejects a chart point without a usable timestamp', async () => {
@@ -337,9 +373,11 @@ describe('trend getters call valid routes with the right parameters (GOO-649)', 
   });
 });
 
-// Run this file under several TZ values (see the PR): every expectation here
-// must hold whatever the viewer's local zone is.
+// Every expectation here must hold whatever the runner's zone is; the block
+// pins one behind UTC so a local-time parse fails even on a UTC runner.
 describe('parseBackendTimestamp reads backend periods as UTC (GOO-649 F2)', () => {
+  pinTimeZone('America/Los_Angeles');
+
   it.each([
     ['isoformat with offset', '2026-11-21T00:00:00+00:00', '2026-11-21T00:00:00.000Z'],
     ['str() with offset', '2026-11-21 00:00:00+00:00', '2026-11-21T00:00:00.000Z'],

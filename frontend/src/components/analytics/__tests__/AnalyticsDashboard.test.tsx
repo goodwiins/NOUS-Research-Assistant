@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import { render } from '@/test/test-utils';
 import {
   AnalyticsDashboard,
@@ -196,8 +196,11 @@ describe('AnalyticsDashboard (GOO-649)', () => {
 
     const { rerender } = render(<AnalyticsDashboard />);
 
-    // Give react-query a chance to fire if it were enabled.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Flush effects and pending microtasks: an enabled query would have called
+    // its queryFn by now.
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(get).not.toHaveBeenCalled();
 
     auth.isLoading = false;
