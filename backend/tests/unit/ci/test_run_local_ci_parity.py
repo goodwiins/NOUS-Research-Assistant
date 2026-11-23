@@ -519,6 +519,37 @@ SCRIPT_PLANTS: dict[str, tuple[str, str]] = {
         '      step "Trigger.dev node tests (blocking)"\n',
         '      step "Trigger.dev node tests (blocking)"\n      while false; do\n',
     ),
+    # GOO-786: the gate's lines stay exact and unconditional, but they are
+    # never executed: swallowed by a heredoc, parked in a function nobody
+    # calls, inside a skipped `{ }` group, or behind an earlier clean exit.
+    "heredoc around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n: <<'DISABLED'\n{ARCHITECTURE_COMMAND}\n"
+        'check $? "backend architecture tests"\nDISABLED\n',
+    ),
+    "architecture step in a function that is never called": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n_architecture_gate() {{\n  {ARCHITECTURE_COMMAND}\n"
+        '  check $? "backend architecture tests"\n}\n',
+    ),
+    "`false && {` group around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\nfalse && {{\n{ARCHITECTURE_COMMAND}\n"
+        'check $? "backend architecture tests"\n}\n',
+    ),
+    "`true || exit 0` before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\ntrue || exit 0\nstep "Backend architecture tests',
+    ),
+    "`exit 0` inside an if before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\nif true; then\n  exit 0\nfi\nstep "Backend architecture tests',
+    ),
+    "bare `exit` early in the script": ("\nFAILED=()\n", "\nFAILED=()\nexit\n"),
+    "`exec` replaces the script before the Trigger tsc": (
+        f"    {_TSC}\n",
+        f"    exec true\n    {_TSC}\n",
+    ),
 }
 # Plants that open a block on their anchor and close it after this line.
 _CLOSE_AFTER = {
