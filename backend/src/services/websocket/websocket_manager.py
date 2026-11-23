@@ -104,6 +104,14 @@ class WebSocketMessage:
 
 _FILTER_SCALARS = (str, int, float, bool, type(None))
 
+# Cluster publishes run on the HTTP request path (thread/message events), so
+# a black-holed Redis must cost a bounded, short wait and then be skipped for
+# a while instead of stalling every request.
+_REDIS_CONNECT_TIMEOUT_S = 1.0
+_REDIS_SOCKET_TIMEOUT_S = 2.0  # > the listener's 1s get_message poll
+_PUBLISH_TIMEOUT_S = 0.5
+_PUBLISH_BACKOFF_S = 10.0
+
 
 def _validated_message_filter(raw: Any) -> Optional[Dict[str, Any]]:
     """A client-supplied ``message_filter``, or None when it is malformed.
@@ -295,6 +303,7 @@ class EnhancedConnectionManager(BaseService):
             settings, "WS_MAX_CONNECTIONS_PER_USER", 100
         )
         self.message_queue = asyncio.Queue(maxsize=1000)
+        self._publish_suspended_until = 0.0
 
     async def initialize(self):
         """Initialize the connection manager"""
@@ -307,6 +316,8 @@ class EnhancedConnectionManager(BaseService):
                 encoding="utf-8",
                 decode_responses=True,
                 health_check_interval=30,
+                socket_connect_timeout=_REDIS_CONNECT_TIMEOUT_S,
+                socket_timeout=_REDIS_SOCKET_TIMEOUT_S,
             )
 
             # Test Redis connection
@@ -727,6 +738,8 @@ class EnhancedConnectionManager(BaseService):
         id. No-op in single-instance mode (no Redis)."""
         if not self.redis_client:
             return
+        if time.monotonic() < self._publish_suspended_until:
+            return  # Redis failed recently: local delivery only for now.
         try:
             payload = {
                 "kind": kind,
@@ -742,9 +755,17 @@ class EnhancedConnectionManager(BaseService):
                 # kind="channels": a multi-channel broadcast. Workers that
                 # predate it fall back to ``channel`` (the first one) above.
                 payload["targets"] = list(targets)
-            await self.redis_client.publish("websocket_broadcast", json.dumps(payload))
+            await asyncio.wait_for(
+                self.redis_client.publish("websocket_broadcast", json.dumps(payload)),
+                timeout=_PUBLISH_TIMEOUT_S,
+            )
         except Exception as e:
-            logger.error(f"Failed to broadcast via Redis (kind={kind}): {e}")
+            # Never fatal: local subscribers already received the message.
+            self._publish_suspended_until = time.monotonic() + _PUBLISH_BACKOFF_S
+            logger.error(
+                f"Failed to broadcast via Redis (kind={kind}): {type(e).__name__}; "
+                f"skipping cluster publish for {_PUBLISH_BACKOFF_S:.0f}s"
+            )
 
     async def broadcast_to_channel(self, channel: str, message: WebSocketMessage):
         """Broadcast message to all subscribers of a channel (local + cluster)."""

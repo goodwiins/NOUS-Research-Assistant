@@ -53,7 +53,20 @@ class ThreadEventService:
         ``target_organization``), and publishes through Redis so subscribers
         held by other workers/replicas receive the event too.
         """
-        await self._manager.broadcast_to_channels(channels, message)
+        # Best effort: the HTTP write that triggered the event has already
+        # committed, so a broadcast failure (Redis down, a send error) must
+        # never turn it into a 500. Clients reconcile on their next fetch.
+        try:
+            await self._manager.broadcast_to_channels(channels, message)
+        except Exception as exc:
+            logger.warning(
+                "Thread event broadcast failed",
+                extra={
+                    "event_type": getattr(message, "type", None),
+                    "channel_count": len(channels),
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     async def broadcast_thread_created(
         self,
