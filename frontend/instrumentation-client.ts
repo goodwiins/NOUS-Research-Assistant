@@ -1,5 +1,12 @@
 import * as Sentry from '@sentry/nextjs';
 
+import {
+  SENTRY_CONSOLE_LOG_LEVELS,
+  scrubReplayEventsIntegration,
+  scrubReplayRecordingEvent,
+  sentryScrubOptions,
+} from './src/lib/sentry-scrub';
+
 Sentry.init({
   dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
   environment: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT,
@@ -10,12 +17,19 @@ Sentry.init({
   replaysOnErrorSampleRate: 1.0,
   enabled: Boolean(process.env.NEXT_PUBLIC_SENTRY_DSN),
   enableLogs: true,
+  // Scrub user content and credentials from events, transactions, spans,
+  // breadcrumbs and logs (GOO-725).
+  ...sentryScrubOptions,
   integrations: [
     Sentry.replayIntegration({
       maskAllText: true,
       blockAllMedia: true,
+      // Strip query strings from navigation, resource and request frames.
+      beforeAddRecordingEvent: scrubReplayRecordingEvent,
     }),
-    Sentry.consoleLoggingIntegration({ levels: ['log', 'warn', 'error'] }),
+    // Strip query strings from the replay event's URL list.
+    scrubReplayEventsIntegration(),
+    Sentry.consoleLoggingIntegration({ levels: SENTRY_CONSOLE_LOG_LEVELS }),
   ],
   debug: false,
 });
