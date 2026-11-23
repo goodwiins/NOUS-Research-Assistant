@@ -65,7 +65,11 @@ function runStatus(
   return { runId: 'run-42', status, metadata: {}, output, error: null };
 }
 
-function parkDurableConfirmation(waitTokenId: string | null = 'wait-7'): void {
+function parkDurableConfirmation(
+  waitTokenId: string | null = 'wait-7',
+  // `null` parks a card with no approval id at all.
+  approvalId: string | null = 'a'.repeat(64)
+): void {
   useAgentChatStore.setState({
     activeThreadId: 'thread-A',
     messages: [
@@ -82,7 +86,7 @@ function parkDurableConfirmation(waitTokenId: string | null = 'wait-7'): void {
         assistantMessageId: 'a-1',
         jobId: 'run_cmabc123',
         origin: 'durable',
-        approvalId: 'a'.repeat(64),
+        ...(approvalId !== null ? { approvalId } : {}),
         ...(waitTokenId ? { waitTokenId } : {}),
         tools: [{ name: 'ingest_arxiv', args: {} }],
         message: 'Confirm?',
@@ -356,6 +360,58 @@ describe('a stale durable card never approves a newer confirmation (GOO-748 F1/F
       useAgentChatStore.getState().pendingConfirmations['thread-A']?.jobId
     ).toBe('run_cmabc123');
   });
+});
+
+describe('a durable card never approves a confirmation it cannot identify (GOO-758)', () => {
+  const CARD_APPROVAL_ID = 'a'.repeat(64);
+
+  beforeEach(() => {
+    useAgentChatStore.getState().reset();
+    vi.clearAllMocks();
+    serviceMocks.getDurableRunStatus.mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  // [label, card's approvalId (null = absent), the run's parked confirmation]
+  it.each<[string, string | null, Record<string, unknown> | undefined]>([
+    ['the parked confirmation has no id', CARD_APPROVAL_ID, {}],
+    ['the run parked no confirmation object', CARD_APPROVAL_ID, undefined],
+    ['both ids are empty strings', '', { approval_id: '' }],
+    ['neither the card nor the confirmation has an id', null, {}],
+    ['the card has no id and the run has none either', null, undefined],
+    ['the card has no id and the confirmation id is empty', null, { approval_id: '' }],
+    ['the card has no id and the confirmation id is null', null, { approval_id: null }],
+  ])(
+    'does not complete a late token when %s',
+    async (_label, cardApprovalId, confirmation) => {
+      parkDurableConfirmation(null, cardApprovalId);
+      serviceMocks.getDurableRunStatus.mockResolvedValue({
+        ...runStatus('WAITING'),
+        metadata: {
+          status: 'awaiting_confirmation',
+          ...(confirmation !== undefined ? { confirmation } : {}),
+          waitTokenId: 'wait-unidentified',
+        },
+      });
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+      expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+      const state = useAgentChatStore.getState();
+      // Denied the same way as a changed confirmation: the card is gone and
+      // the user is told to reload.
+      expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+      expect(state.messages[0].content).toBe(
+        DURABLE_CONFIRMATION_CHANGED_NOTICE
+      );
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
 });
 
 describe('durable polls survive a dropped request (FL2D-2)', () => {
