@@ -118,8 +118,10 @@ describe('performance', () => {
   // One Markdown parse, the same one the renderer already pays for this
   // message. A wall-clock bound flakes on loaded CI runners (400 KB took
   // 4.2-4.6 s there, 0.9 s locally), so this pins the growth instead. 16x the
-  // input costs about 21x the time here; a quadratic scanner costs about 256x
-  // (a mutant with an O(n^2) pre-scan measured 78x). The bound sits between.
+  // input costs 16-21x the time, quiet or under 4 parallel coverage runs; a
+  // quadratic scanner costs about 256x (a mutant with an O(n^2) pre-scan
+  // measured over 60x). The bound sits between. Small and large runs
+  // alternate, so a load spike lands on both sizes rather than on one.
   // The input is block-structured, as real answers are; micromark itself is
   // superlinear on one giant paragraph.
   const unit =
@@ -138,21 +140,19 @@ describe('performance', () => {
     return performance.now() - start;
   }
 
-  // Fastest of a few runs, so one GC pause does not decide the ratio.
-  function fastestParseMs(content: string, runs: number): number {
-    let best = Infinity;
-    for (let run = 0; run < runs; run += 1) {
-      best = Math.min(best, parseMs(fresh(content)));
-    }
-    return best;
-  }
+  const median = (values: number[]): number =>
+    [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 
   it('scales linearly with message size on code- and marker-dense input', () => {
-    referenced(fresh(message(25_000))); // warm the parser before timing
-    const small = fastestParseMs(message(25_000), 5);
-    const large = fastestParseMs(message(400_000), 2);
+    referenced(fresh(message(20_000))); // warm the parser before timing
+    const small: number[] = [];
+    const large: number[] = [];
+    for (let pair = 0; pair < 5; pair += 1) {
+      small.push(parseMs(fresh(message(12_500))));
+      large.push(parseMs(fresh(message(200_000))));
+    }
 
-    expect(large / small).toBeLessThan(40);
+    expect(median(large) / median(small)).toBeLessThan(40);
   }, 60_000);
 
   it('parses a committed message once, however often it is asked again', () => {
