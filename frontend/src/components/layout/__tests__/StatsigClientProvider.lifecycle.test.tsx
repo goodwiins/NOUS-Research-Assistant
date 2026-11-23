@@ -20,10 +20,6 @@ vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({ user: null }),
 }));
 
-vi.mock('@statsig/web-analytics', () => ({
-  StatsigAutoCapturePlugin: class StatsigAutoCapturePlugin {},
-}));
-
 vi.mock('@statsig/react-bindings', () => ({
   LogLevel: { Warn: 'Warn', Debug: 'Debug' },
   StatsigClient: vi.fn(() => mockClient),
@@ -77,7 +73,7 @@ describe('StatsigClientProvider lifecycle', () => {
       expect(mockUseClientAsyncInit).toHaveBeenCalledWith(
         'client-test-key',
         expect.objectContaining({ userID: 'anonymous' }),
-        expect.objectContaining({ plugins: expect.any(Array) })
+        expect.objectContaining({ logLevel: expect.anything() })
       );
     });
   });
@@ -103,8 +99,7 @@ describe('StatsigClientProvider lifecycle', () => {
     });
   });
 
-  it('registers AutoCapture and no session-replay plugin (GOO-774)', async () => {
-    const { StatsigAutoCapturePlugin } = await import('@statsig/web-analytics');
+  it('registers no plugins: no session replay (GOO-774), no AutoCapture (GOO-784)', async () => {
     const { StatsigClientProvider } =
       await import('../../../../app/statsig-provider');
 
@@ -118,12 +113,61 @@ describe('StatsigClientProvider lifecycle', () => {
       expect(mockUseClientAsyncInit).toHaveBeenCalled();
     });
     const options = mockUseClientAsyncInit.mock.calls[0][2] as {
-      plugins: unknown[];
+      plugins?: unknown[];
     };
-    // Gates and events stay; the only plugin is AutoCapture. A recorder here
-    // would bypass Sentry's replay privacy options.
-    expect(options.plugins).toHaveLength(1);
-    expect(options.plugins[0]).toBeInstanceOf(StatsigAutoCapturePlugin);
+    // Gates, experiments and explicit logEvent calls need no plugin. Every
+    // Statsig plugin so far sent page URLs, query params, the referrer or
+    // element text past Sentry's scrubbing.
+    expect(options.plugins ?? []).toEqual([]);
+  });
+
+  it('sends Statsig no page URL, query, referrer or first-touch metadata (GOO-784)', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/search?q=secret-search-text&token_hash=tok-123#access_token=at-456'
+    );
+    const referrer = vi
+      .spyOn(document, 'referrer', 'get')
+      .mockReturnValue('https://ref.example/in?q=referrer-leak');
+    try {
+      const { StatsigClientProvider } =
+        await import('../../../../app/statsig-provider');
+
+      render(
+        <StatsigClientProvider>
+          <span>Application shell</span>
+        </StatsigClientProvider>
+      );
+
+      await vi.waitFor(() => {
+        expect(mockUseClientAsyncInit).toHaveBeenCalled();
+      });
+      const [, user, options] = mockUseClientAsyncInit.mock.calls[0];
+      const sent = JSON.stringify({ user, options });
+      for (const leak of [
+        'secret-search-text',
+        'tok-123',
+        'at-456',
+        'ref.example',
+        'referrer-leak',
+        '/search',
+      ]) {
+        expect(sent).not.toContain(leak);
+      }
+      // AutoCapture writes first-touch data onto the user object, where its
+      // event filter never sees it.
+      expect(user).not.toHaveProperty('analyticsOnlyMetadata');
+      const allowedUserKeys = ['userID', 'email', 'customIDs', 'custom'];
+      expect(
+        Object.keys(user as object).filter(
+          (key) => !allowedUserKeys.includes(key)
+        )
+      ).toEqual([]);
+    } finally {
+      referrer.mockRestore();
+      window.history.replaceState(null, '', '/');
+    }
   });
 
   it('does not initialize Statsig during server rendering', async () => {
