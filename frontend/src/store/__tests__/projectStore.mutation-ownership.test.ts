@@ -51,15 +51,19 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
-/** Project B is current with one document and one note on screen. */
-async function onProjectB(): Promise<void> {
+/**
+ * Project B is current with one document and one note on screen. Pass the
+ * ids A uses to give B an item with the same id, so an A mutation that
+ * leaked into B's list would visibly change it.
+ */
+async function onProjectB(docId = 'b-doc', noteId = 'b-note'): Promise<void> {
   state().setCurrentProject(project('A'));
   state().setCurrentProject(project('B'));
   svc.listProjectDocuments.mockResolvedValueOnce({
-    documents: [doc('b-doc')],
+    documents: [doc(docId)],
   } as never);
   svc.listProjectNotes.mockResolvedValueOnce({
-    notes: [note('b-note')],
+    notes: [note(noteId)],
   } as never);
   await state().fetchProjectDocuments('B');
   await state().fetchProjectNotes('B');
@@ -180,5 +184,164 @@ describe('projectStore mutations after a project switch (GOO-754)', () => {
     bib.resolve({ content: 'bib-A' });
     await pending;
     expect(state().bibliography).toBeNull();
+  });
+
+  describe('id-keyed mutations for A, settling on B where the same id exists', () => {
+    const SHARED = 'shared';
+    const changed = { id: SHARED, content: 'from A' } as unknown as ProjectNote;
+
+    const cases = [
+      {
+        name: 'removeDocument',
+        mock: (): typeof svc.removeDocumentFromProject =>
+          svc.removeDocumentFromProject,
+        start: (): Promise<unknown> => state().removeDocument('A', SHARED),
+        value: undefined,
+      },
+      {
+        name: 'updateNote',
+        mock: (): typeof svc.updateNote => svc.updateNote,
+        start: (): Promise<unknown> =>
+          state().updateNote('A', SHARED, { content: 'from A' } as never),
+        value: changed,
+      },
+      {
+        name: 'deleteNote',
+        mock: (): typeof svc.deleteNote => svc.deleteNote,
+        start: (): Promise<unknown> => state().deleteNote('A', SHARED),
+        value: undefined,
+      },
+      {
+        name: 'toggleNotePin',
+        mock: (): typeof svc.toggleNotePin => svc.toggleNotePin,
+        start: (): Promise<unknown> => state().toggleNotePin('A', SHARED),
+        value: changed,
+      },
+    ] as const;
+
+    const bIsUntouched = (): void => {
+      expect(state().projectDocuments).toEqual([doc(SHARED)]);
+      expect(state().projectNotes).toEqual([note(SHARED)]);
+    };
+
+    it.each(cases)("$name success leaves B's same-id item alone", async (c) => {
+      state().setCurrentProject(project('A'));
+      const call = deferred<unknown>();
+      (
+        c.mock() as unknown as { mockReturnValueOnce(v: unknown): void }
+      ).mockReturnValueOnce(call.promise);
+      const pending = c.start();
+
+      await onProjectB(SHARED, SHARED);
+      call.resolve(c.value);
+      await pending;
+
+      bIsUntouched();
+      expect(state().documentsLoading).toBe(false);
+      expect(state().notesLoading).toBe(false);
+    });
+
+    it.each(cases)(
+      '$name failure sets no error on B, and still rejects',
+      async (c) => {
+        state().setCurrentProject(project('A'));
+        const call = deferred<unknown>();
+        (
+          c.mock() as unknown as { mockReturnValueOnce(v: unknown): void }
+        ).mockReturnValueOnce(call.promise);
+        const pending = c.start();
+
+        await onProjectB(SHARED, SHARED);
+        call.reject(new Error(`${c.name} failed`));
+
+        await expect(pending).rejects.toThrow(`${c.name} failed`);
+        expect(state().error).toBeNull();
+        bIsUntouched();
+      }
+    );
+
+    it.each(cases)(
+      '$name for the project on screen still commits and reports errors',
+      async (c) => {
+        await onProjectB(SHARED, SHARED);
+        const forB = {
+          ...c,
+          start: (): Promise<unknown> => {
+            switch (c.name) {
+              case 'removeDocument':
+                return state().removeDocument('B', SHARED);
+              case 'updateNote':
+                return state().updateNote('B', SHARED, {
+                  content: 'from A',
+                } as never);
+              case 'deleteNote':
+                return state().deleteNote('B', SHARED);
+              default:
+                return state().toggleNotePin('B', SHARED);
+            }
+          },
+        };
+        const mock = c.mock() as unknown as {
+          mockResolvedValueOnce(v: unknown): void;
+          mockRejectedValueOnce(e: unknown): void;
+        };
+        mock.mockResolvedValueOnce(c.value);
+        await forB.start();
+        if (c.name === 'removeDocument')
+          expect(state().projectDocuments).toEqual([]);
+        else if (c.name === 'deleteNote')
+          expect(state().projectNotes).toEqual([]);
+        else expect(state().projectNotes).toEqual([changed]);
+
+        mock.mockRejectedValueOnce(new Error('nope'));
+        await expect(forB.start()).rejects.toThrow('nope');
+        expect(state().error).toBe('nope');
+      }
+    );
+  });
+
+  it('with no list loaded yet, the current project decides', async () => {
+    // B is current but none of its lists has been fetched: an A note must
+    // not appear in it, while a B note does.
+    state().setCurrentProject(project('B'));
+    svc.createNote.mockResolvedValueOnce(note('a-note'));
+    await state().createNote('A', { content: 'x' } as never);
+    expect(state().projectNotes).toEqual([]);
+
+    svc.createNote.mockResolvedValueOnce(note('b-note'));
+    await state().createNote('B', { content: 'x' } as never);
+    expect(state().projectNotes.map((n) => n.id)).toEqual(['b-note']);
+  });
+
+  it("while fetchProject(B) is pending, the lists on screen are B's: they decide, not currentProject", async () => {
+    // currentProject is still A, but B's lists are already committed.
+    state().setCurrentProject(project('A'));
+    svc.listProjectDocuments.mockResolvedValueOnce({
+      documents: [doc('b-doc')],
+    } as never);
+    await state().fetchProjectDocuments('B');
+    const fetchingB = deferred<Project>();
+    svc.getProject.mockReturnValueOnce(fetchingB.promise);
+    const projectPending = state().fetchProject('B');
+    expect(state().currentProject?.id).toBe('A');
+
+    // A mutation for B lands in B's list ...
+    svc.addDocumentToProject.mockResolvedValueOnce(doc('b-doc-2'));
+    await state().addDocument('B', 'b-doc-2');
+    // ... and one for A, the stale current project, does not.
+    svc.addDocumentToProject.mockResolvedValueOnce(doc('a-doc'));
+    await state().addDocument('A', 'a-doc');
+
+    expect(state().projectDocuments.map((d) => d.document_id)).toEqual([
+      'b-doc',
+      'b-doc-2',
+    ]);
+
+    fetchingB.resolve(project('B'));
+    await projectPending;
+    expect(state().projectDocuments.map((d) => d.document_id)).toEqual([
+      'b-doc',
+      'b-doc-2',
+    ]);
   });
 });
