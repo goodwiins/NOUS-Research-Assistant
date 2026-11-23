@@ -11,7 +11,9 @@ reads the source and, for each site, checks:
 Sites that use the request's sync ``Session`` (or an upload whose object must
 be deleted after a cancel) must use ``to_thread_finish_on_cancel``: a plain
 ``to_thread`` returns on cancellation while the thread is still inside the
-Session that ``get_db_sync`` is about to close.
+Session that ``get_db_sync`` is about to close. They must also pass the
+Session as ``guard_session=db`` (GOO-698), so a thread abandoned after the
+bounded wait can neither commit on it nor have it closed under it.
 """
 
 import ast
@@ -37,6 +39,10 @@ class Site(NamedTuple):
     # "lambda:<attr>" for a lambda whose body calls ``<x>.<attr>(...)``.
     target: str
     offloads: frozenset = _ANY_OFFLOAD
+    # The call must pass the request Session as ``guard_session=`` so an
+    # abandoned thread cannot commit on it or have it closed under it
+    # (GOO-698).
+    guards_session: bool = False
 
 
 SITES: List[Site] = [
@@ -74,56 +80,77 @@ SITES: List[Site] = [
         "get_evidence_meter",
         "_load_sources_and_release",
         _FINISH,
+        True,
     ),
-    Site("api/evidence/router.py", "get_evidence_meter", "_save_and_commit", _FINISH),
+    Site(
+        "api/evidence/router.py",
+        "get_evidence_meter",
+        "_save_and_commit",
+        _FINISH,
+        True,
+    ),
     Site(
         "api/evidence/router.py",
         "classify_sources_for_claim",
         "_load_sources_and_release",
         _FINISH,
+        True,
     ),
     Site(
         "api/evidence/router.py",
         "classify_sources_for_claim",
         "_save_and_commit",
         _FINISH,
+        True,
     ),
-    Site("api/evidence/router.py", "classify_sources_for_claim", "rollback", _FINISH),
+    Site(
+        "api/evidence/router.py",
+        "classify_sources_for_claim",
+        "rollback",
+        _FINISH,
+        True,
+    ),
     Site(
         "api/infrastructure/evaluation.py",
         "create_evaluation_job",
         "_fail_job_quietly",
         _FINISH,
+        True,
     ),
     Site(
         "services/evaluation/rag_evaluation_service.py",
         "create_evaluation_job",
         "_create_evaluation_job_sync",
         _FINISH,
+        True,
     ),
     Site(
         "api/quality/user_behavior.py",
         "get_user_behavior_analytics",
         "lambda:query",
         _FINISH,
+        True,
     ),
     Site(
         "api/quality/user_behavior.py",
         "get_organization_user_behavior",
         "lambda:execute",
         _FINISH,
+        True,
     ),
     Site(
         "api/quality/user_behavior.py",
         "generate_behavior_report",
         "lambda:query",
         _FINISH,
+        True,
     ),
     Site(
         "api/quality/user_behavior.py",
         "export_behavior_data",
         "_query_content_usage",
         _FINISH,
+        True,
     ),
 ]
 
@@ -160,14 +187,23 @@ def _calls_attr(node: ast.AST, attr: str) -> bool:
     )
 
 
-def _offload_calls(fn: ast.AST) -> List[Tuple[str, ast.expr]]:
+def _offload_calls(fn: ast.AST) -> List[Tuple[str, ast.expr, ast.Call]]:
     out = []
     for node in ast.walk(fn):
         if isinstance(node, ast.Call) and node.args:
             name = _tail(node.func)
             if name in _ANY_OFFLOAD:
-                out.append((name, node.args[0]))
+                out.append((name, node.args[0], node))
     return out
+
+
+def _passes_db_as_guard(call: ast.Call) -> bool:
+    return any(
+        kw.arg == "guard_session"
+        and isinstance(kw.value, ast.Name)
+        and kw.value.id == "db"
+        for kw in call.keywords
+    )
 
 
 def _matches(arg: ast.expr, target: str) -> bool:
@@ -182,17 +218,27 @@ def _matches(arg: ast.expr, target: str) -> bool:
 def test_blocking_call_stays_off_the_loop(site: Site) -> None:
     fn = _function(_tree(site.path), site.function)
     offloads = _offload_calls(fn)
-    used = [name for name, arg in offloads if _matches(arg, site.target)]
+    used = [name for name, arg, _ in offloads if _matches(arg, site.target)]
 
     assert used, f"{site.target} is no longer offloaded in {site.function}"
     wrong = [name for name in used if name not in site.offloads]
     assert (
         not wrong
     ), f"{site.target} must use one of {sorted(site.offloads)}, not {wrong}"
+    if site.guards_session:
+        unguarded = [
+            call.lineno
+            for _, arg, call in offloads
+            if _matches(arg, site.target) and not _passes_db_as_guard(call)
+        ]
+        assert not unguarded, (
+            f"{site.target} uses the request Session but does not pass "
+            f"guard_session=db (lines {unguarded})"
+        )
 
     lambdas = {
         id(n)
-        for _, arg in offloads
+        for _, arg, _ in offloads
         if isinstance(arg, ast.Lambda)
         for n in ast.walk(arg)
     }
