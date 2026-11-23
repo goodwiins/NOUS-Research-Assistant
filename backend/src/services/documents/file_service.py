@@ -12,7 +12,7 @@ import uuid
 import uuid as uuid_module
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional
+from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
 
 import aiofiles
 import magic
@@ -34,6 +34,7 @@ except ImportError:
 
 from src.core.config import settings
 from src.core.database import get_db
+from src.core.thread_offload import to_thread_finish_on_cancel
 from src.models.document import Document, DocumentType, ProcessingStatus
 from src.models.organization import Organization
 from src.models.processing import JobPriority, JobStatus, JobType, ProcessingJob
@@ -524,8 +525,18 @@ class FileService:
                 spool_path, file_hash = await self._spool_and_hash(file)
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
-                    with open(spool_path, "rb") as fh:
-                        self.s3_helper.upload_fileobj(fh, s3_key, mime_type)
+                    # boto3 is blocking: upload from a worker thread (GOO-643).
+                    await self._upload_off_loop(
+                        lambda _result: (
+                            "s3",
+                            s3_key,
+                            f"s3://{settings.S3_BUCKET_NAME}/{s3_key}",
+                        ),
+                        spool_path,
+                        self.s3_helper.upload_fileobj,
+                        s3_key,
+                        mime_type,
+                    )
                 finally:
                     try:
                         os.unlink(spool_path)
@@ -563,10 +574,18 @@ class FileService:
                 spool_path, file_hash = await self._spool_and_hash(file)
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
-                    with open(spool_path, "rb") as fh:
-                        storage_key = self.storage_helper.upload_fileobj(
-                            fh, bucket, key, mime_type
-                        )
+                    storage_key = await self._upload_off_loop(
+                        lambda stored_key: (
+                            "supabase",
+                            stored_key,
+                            f"supabase://{stored_key}",
+                        ),
+                        spool_path,
+                        self.storage_helper.upload_fileobj,
+                        bucket,
+                        key,
+                        mime_type,
+                    )
                 finally:
                     try:
                         os.unlink(spool_path)
@@ -597,7 +616,9 @@ class FileService:
                 )
                 file_path_with_ext = f"{file_path}{original_ext}"
                 saved_path = await self.save_file(file, file_path_with_ext)
-                file_hash = self.calculate_file_hash(saved_path)
+                file_hash = await asyncio.to_thread(
+                    self.calculate_file_hash, saved_path
+                )
                 try:
                     await self._assert_not_duplicate(file_hash, str(organization.id))
                 except Exception:
@@ -771,7 +792,9 @@ class FileService:
             if reversal_ok and stored_object is not None:
                 backend, storage_path, obj_file_path = stored_object
                 try:
-                    self._delete_stored_object(backend, storage_path, obj_file_path)
+                    await asyncio.to_thread(
+                        self._delete_stored_object, backend, storage_path, obj_file_path
+                    )
                 except Exception:
                     logger.warning(
                         "upload rollback: orphaned storage object %s (recoverable "
@@ -989,6 +1012,39 @@ class FileService:
             self.storage_helper.delete_file(bucket, key)
         elif file_path and os.path.exists(file_path):
             os.remove(file_path)
+
+    async def _upload_off_loop(
+        self,
+        identity: Callable[[Any], Tuple[str, Optional[str], Optional[str]]],
+        spool_path: str,
+        upload: Any,
+        *args: Any,
+    ) -> Any:
+        """Run a blocking ``upload_fileobj`` in a worker thread.
+
+        Cancelling the request cannot stop the thread, so on cancellation wait
+        for it to finish and delete whatever it stored (``identity`` maps the
+        upload result to ``_delete_stored_object`` arguments) before
+        re-raising. Without that the object lands after the rollback ran and
+        nothing references it. Waiting also keeps the spool file in place
+        until the thread is done reading it.
+        """
+
+        def _delete_landed(result: Any) -> None:
+            self._delete_stored_object(*identity(result))
+
+        # Waits through any number of cancellations (a second one used to
+        # skip the delete, GOO-693) and logs a failed delete: the object is
+        # then recoverable by a later sweep.
+        return await to_thread_finish_on_cancel(
+            self._upload_spool, spool_path, upload, *args, on_cancel=_delete_landed
+        )
+
+    @staticmethod
+    def _upload_spool(spool_path: str, upload: Any, *args: Any) -> Any:
+        """Open the spooled upload and hand it to a blocking ``upload_fileobj``."""
+        with open(spool_path, "rb") as fh:
+            return upload(fh, *args)
 
     def delete_physical_file(self, document: Document) -> None:
         """Delete every stored object a document owns.
@@ -1386,7 +1442,8 @@ class FileService:
         # Best-effort physical delete AFTER the commit. A failure here must NOT
         # roll back the committed soft-delete — log it as a recoverable orphan.
         try:
-            self.delete_physical_file(document)
+            # Blocking boto3/disk calls: worker thread (GOO-643 IS-1).
+            await asyncio.to_thread(self.delete_physical_file, document)
         except Exception as delete_error:
             logger.warning(
                 "Soft-deleted document %s but failed to remove its storage "

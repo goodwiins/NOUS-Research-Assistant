@@ -683,15 +683,18 @@ class CitationExtractionService:
                 return None
 
             def _extract_pdf_data(file_path: str) -> Tuple[Dict[str, Any], str]:
-                doc = fitz.open(file_path)
-                try:
-                    metadata = doc.metadata or {}
-                    text = ""
-                    for page_num in range(min(5, len(doc))):
-                        text += doc[page_num].get_text()
-                    return metadata, text
-                finally:
-                    doc.close()
+                from src.services.processing import pdf_lock
+
+                with pdf_lock.PYMUPDF_LOCK:  # PyMuPDF is not thread-safe
+                    doc = fitz.open(file_path)
+                    try:
+                        metadata = doc.metadata or {}
+                        text = ""
+                        for page_num in range(min(5, len(doc))):
+                            text += doc[page_num].get_text()
+                        return metadata, text
+                    finally:
+                        doc.close()
 
             # Run the synchronous PDF parsing in a thread pool to avoid blocking the event loop
             import asyncio

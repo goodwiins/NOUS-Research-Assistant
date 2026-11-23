@@ -288,3 +288,46 @@ class TestAssertCallerCanDelegate:
         self._svc(ADMIN_PERMS, [ADMIN_ROLE]).assert_caller_can_delegate(
             ADMIN_ID, ORG, sorted(ADMIN_PERMS), 800
         )
+
+
+@pytest.mark.unit
+class TestUpdateRolePermissionNames:
+    """API-2: replacing a role's permissions used a raw SQL string.
+
+    SQLAlchemy 2.x ``Session.execute`` rejects plain strings, so every
+    ``PUT /roles/{id}`` carrying ``permission_names`` hit the 500 branch.
+    """
+
+    def test_permission_names_reset_uses_a_core_delete(
+        self, client_for: ClientFor
+    ) -> None:
+        from sqlalchemy.sql.dml import Delete
+
+        editor = _custom(EDITOR_ROLE)
+        editor.to_dict = lambda: {
+            "id": editor.id,
+            "name": editor.name,
+            "display_name": "Editor",
+            "description": None,
+            "organization_id": ORG,
+            "is_system": False,
+            "is_active": True,
+            "priority": editor.priority,
+            "permissions": [],
+            "created_at": "2026-11-21T00:00:00",
+            "updated_at": None,
+        }
+        db = _fake_db(editor)
+        with patch.object(
+            RBACService, "assign_permissions_to_role", return_value=True
+        ) as assign:
+            resp = client_for(SUPER_ID, db).put(
+                f"{API}/roles/{editor.id}",
+                json={"permission_names": ["document_read"]},
+            )
+
+        assert resp.status_code == 200, resp.text
+        statement = db.execute.call_args_list[0].args[0]
+        assert isinstance(statement, Delete)
+        assert statement.table.name == "role_permissions"
+        assign.assert_called_once_with(editor.id, ["document_read"])

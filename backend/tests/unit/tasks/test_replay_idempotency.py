@@ -462,3 +462,73 @@ def test_ingestion_skips_completed_job_without_reprocessing(
     result = pt.process_document_ingestion.apply(args=(str(job_id),)).get()
     assert result["skipped"] == "terminal"
     assert result["status"] == "completed"
+
+
+class _FailingExtractionPipeline(_FakePipeline):
+    """Extraction errored: the pipeline reports None, not an empty set."""
+
+    async def process_entity_extraction(self, document, text):
+        return None
+
+
+def test_failed_extraction_keeps_existing_entities(session_factory, monkeypatch):
+    """GOO-642 review: a failed extraction used to come back as [] and the
+    reset then deleted the document's entities before inserting nothing."""
+    Session = session_factory
+    org_id, doc_id, job_id = uuid4(), uuid4(), uuid4()
+
+    setup = Session()
+    _seed_document(setup, doc_id=doc_id, org_id=org_id, content_text="Ada.")
+    _seed_job(
+        setup, job_id=job_id, doc_id=doc_id, org_id=org_id, status=JobStatus.PENDING
+    )
+    setup.add(_entity("Ada Lovelace", ExtractionMethod.SPACY, doc_id, org_id))
+    setup.commit()
+    setup.close()
+
+    _stub_ingestion_side_effects(monkeypatch, Session)
+    monkeypatch.setattr(pt, "ProcessingPipeline", _FailingExtractionPipeline)
+
+    pt.process_document_ingestion.apply(args=(str(job_id),)).get()
+
+    check = Session()
+    names = [e.name for e in check.query(Entity).filter(Entity.document_id == doc_id)]
+    doc = check.query(Document).filter(Document.id == doc_id).one()
+    graph_status = doc.neo4j_index_status
+    redrive = (doc.document_metadata or {}).get("graph_redrive")
+    check.close()
+    assert names == ["Ada Lovelace"]
+    # GOO-688: marked failed so the reconciler re-extracts it, instead of
+    # silently "completed with 0 entities".
+    assert graph_status == "failed"
+    # GOO-695: and the reconciler is told the Postgres rows are stale too,
+    # with a fresh attempt budget.
+    assert redrive == {"attempts": 0, "postgres_entities_stale": True}
+
+
+def test_successful_extraction_clears_a_pending_redrive(session_factory, monkeypatch):
+    """GOO-695: a reprocess that extracts fine supersedes the reconciler's
+    retry state (Postgres is fresh again, the attempt budget resets)."""
+    Session = session_factory
+    org_id, doc_id, job_id = uuid4(), uuid4(), uuid4()
+
+    setup = Session()
+    doc = _seed_document(setup, doc_id=doc_id, org_id=org_id, content_text="Ada.")
+    doc.document_metadata = {
+        "keep": "me",
+        "graph_redrive": {"attempts": 3, "postgres_entities_stale": True},
+    }
+    _seed_job(
+        setup, job_id=job_id, doc_id=doc_id, org_id=org_id, status=JobStatus.PENDING
+    )
+    setup.commit()
+    setup.close()
+
+    _stub_ingestion_side_effects(monkeypatch, Session)
+    pt.process_document_ingestion.apply(args=(str(job_id),)).get()
+
+    check = Session()
+    meta = check.query(Document).filter(Document.id == doc_id).one().document_metadata
+    check.close()
+    assert "graph_redrive" not in (meta or {})
+    assert (meta or {}).get("keep") == "me"

@@ -1,7 +1,11 @@
 import { logger, task, metadata } from "@trigger.dev/sdk";
 import { ingestPaper } from "./ingest-paper";
 import { backendClient } from "../_lib/backend-client";
-import type { ArxivBulkIngestPayload } from "../_lib/schemas";
+import { emptyTally, tallyIngestRuns } from "./tally";
+import {
+  ArxivSearchResponseSchema,
+  type ArxivBulkIngestPayload,
+} from "../_lib/schemas";
 
 export const bulkIngestArxiv = task({
   id: "arxiv-bulk-ingest",
@@ -34,18 +38,21 @@ export const bulkIngestArxiv = task({
     if (dateFrom) searchParams.date_from = dateFrom;
     if (dateTo) searchParams.date_to = dateTo;
 
-    const searchResult = await backendClient.post<{
-      papers: Array<{ id: string; title: string }>;
-      total?: number;
-    }>("/api/v1/arxiv/search", searchParams);
-
-    const papers = searchResult.papers ?? [];
+    // The endpoint returns a bare array. Validating it means a shape change
+    // fails the run loudly instead of silently ingesting zero papers.
+    const papers = await backendClient.post(
+      "/api/v1/arxiv/search",
+      searchParams,
+      ArxivSearchResponseSchema,
+      undefined,
+      { idempotent: true },
+    );
     metadata.set("totalPapers", papers.length);
     metadata.set("status", "ingesting");
 
     if (papers.length === 0) {
       logger.info("No papers found for query", { query });
-      return { status: "completed", ingested: 0, failed: 0, total: 0 };
+      return { status: "completed", ...emptyTally(), total: 0 };
     }
 
     const batches: Array<Array<{ id: string; title: string }>> = [];
@@ -53,8 +60,7 @@ export const bulkIngestArxiv = task({
       batches.push(papers.slice(i, i + batchSize));
     }
 
-    let ingested = 0;
-    let failed = 0;
+    const tally = emptyTally();
 
     for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
       const batch = batches[batchIdx];
@@ -65,27 +71,24 @@ export const bulkIngestArxiv = task({
         })),
       );
 
-      for (const run of results.runs) {
-        if (run.ok) {
-          ingested++;
-        } else {
-          failed++;
-        }
-      }
+      // A child that returned failed/timeout/skipped still has run.ok;
+      // count by the child's reported outcome, not by run.ok alone.
+      tallyIngestRuns(results.runs, tally);
 
       metadata.set("progress", (batchIdx + 1) / batches.length);
-      metadata.set("ingested", ingested);
-      metadata.set("failed", failed);
+      metadata.set("ingested", tally.ingested);
+      metadata.set("accepted", tally.accepted);
+      metadata.set("skipped", tally.skipped);
+      metadata.set("failed", tally.failed);
 
       logger.info("Batch complete", {
         batch: batchIdx + 1,
         total: batches.length,
-        ingested,
-        failed,
+        ...tally,
       });
     }
 
     metadata.set("status", "completed");
-    return { status: "completed", ingested, failed, total: papers.length };
+    return { status: "completed", ...tally, total: papers.length };
   },
 });

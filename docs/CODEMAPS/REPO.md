@@ -22,7 +22,7 @@ config/           Environment templates and compose variants
 monitoring/       Prometheus / Grafana / Alertmanager configs
 scripts/          Root utility and CI scripts (scripts/ci, scripts/docs, ...)
 docs/             Engineering contracts, architecture, API refs, plans, audits, archive, CODEMAPS
-security/, brand/, notebooks/, specs/, projects/, tools/, nginx/, feature-flags/
+brand/, notebooks/, specs/, projects/, tools/, nginx/, feature-flags/
 .github/workflows/  CI/CD workflows (11 files, listed in INFRA.md)
 ```
 

@@ -333,7 +333,14 @@ class AnalyticsExportRequest(BaseModel):
     data_type: str = Field(..., description="Type of data to export")
     start_date: datetime = Field(..., description="Export start date")
     end_date: datetime = Field(..., description="Export end date")
-    format: str = Field("csv", description="Export format")
+    format: str = Field(
+        "json",
+        description=(
+            "Export format: json (default) returns the structured rows; csv "
+            "returns each table as CSV text, with cells that start with "
+            "= + - @ TAB or CR prefixed by ' so spreadsheets do not run them"
+        ),
+    )
     filters: Optional[Dict[str, Any]] = Field(None, description="Export filters")
     include_metadata: bool = Field(True, description="Include metadata in export")
 

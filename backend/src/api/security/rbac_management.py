@@ -25,6 +25,7 @@ from src.models.permission import (
     PermissionCategory,
     Role,
     UserRoleAssignment,
+    role_permissions,
 )
 from src.models.user import User
 from src.services.security.rbac_service import RBACService, get_rbac_service
@@ -381,8 +382,7 @@ async def update_role(
         if permission_names is not None:
             # Remove existing permissions
             rbac_service.db.execute(
-                "DELETE FROM role_permissions WHERE role_id = :role_id",
-                {"role_id": role_id},
+                role_permissions.delete().where(role_permissions.c.role_id == role_id)
             )
 
             # Add new permissions

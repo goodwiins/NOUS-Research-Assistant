@@ -33,9 +33,10 @@ It is created manually, never committed to Git.
 export INFISICAL_CLIENT_ID='<machine-identity-client-id>'
 export INFISICAL_CLIENT_SECRET='<machine-identity-client-secret>'
 
-# One per target namespace (live: multimodal-rag-system). Needs explicit
-# authorization for the target cluster.
-for ns in multimodal-rag-system; do
+# One per target namespace (live: multimodal-rag-system; set NS to target
+# another, e.g. during disaster recovery). Needs explicit authorization for
+# the target cluster.
+for ns in "${NS:-multimodal-rag-system}"; do
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
   kubectl create secret generic infisical-universal-auth \
     --namespace "$ns" \

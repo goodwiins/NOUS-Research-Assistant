@@ -112,10 +112,20 @@ class QualityRecommendationsService:
         focus_areas: Optional[List[RecommendationCategory]] = None,
         priority_filter: Optional[RecommendationPriority] = None,
         days_back: int = 30,
+        *,
+        include_host_metrics: bool = False,
     ) -> List[QualityRecommendation]:
-        """Generate quality improvement recommendations"""
+        """Generate quality improvement recommendations.
 
-        cache_key = f"{organization_id}_{focus_areas}_{priority_filter}_{days_back}"
+        ``include_host_metrics`` adds the host CPU/memory recommendations.
+        Those describe the shared deployment, not the tenant, so callers must
+        pass it only for platform operators (GOO-672, same gate as #2197).
+        """
+
+        cache_key = (
+            f"{organization_id}_{focus_areas}_{priority_filter}_{days_back}"
+            f"_host={include_host_metrics}"
+        )
         if cache_key in self.recommendation_cache:
             cached_data = self.recommendation_cache[cache_key]
             if (datetime.utcnow() - cached_data["timestamp"]).seconds < self.cache_ttl:
@@ -159,7 +169,9 @@ class QualityRecommendationsService:
                     )
                 )
 
-            if not focus_areas or RecommendationCategory.INFRASTRUCTURE in focus_areas:
+            if include_host_metrics and (
+                not focus_areas or RecommendationCategory.INFRASTRUCTURE in focus_areas
+            ):
                 recommendations.extend(
                     await self._generate_infrastructure_recommendations(
                         insights, organization_id

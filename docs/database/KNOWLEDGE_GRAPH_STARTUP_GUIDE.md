@@ -410,12 +410,13 @@ docker-compose -f docker-compose.graph-services-corrected.yml exec neo4j-graph c
 
 #### Migration Errors
 ```bash
-# Check PostgreSQL migration status
-psql -h localhost -p 5433 -U rag_user -d rag_graph -c "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;"
-
-# Re-run migrations if needed
-psql -h localhost -p 5433 -U rag_user -d rag_graph -f database/005_correct_knowledge_graph_architecture.sql
+# The schema comes from Alembic. Check the applied revision, then upgrade.
+cd backend
+alembic current
+alembic upgrade head
 ```
+
+The standalone `005_correct_knowledge_graph_architecture.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
 
 #### Neo4j Constraint Errors
 ```bash
@@ -468,7 +469,7 @@ curl -X GET http://localhost:8010/api/visualization/layout
 #### 1. Environment Configuration
 ```bash
 # Production environment file
-cat > .env.production << EOF
+cat > .env.prod << EOF
 # Production Environment Variables
 JWT_SECRET_KEY=your-production-secret-key
 DEBUG=false
@@ -489,7 +490,7 @@ EOF
 #### 2. Production Deployment
 ```bash
 # Deploy with production configuration
-env_file=.env.production ./scripts/deploy-graph-services.sh deploy
+env_file=.env.prod ./scripts/deploy-graph-services.sh deploy
 
 # Enable monitoring profile
 docker-compose -f docker-compose.graph-services-corrected.yml --profile monitoring up -d

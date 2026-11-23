@@ -11,8 +11,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
-from src.core.dependencies import get_current_user
-from src.models.user import User
+from src.core.dependencies import (
+    get_current_user,
+    is_platform_operator,
+    require_platform_operator,
+)
+from src.models.user import User, UserRole
 from src.schemas.quality_metrics import (
     DashboardConfiguration,
     DashboardWidget,
@@ -29,6 +33,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _is_org_admin(user: User) -> bool:
+    return user.role == UserRole.ADMIN
+
+
+def _scope_overview_for(user: User, overview: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop overview sections the caller may not see (GOO-633).
+
+    ``get_dashboard_overview`` bundles every section. ``system_health`` holds
+    host-wide process metrics, so only platform operators get it (same gate
+    as ``/system-health``). ``user_engagement`` lists per-user names, ids and
+    activity, so only org admins get it (same gate as ``/user-engagement``).
+    Without this, ``/overview`` and ``/export`` handed both to any member.
+    Returns a copy; the cached overview is never mutated.
+    """
+    scoped = dict(overview)
+    if not is_platform_operator(user):
+        scoped.pop("system_health", None)
+    if not _is_org_admin(user):
+        scoped.pop("user_engagement", None)
+    return scoped
+
+
 @router.get("/dashboard")
 async def get_performance_dashboard(
     time_range: MetricTimeRange = Query(
@@ -38,8 +64,12 @@ async def get_performance_dashboard(
 ):
     """Get performance dashboard data"""
     try:
-        dashboard = await performance_dashboard_service.get_dashboard_overview(
-            organization_id=str(current_user.organization_id), time_range=time_range
+        dashboard = _scope_overview_for(
+            current_user,
+            await performance_dashboard_service.get_dashboard_overview(
+                organization_id=str(current_user.organization_id),
+                time_range=time_range,
+            ),
         )
 
         # Transform data to match expected format from notebook
@@ -71,8 +101,12 @@ async def get_dashboard_overview(
 ):
     """Get comprehensive dashboard overview"""
     try:
-        overview = await performance_dashboard_service.get_dashboard_overview(
-            organization_id=str(current_user.organization_id), time_range=time_range
+        overview = _scope_overview_for(
+            current_user,
+            await performance_dashboard_service.get_dashboard_overview(
+                organization_id=str(current_user.organization_id),
+                time_range=time_range,
+            ),
         )
 
         return overview
@@ -83,15 +117,13 @@ async def get_dashboard_overview(
 
 
 @router.get("/system-health")
-async def get_system_health_metrics(current_user: User = Depends(get_current_user)):
+async def get_system_health_metrics(
+    current_user: User = Depends(require_platform_operator),
+):
     """Get real-time system health metrics"""
+    # Host-wide process metrics (CPU, memory, disk, connections) describe the
+    # shared deployment, not one tenant, so a tenant ADMIN role is not enough.
     try:
-        # Check permissions - system health metrics are admin-only
-        from src.models.user import UserRole
-
-        if current_user.role not in [UserRole.ADMIN]:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-
         system_health = await performance_dashboard_service.get_system_health_metrics()
 
         return {
@@ -185,10 +217,8 @@ async def get_user_engagement_metrics(
 ):
     """Get user engagement metrics"""
     try:
-        # Check permissions - user engagement metrics are admin/manager only
-        from src.models.user import UserRole
-
-        if current_user.role not in [UserRole.ADMIN]:
+        # Check permissions - user engagement metrics are admin-only
+        if not _is_org_admin(current_user):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
 
         engagement = await performance_dashboard_service.get_user_engagement_metrics(
@@ -650,8 +680,12 @@ async def export_dashboard_data(
     """Export dashboard data in various formats"""
     try:
         # Get dashboard overview data
-        overview = await performance_dashboard_service.get_dashboard_overview(
-            organization_id=str(current_user.organization_id), time_range=time_range
+        overview = _scope_overview_for(
+            current_user,
+            await performance_dashboard_service.get_dashboard_overview(
+                organization_id=str(current_user.organization_id),
+                time_range=time_range,
+            ),
         )
 
         # Filter metrics if specified

@@ -24,6 +24,8 @@ event log served at ``GET /events``, cloned from the
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -37,6 +39,20 @@ from urllib.parse import urlparse
 
 EVENTS: list[dict[str, Any]] = []
 EVENT_LOCK = threading.Lock()
+
+# /execute runs arbitrary Python, so it only runs code for a caller holding an
+# access token this double issued. Each create returns a fresh random
+# `envdAccessToken`; the pinned E2B SDK sends it back as `X-Access-Token` on
+# the code-interpreter /execute call, exactly as against real envd.
+ACCESS_TOKENS: set[str] = set()
+TOKEN_LOCK = threading.Lock()
+
+# Loopback unless the deployment opts in. docker-compose sets
+# MOCK_BIND_HOST=0.0.0.0 because `main` reaches this service from another
+# container on the internal-only `benchmark-internal` network.
+BIND_HOST = os.environ.get("MOCK_BIND_HOST", "127.0.0.1")
+BIND_PORT = int(os.environ.get("MOCK_BIND_PORT", "8080"))
+SCRATCH_DIR = os.environ.get("MOCK_SCRATCH_DIR", "/service/scratch")
 
 # The dependency-priming call SandboxManager fires on every sandbox creation
 # (`e2b_sandbox_manager.py:91-94`, a `pip install -q numpy pandas ...` cell)
@@ -123,6 +139,9 @@ class Handler(BaseHTTPRequestHandler):
     def handle_create(self) -> None:
         body = self._read_json()
         sandbox_id = f"sbx-{uuid.uuid4().hex[:12]}"
+        access_token = secrets.token_urlsafe(24)
+        with TOKEN_LOCK:
+            ACCESS_TOKENS.add(access_token)
         record_event(
             {
                 "type": "create",
@@ -136,6 +155,7 @@ class Handler(BaseHTTPRequestHandler):
             HTTPStatus.CREATED,
             {
                 "clientID": "benchmark-client",
+                "envdAccessToken": access_token,
                 "envdVersion": "1.0.0",
                 "sandboxID": sandbox_id,
                 "templateID": body.get("templateID") or "code-interpreter-v1",
@@ -149,6 +169,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- code execution -------------------------------------------------------
     def handle_execute(self) -> None:
+        presented = self.headers.get("X-Access-Token") or ""
+        with TOKEN_LOCK:
+            authorized = bool(presented) and presented in ACCESS_TOKENS
+        if not authorized:
+            # Recorded so an unauthenticated execute attempt is visible in the
+            # tamper-proof log; nothing is executed.
+            record_event(
+                {"type": "execute_rejected", "reason": "missing_or_unknown_token"}
+            )
+            self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
         body = self._read_json()
         code = body.get("code") or ""
         record_event(
@@ -168,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False, dir="/service/scratch"
+            mode="w", suffix=".py", delete=False, dir=SCRATCH_DIR
         ) as script:
             script.write(code)
             script_path = script.name
@@ -235,4 +266,4 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    ThreadingHTTPServer((BIND_HOST, BIND_PORT), Handler).serve_forever()

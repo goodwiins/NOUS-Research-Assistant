@@ -17,9 +17,59 @@ from src.core.config import settings
 from src.core.database import get_db_sync
 from src.models.organization import Organization
 from src.models.quality_metrics import SearchEvent, SearchSession
+from src.models.search import SearchQuery
 from src.models.user import User
 
 logger = logging.getLogger(__name__)
+
+
+def analytics_window(
+    days_back: int,
+    start_date: Optional[datetime],
+    end_date: Optional[datetime],
+) -> Tuple[datetime, datetime]:
+    """``[start, end)`` for an analytics query, as naive UTC like the columns.
+
+    An explicit ``start_date``/``end_date`` wins; otherwise the window is the
+    last ``days_back`` days up to now.
+    """
+    end = end_date or datetime.utcnow()
+    return start_date or end - timedelta(days=days_back), end
+
+
+def _query_top_documents(
+    db: Session, organization_id: Any, cutoff_date: datetime, end_date: datetime
+) -> List[Any]:
+    """Most-accessed documents for one organization (``/insights``).
+
+    ``search_events.search_query_id`` has no FK, so every joined table is
+    filtered by org, not only ``documents``: an event from another org pointed
+    at this org's query must not count (same rule as content-usage analytics).
+    """
+    return db.execute(
+        text("""
+        SELECT
+            d.id,
+            d.title,
+            COUNT(DISTINCT s.user_id) as unique_users,
+            COUNT(*) as access_count
+        FROM search_results sr
+        JOIN documents d ON sr.document_id = d.id
+        JOIN search_queries sq ON sr.search_query_id = sq.id
+        JOIN search_events e ON sq.id = e.search_query_id
+        JOIN search_sessions s ON e.session_id = s.id
+        WHERE d.organization_id = :org_id
+            AND sq.organization_id = :org_id
+            AND e.organization_id = :org_id
+            AND s.organization_id = :org_id
+            AND e.created_at >= :cutoff_date
+            AND e.created_at < :end_date
+        GROUP BY d.id, d.title
+        ORDER BY unique_users DESC, access_count DESC
+        LIMIT 10
+    """),
+        {"org_id": organization_id, "cutoff_date": cutoff_date, "end_date": end_date},
+    ).fetchall()
 
 
 class BehaviorPattern(Enum):
@@ -88,46 +138,93 @@ class UserBehaviorService:
         search_type: str,
         results_count: int,
         response_time: float,
-        user_id: Optional[str] = None,
+        user_id: str,
+        organization_id: Optional[str],
         search_query_id: Optional[str] = None,
         page_number: int = 1,
         filters_applied: Optional[Dict[str, Any]] = None,
         sort_order: Optional[str] = None,
-    ) -> SearchEvent:
-        """Track a search event for behavior analysis"""
+    ) -> Optional[SearchEvent]:
+        """Track a search event for behavior analysis.
+
+        ``session_id`` is the client token that ``POST /sessions`` returned
+        (``SearchSession.session_id``), not the row's primary key. The session
+        must belong to the caller (same user and organization); otherwise
+        ``None`` is returned and nothing is written. The event carries the
+        caller's ``organization_id`` (NOT NULL on ``search_events``) and points
+        at the session row's primary key.
+        """
+
+        if not organization_id:
+            return None
+        # Validate client-supplied ids before opening a session: a malformed
+        # value is the caller's error (the route maps ValueError to 422).
+        org_uuid = uuid.UUID(str(organization_id))
+        user_uuid = uuid.UUID(str(user_id))
+        query_uuid = uuid.UUID(str(search_query_id)) if search_query_id else None
 
         db = next(get_db_sync())
 
         try:
-            # Create search event
+            session = (
+                db.query(SearchSession)
+                .filter(
+                    SearchSession.session_id == session_id,
+                    SearchSession.user_id == user_uuid,
+                    SearchSession.organization_id == org_uuid,
+                )
+                .first()
+            )
+            if session is None:
+                return None
+
+            # ``search_events.search_query_id`` has no FK, and content-usage
+            # analytics joins through it, so a foreign id would plant this
+            # event in another org's analytics. Accept only the caller's own.
+            if query_uuid is not None:
+                own_query = (
+                    db.query(SearchQuery)
+                    .filter(
+                        SearchQuery.id == query_uuid,
+                        SearchQuery.organization_id == org_uuid,
+                    )
+                    .first()
+                )
+                if own_query is None:
+                    return None
+
             search_event = SearchEvent(
-                session_id=(
-                    uuid.UUID(session_id) if isinstance(session_id, str) else session_id
-                ),
+                session_id=session.id,
                 query=query,
                 search_type=search_type,
                 results_count=results_count,
                 response_time=response_time,
-                user_id=uuid.UUID(user_id) if user_id else None,
-                search_query_id=uuid.UUID(search_query_id) if search_query_id else None,
+                user_id=user_uuid,
+                organization_id=org_uuid,
+                search_query_id=query_uuid,
                 page_number=page_number,
                 filters_applied=filters_applied,
                 sort_order=sort_order,
             )
-
             db.add(search_event)
+
+            session.search_count = (session.search_count or 0) + 1
+            session.total_response_time = (
+                session.total_response_time or 0.0
+            ) + response_time
+            session.avg_response_time = (
+                session.total_response_time / session.search_count
+            )
+
             db.commit()
             db.refresh(search_event)
 
-            # Update session metrics
-            await self._update_session_metrics(session_id, search_event, db)
-
-            logger.info(f"Tracked search event: {query} for user {user_id}")
+            logger.info("Tracked search event for user %s", user_id)
             return search_event
 
-        except Exception as e:
+        except Exception:
             db.rollback()
-            logger.error(f"Failed to track search event: {e}")
+            logger.error("Failed to track search event", exc_info=True)
             raise
         finally:
             db.close()
@@ -331,14 +428,24 @@ class UserBehaviorService:
             db.close()
 
     async def get_behavior_trends(
-        self, organization_id: str, days_back: int = 30, group_by: str = "day"
+        self,
+        organization_id: str,
+        days_back: int = 30,
+        group_by: str = "day",
+        *,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Get behavior trends for organization"""
+        """Get behavior trends for organization.
+
+        The window is ``[start_date, end_date)`` when given (naive UTC),
+        otherwise the last ``days_back`` days.
+        """
 
         db = next(get_db_sync())
 
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+            cutoff_date, end_date = analytics_window(days_back, start_date, end_date)
 
             # Get daily/weekly/monthly aggregates
             if group_by == "day":
@@ -359,10 +466,15 @@ class UserBehaviorService:
                 FROM search_sessions
                 WHERE organization_id = :org_id
                     AND start_time >= :cutoff_date
+                    AND start_time < :end_date
                 GROUP BY period
                 ORDER BY period
             """),  # nosec: B608 - group_by constrained to enum-derived literal values
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
+                {
+                    "org_id": organization_id,
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
+                },
             ).fetchall()
 
             # Query search event trends
@@ -377,10 +489,15 @@ class UserBehaviorService:
                 FROM search_events
                 WHERE organization_id = :org_id
                     AND created_at >= :cutoff_date
+                    AND created_at < :end_date
                 GROUP BY period
                 ORDER BY period
             """),  # nosec: B608 - group_by constrained to enum-derived literal values
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
+                {
+                    "org_id": organization_id,
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
+                },
             ).fetchall()
 
             # Query user engagement trends
@@ -393,12 +510,18 @@ class UserBehaviorService:
                     AVG(CASE WHEN e.user_rating IS NOT NULL THEN e.user_rating END) as avg_satisfaction
                 FROM search_sessions s
                 LEFT JOIN search_events e ON s.id = e.session_id
+                    AND e.organization_id = :org_id
                 WHERE s.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
+                    AND s.start_time < :end_date
                 GROUP BY period
                 ORDER BY period
             """),  # nosec: B608 - group_by constrained to enum-derived literal values
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
+                {
+                    "org_id": organization_id,
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
+                },
             ).fetchall()
 
             return {
@@ -461,6 +584,7 @@ class UserBehaviorService:
                     AVG(CASE WHEN e.clicked_results > 0 THEN 1 ELSE 0 END) as success_rate
                 FROM search_sessions s
                 LEFT JOIN search_events e ON s.id = e.session_id
+                    AND e.organization_id = :org_id
                 WHERE s.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
             """),
@@ -478,6 +602,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY e.query
                 ORDER BY search_count DESC
@@ -496,6 +621,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY e.search_type
                 ORDER BY count DESC
@@ -512,6 +638,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                 GROUP BY hour
                 ORDER BY search_count DESC
@@ -521,26 +648,9 @@ class UserBehaviorService:
             ).fetchall()
 
             # Get most accessed documents
-            top_documents = db.execute(
-                text("""
-                SELECT
-                    d.id,
-                    d.title,
-                    COUNT(DISTINCT s.user_id) as unique_users,
-                    COUNT(*) as access_count
-                FROM search_results sr
-                JOIN documents d ON sr.document_id = d.id
-                JOIN search_queries sq ON sr.search_query_id = sq.id
-                JOIN search_events e ON sq.id = e.search_query_id
-                JOIN search_sessions s ON e.session_id = s.id
-                WHERE d.organization_id = :org_id
-                    AND e.created_at >= :cutoff_date
-                GROUP BY d.id, d.title
-                ORDER BY unique_users DESC, access_count DESC
-                LIMIT 10
-            """),
-                {"org_id": organization_id, "cutoff_date": cutoff_date},
-            ).fetchall()
+            top_documents = _query_top_documents(
+                db, organization_id, cutoff_date, datetime.utcnow()
+            )
 
             # Calculate engagement trend (compare with previous period)
             prev_cutoff = cutoff_date - timedelta(days=days_back)
@@ -614,6 +724,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
                     AND e.user_rating IS NOT NULL
             """),
@@ -629,6 +740,7 @@ class UserBehaviorService:
                 FROM search_events e
                 JOIN search_sessions s ON e.session_id = s.id
                 WHERE s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND e.created_at >= :cutoff_date
             """),
                 {"org_id": organization_id, "cutoff_date": cutoff_date},
@@ -849,10 +961,20 @@ class UserBehaviorService:
         return recommendations
 
     async def identify_behavior_patterns(
-        self, organization_id: str, min_sessions: int = 5
+        self,
+        organization_id: str,
+        min_sessions: int = 5,
+        *,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Identify user behavior patterns in the organization"""
+        """Identify user behavior patterns in the organization.
 
+        The window is ``[start_date, end_date)`` when given (naive UTC),
+        otherwise the last 30 days.
+        """
+
+        cutoff_date, end_date = analytics_window(30, start_date, end_date)
         db = next(get_db_sync())
 
         try:
@@ -872,14 +994,18 @@ class UserBehaviorService:
                 JOIN search_sessions s ON u.id = s.user_id
                 JOIN search_events e ON s.id = e.session_id
                 WHERE u.organization_id = :org_id
+                    AND s.organization_id = :org_id
+                    AND e.organization_id = :org_id
                     AND s.start_time >= :cutoff_date
+                    AND s.start_time < :end_date
                 GROUP BY u.id, u.first_name, u.last_name
                 HAVING COUNT(s.id) >= :min_sessions
                 ORDER BY search_count DESC
             """),
                 {
                     "org_id": organization_id,
-                    "cutoff_date": datetime.utcnow() - timedelta(days=30),
+                    "cutoff_date": cutoff_date,
+                    "end_date": end_date,
                     "min_sessions": min_sessions,
                 },
             ).fetchall()
@@ -902,7 +1028,9 @@ class UserBehaviorService:
                     avg_rating=user.avg_rating,
                 )
 
-                patterns[pattern.value].append(
+                # Response buckets are plural ("power_users"); the enum value
+                # alone raised KeyError for every classified user (GOO-691).
+                patterns[f"{pattern.value}s"].append(
                     {
                         "user_id": str(user.id),
                         "name": f"{user.first_name} {user.last_name}",
@@ -969,26 +1097,6 @@ class UserBehaviorService:
             )
 
         return report
-
-    async def _update_session_metrics(
-        self, session_id: str, event: SearchEvent, db: Session
-    ):
-        """Update session metrics when a new event is added"""
-
-        session = (
-            db.query(SearchSession)
-            .filter(SearchSession.session_id == session_id)
-            .first()
-        )
-
-        if session:
-            session.search_count += 1
-            session.total_response_time += event.response_time
-            session.avg_response_time = (
-                session.total_response_time / session.search_count
-            )
-
-            db.commit()
 
     def _calculate_behavior_metrics(
         self,

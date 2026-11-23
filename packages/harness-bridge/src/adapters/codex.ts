@@ -135,18 +135,27 @@ export class CodexAdapter implements HarnessAdapter {
           this.queue.fail(e);
         },
       );
-      const reply = await this.rpc.call("initialize", {
-        clientInfo: { name: "nous_harness_bridge", version: "0.1.0" },
-        capabilities: { experimentalApi: true },
-      });
-      if (
-        !record(reply) ||
-        !string(reply.userAgent) ||
-        this.version === undefined ||
-        !reply.userAgent.includes(`/${this.version}`)
-      )
-        throw new Error("unsupported Codex handshake");
-      await this.rpc.notify("initialized");
+      try {
+        const reply = await this.rpc.call("initialize", {
+          clientInfo: { name: "nous_harness_bridge", version: "0.1.0" },
+          capabilities: { experimentalApi: true },
+        });
+        if (
+          !record(reply) ||
+          !string(reply.userAgent) ||
+          this.version === undefined ||
+          !reply.userAgent.includes(`/${this.version}`)
+        )
+          throw new Error("unsupported Codex handshake");
+        await this.rpc.notify("initialized");
+      } catch (error) {
+        // Never leave a half-initialized app-server running. The rejection
+        // stays memoized on purpose: closing the transport fails this
+        // adapter's event queue, so it cannot be reused; callers create a
+        // new adapter to retry.
+        await this.rpc.close().catch(() => {});
+        throw error;
+      }
     })();
     return this.boot;
   }

@@ -27,13 +27,12 @@ The system integrates with the existing Multimodal Enterprise RAG System compone
 
 ### Step 1: Database Setup
 
-The analytics schema is already defined in `database/migrations/007_knowledge_graph_analytics_dashboard.sql`.
+The schema comes from the Alembic chain in `backend/alembic/`. The standalone `007_knowledge_graph_analytics_dashboard.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
 
-To apply the migration:
+To apply it:
 ```bash
-# Run the migration
-cd /path/to/project
-psql -h localhost -U postgres -d multimodal_rag -f database/migrations/007_knowledge_graph_analytics_dashboard.sql
+cd /path/to/project/backend
+alembic upgrade head
 
 # Verify tables were created
 psql -h localhost -U postgres -d multimodal_rag -c "\dt analytics_*"

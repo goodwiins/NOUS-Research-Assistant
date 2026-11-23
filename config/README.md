@@ -9,7 +9,7 @@ Application and deployment configuration that is not Helm or Terraform.
   `docker-compose.development.yml`, `docker-compose.ci.yml` and
   `docker-compose.prod.yml` are symlinks into this directory.
 - `environments/` holds the environment templates `.env.example`,
-  `.env.azure` and `.env.production` (hidden files; look with `ls -A`). They
+  `.env.azure` and `.env.prod` (hidden files; look with `ls -A`). They
   are templates; never commit real credentials.
 - `security/monitoring-security.yml` is monitoring-related security
   configuration.

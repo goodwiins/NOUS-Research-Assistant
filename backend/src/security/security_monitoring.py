@@ -25,6 +25,7 @@ import yaml
 from jinja2 import Template
 from psycopg2 import sql
 
+from src.core.background_tasks import spawn
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -822,8 +823,9 @@ class SecurityMonitoringService:
                     # so asyncio.run() is normally safe. Guard against nested loops.
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(
-                            self.alert_manager.process_security_event(event)
+                        spawn(
+                            self.alert_manager.process_security_event(event),
+                            loop=loop,
                         )
                     except RuntimeError:
                         asyncio.run(self.alert_manager.process_security_event(event))

@@ -13,6 +13,7 @@ from celery import Celery
 from celery.signals import beat_init, celeryd_init, worker_process_init
 
 from src.core.config import settings
+from src.core.url_redaction import redact_url
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,7 @@ celery_app.conf.update(
     task_time_limit=600,
 )
 
-logger.info(f"Celery app configured with broker: {settings.REDIS_URL[:20]}...")
+logger.info("Celery app configured with broker: %s", redact_url(settings.REDIS_URL))
 
 
 @celeryd_init.connect

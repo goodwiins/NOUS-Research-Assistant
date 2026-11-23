@@ -2,7 +2,9 @@
 Text embedding generation service
 """
 
+import asyncio
 import logging
+import threading
 import time
 from typing import Any, Dict, List, Optional, Union
 
@@ -58,18 +60,50 @@ class EmbeddingService:
         self.embedding_provider = "sentence_transformers"  # default provider
         self._initialized = False
         self.use_simple_fallback = False
+        self._local_model_ready = False
+        self._local_dimension: Optional[int] = None
+        self._local_model_lock = threading.Lock()
         if not lazy:
             self._ensure_initialized()
+            if self.embedding_provider == "sentence_transformers":
+                self._ensure_local_model()
 
     def _ensure_initialized(self):
-        """Lazily initialize the model and provider availability checks"""
+        """Resolve the provider. Cheap: never loads the local model.
+
+        Priority: cohere > azure_openai > sentence_transformers > fallback.
+        The sentence-transformers model is loaded only when an encode actually
+        needs it (``_ensure_local_model``), so a Cohere/Azure deployment never
+        pays the load, and async callers never pay it on the event loop
+        (GOO-642/IS-7).
+        """
         if self._initialized:
             return
-        self._load_model()
-        # Priority: cohere > azure_openai > sentence_transformers > fallback
         if not self._check_cohere_availability():
             self._check_azure_availability()
         self._initialized = True
+
+    def _ensure_local_model(self) -> None:
+        """Load the sentence-transformers model (or simple fallback) once.
+
+        Blocking; async code calls it through ``asyncio.to_thread``. The
+        provider's dimension (Cohere/Azure) is kept as the service dimension;
+        the local model's own dimension is kept in ``_local_dimension``.
+        """
+        if self._local_model_ready:
+            return
+        with self._local_model_lock:
+            if self._local_model_ready:
+                return
+            provider_dimension = self.embedding_dimension
+            self._load_model()
+            self._local_dimension = self.embedding_dimension
+            if (
+                self.embedding_provider != "sentence_transformers"
+                and provider_dimension is not None
+            ):
+                self.embedding_dimension = provider_dimension
+            self._local_model_ready = True
 
     def _check_cohere_availability(self) -> bool:
         """Check if Cohere embed service is available and set as preferred provider"""
@@ -356,24 +390,21 @@ class EmbeddingService:
             # Use provided model or default model for sentence transformers
             model_to_use = request.model if request.model else self.model_name
 
-            # Check if we should use simple fallback
-            if hasattr(self, "use_simple_fallback") and self.use_simple_fallback:
-                # Use simple fallback service
-                embedding = self.simple_service.encode([request.text])[0]
-                embedding_dimension = self.embedding_dimension
-                embedding_list = embedding.tolist()
+            # Model load and encode are blocking CPU work: run them in a
+            # worker thread so the event loop keeps serving (GOO-642/IS-7).
+            await asyncio.to_thread(self._ensure_local_model)
+            # Resolve after the load: it may switch to the fallback model.
+            model_to_use = request.model if request.model else self.model_name
+            if self.use_simple_fallback:
+                embedding = await asyncio.to_thread(
+                    self.simple_service.encode, [request.text]
+                )
+                embedding_dimension = self._local_dimension
+                embedding_list = embedding[0].tolist()
             else:
-                # If different model requested, load it
-                if model_to_use != self.model_name:
-                    temp_model = _get_sentence_transformer(model_to_use, self.device)
-                    embedding = temp_model.encode(request.text, convert_to_tensor=True)
-                    embedding_dimension = temp_model.get_sentence_embedding_dimension()
-                else:
-                    embedding = self.model.encode(request.text, convert_to_tensor=True)
-                    embedding_dimension = self.embedding_dimension
-
-                # Convert to list for JSON serialization
-                embedding_list = embedding.cpu().numpy().tolist()
+                embedding_list, embedding_dimension = await asyncio.to_thread(
+                    self._encode_local, model_to_use, request.text
+                )
 
             processing_time = time.time() - start_time
 
@@ -450,17 +481,22 @@ class EmbeddingService:
                     errors=errors,
                 )
 
-            # If different model requested, load it
-            if model_to_use != self.model_name:
-                temp_model = _get_sentence_transformer(model_to_use, self.device)
-                embeddings = temp_model.encode(valid_texts, convert_to_tensor=True)
-                embedding_dimension = temp_model.get_sentence_embedding_dimension()
+            # Off the event loop: model load + encode (GOO-642/IS-7).
+            await asyncio.to_thread(self._ensure_local_model)
+            # Resolve after the load: it may switch to the fallback model.
+            model_to_use = request.model if request.model else self.model_name
+            if self.use_simple_fallback:
+                encoded = await asyncio.to_thread(
+                    self.simple_service.encode, valid_texts
+                )
+                embedding_lists = [row.tolist() for row in encoded]
+                embedding_dimension = self._local_dimension
             else:
-                embeddings = self.model.encode(valid_texts, convert_to_tensor=True)
-                embedding_dimension = self.embedding_dimension
+                embedding_lists, embedding_dimension = await asyncio.to_thread(
+                    self._encode_local, model_to_use, valid_texts
+                )
 
-            # Convert to list and restore original order
-            embedding_lists = embeddings.cpu().numpy().tolist()
+            # Restore original order
             all_embeddings = [None] * len(request.texts)
 
             for i, original_index in enumerate(valid_indices):
@@ -499,6 +535,20 @@ class EmbeddingService:
                 ],
                 provider="sentence_transformers",
             )
+
+    def _encode_local(self, model_name: str, texts: Union[str, List[str]]) -> tuple:
+        """Encode with sentence-transformers (blocking; run in a thread).
+
+        Returns ``(embedding_as_lists, dimension)``.
+        """
+        if model_name != self.model_name:
+            model = _get_sentence_transformer(model_name, self.device)
+            dimension = model.get_sentence_embedding_dimension()
+        else:
+            model = self.model
+            dimension = self._local_dimension
+        embeddings = model.encode(texts, convert_to_tensor=True)
+        return embeddings.cpu().numpy().tolist(), dimension
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the current model"""

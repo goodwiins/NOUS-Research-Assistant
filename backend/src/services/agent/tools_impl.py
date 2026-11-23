@@ -10,7 +10,6 @@ import json
 import logging
 import math
 import re
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, cast
@@ -123,25 +122,14 @@ INGEST_STATUS_COMPLETE_LINK_FAILED = "ingestion_complete_link_failed"
 _INGEST_FAILURE_STATUSES = frozenset({INGEST_STATUS_FAILED, INGEST_STATUS_PARTIAL})
 
 
-# Cache the LLM client used by summarize/compare tools at module scope so
-# we don't pay the ~50ms client-build cost on every invocation. Mirrors the
-# `_REFLECTION_LLM` pattern in src/services/agent/reflection.py.
-_TOOL_LLM = None
-_TOOL_LLM_LOCK = threading.Lock()
-
-
 def _get_tool_llm():
-    """Return a cached LangChain chat model for use in tool implementations."""
-    global _TOOL_LLM
-    if _TOOL_LLM is not None:
-        return _TOOL_LLM
-    with _TOOL_LLM_LOCK:
-        if _TOOL_LLM is not None:  # re-check inside lock
-            return _TOOL_LLM
-        from src.services.agent.graph import _build_llm
+    """Return the LangChain chat model for use in tool implementations."""
+    # No module-level cache: graph._build_llm caches by credential
+    # fingerprint, so a rotated Azure key/endpoint gets a fresh client
+    # (audit AG-1).
+    from src.services.agent.graph import _build_llm
 
-        _TOOL_LLM = _build_llm()
-    return _TOOL_LLM
+    return _build_llm()
 
 
 # ---------------------------------------------------------------------------

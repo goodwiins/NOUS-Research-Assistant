@@ -436,8 +436,8 @@ class ArXivChangeTracker:
             for paper_id in stored_ids & current_ids:
                 org_state[paper_id].pop("miss_count", None)
             logger.info(
-                "deletion detection skipped (scan truncated)",
-                organization_id=str(organization_id),
+                "deletion detection skipped (scan truncated) organization_id=%s",
+                organization_id,
             )
             return changes
 

@@ -37,32 +37,12 @@ Run migrations: `cd backend && alembic upgrade head`
 Create new: `alembic revision --rev-id xx01_short_slug -m "describe_change"`, then write `upgrade()`/`downgrade()` by hand (no `--autogenerate`; see `backend/alembic/README.md`)  
 Roll back one: `alembic downgrade -1`
 
-### Raw SQL migrations (`database/migrations/`)
+### Standalone SQL (`database/`)
 
-Legacy SQL files — used for PostgreSQL features (views, triggers, partitioning) that Alembic doesn't autogenerate. Applied manually or via deploy scripts. These have numeric prefix collisions (`001_*`, `007_*`, `008_*`) — **do not rely on filename order; read each file's header comment for application context.**
-
-Key files:
-
-| File | Purpose |
-|---|---|
-| `006_document_upload_schema.sql` | Document storage columns |
-| `007_analytics_schema.sql` | Analytics event tables |
-| `009_realtime_status_optimizations.sql` | Realtime status indexes |
-| `011_realtime_document_status_enhancements.sql` | Final realtime status schema |
-| `012_ai_document_qa_system.sql` | QA system tables |
-
-Also in `database/`:
-
-| File | Purpose |
-|---|---|
-| `indexing_strategy.sql` | Index creation guidelines + DDL |
-| `partitioning_strategy.sql` | Table partitioning (analytics events) |
-| `performance_optimization.sql` | PG tuning queries |
-| `monitoring_schema.sql` | Monitoring/metrics tables |
-| `data_retention_policies.sql` | TTL + cleanup jobs |
-| `triggers/` | PG trigger functions |
-| `views/` | Materialized + regular views |
-| `procedures/` | Stored procedures |
+There are no raw SQL migrations: the schema comes only from Alembic. The legacy
+`database/migrations/` SQL was deleted on 2026-11-22 (GOO-681, GOO-685); none of
+it applied to a real database. What remains in `database/` and who reads it is
+listed in [`database/README.md`](../../database/README.md).
 
 ## Neo4j schema
 

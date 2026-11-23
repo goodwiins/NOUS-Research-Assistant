@@ -450,6 +450,25 @@ from .integration_handoff import IntegrationHandoff
 from .native_artifact_intent import NativeArtifactIntent
 from .tool_action import IntegrationToolAction
 
+# GOO-686: register the realtime/WebSocket status tables on Base.metadata so
+# the r6h3 model baseline creates them and the `alembic check` drift gate
+# compares them (ws01_websocket_status_tables backfills existing DBs). Only
+# the model classes are exported; the module's Priority / UpdateType /
+# ConnectionStatus enums are deliberately left out of this namespace.
+from .websocket_status import (  # noqa: E402
+    ConnectionEvent,
+    NotificationTemplate,
+    StatusUpdate,
+    WebSocketConnection,
+)
+
+__all__ += [
+    "ConnectionEvent",
+    "NotificationTemplate",
+    "StatusUpdate",
+    "WebSocketConnection",
+]
+
 __all__ += [
     "HarnessSession",
     "BridgeDevice",

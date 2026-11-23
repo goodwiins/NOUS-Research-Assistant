@@ -51,9 +51,7 @@ async def test_rebuild_does_not_create_indexes(monkeypatch: pytest.MonkeyPatch) 
         lambda doc_id, db: rebuilt.append(doc_id),
     )
 
-    response = await search_api.rebuild_search_indexes(
-        current_user=_admin(), db=MagicMock()
-    )
+    response = search_api.rebuild_search_indexes(current_user=_admin(), db=MagicMock())
 
     assert rebuilt == ["d1", "d2"]
     # Same response keys as before; the flag/message are now truthful.
@@ -79,7 +77,7 @@ async def test_rebuild_rejects_non_admin(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     user = SimpleNamespace(id="u", role=UserRole.USER, organization_id="org-1")
     with pytest.raises(HTTPException) as exc:
-        await search_api.rebuild_search_indexes(current_user=user, db=MagicMock())
+        search_api.rebuild_search_indexes(current_user=user, db=MagicMock())
     assert exc.value.status_code == 403
 
 

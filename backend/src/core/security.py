@@ -13,10 +13,14 @@ The backend accepts two JWT shapes:
 
 import logging
 import secrets
+import threading
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+import anyio
+import anyio.to_thread
 import bcrypt  # Changed from passlib
 import httpx
 import jwt
@@ -34,6 +38,31 @@ logger = logging.getLogger(__name__)
 _supabase_jwks_cache: Optional[Dict] = None
 _supabase_jwks_cache_fetched_at: Optional[float] = None
 _SUPABASE_JWKS_TTL_SECONDS = 3600
+_SUPABASE_JWKS_FETCH_TIMEOUT_SECONDS = 5.0
+# httpx timeouts are per phase and do not cover DNS resolution, so the whole
+# fetch also has a hard deadline; the lock holder never stays longer.
+_SUPABASE_JWKS_FETCH_DEADLINE_SECONDS = 8.0
+# Waiting for another thread's fetch is bounded by that deadline, so a hung
+# fetch cannot pin every threadpool worker queued on the lock.
+_SUPABASE_JWKS_LOCK_WAIT_SECONDS = _SUPABASE_JWKS_FETCH_DEADLINE_SECONDS + 1.0
+# Keys older than this are not served even when every refresh fails, so a
+# rotated-out key stops verifying within a day of a long Supabase outage.
+_SUPABASE_JWKS_MAX_STALE_SECONDS = 24 * 3600
+# After a failed fetch, wait this long before trying Supabase again, so an
+# outage costs one timeout per window instead of one per request.
+_SUPABASE_JWKS_FAILURE_BACKOFF_SECONDS = 30.0
+_supabase_jwks_retry_not_before: Optional[float] = None
+# Serialises network fetches (cold fetch and background refresh).
+_supabase_jwks_lock = threading.Lock()
+# Guards the "is a background refresh already running" check.
+_supabase_jwks_refresh_guard = threading.Lock()
+_supabase_jwks_refresh_thread: Optional[threading.Thread] = None
+# Set by ``verify_token_async`` around an inline (event-loop) verification.
+# A lookup that would have to fetch records that here and returns ``None``
+# instead of blocking, and the caller re-runs the check in a worker thread.
+_jwks_inline_probe: ContextVar[Optional[List[bool]]] = ContextVar(
+    "_jwks_inline_probe", default=None
+)
 
 # JWT Bearer scheme
 security = HTTPBearer()
@@ -147,37 +176,175 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _get_supabase_jwks() -> Optional[Dict]:
-    """Fetch and cache JWKS from Supabase for ES256 verification.
+def _fetch_supabase_jwks_now() -> None:
+    """Fetch the JWKS over the network and update the cache (blocking).
 
-    Cached for _SUPABASE_JWKS_TTL_SECONDS so a Supabase key rotation is
-    picked up without a restart. If the refetch after expiry fails, the
-    stale cache is returned (with a warning) rather than None'd out —
-    working keys must never be dropped just because one refresh attempt
-    failed.
+    Callers must hold ``_supabase_jwks_lock``. A failure leaves any existing
+    cache untouched and arms the negative cache so the next attempt waits
+    ``_SUPABASE_JWKS_FAILURE_BACKOFF_SECONDS``; during a Supabase outage
+    requests are not each paying a 5 s timeout.
     """
     global _supabase_jwks_cache, _supabase_jwks_cache_fetched_at
-    now = time.time()
-    if (
-        _supabase_jwks_cache is not None
-        and _supabase_jwks_cache_fetched_at is not None
-        and now - _supabase_jwks_cache_fetched_at < _SUPABASE_JWKS_TTL_SECONDS
-    ):
-        return _supabase_jwks_cache
+    global _supabase_jwks_retry_not_before
     try:
         url = f"{settings.SUPABASE_URL}/auth/v1/.well-known/jwks.json"
-        resp = httpx.get(url, timeout=5.0)
+        resp = _http_get_with_deadline(url)
         resp.raise_for_status()
-        _supabase_jwks_cache = resp.json()
-        _supabase_jwks_cache_fetched_at = now
+        payload = resp.json()
+        keys = payload.get("keys") if isinstance(payload, dict) else None
+        if not isinstance(keys, list) or not keys:
+            # A 200 with no usable keys must not replace keys that work.
+            raise ValueError("JWKS response has no keys")
+        _supabase_jwks_cache = payload
+        _supabase_jwks_cache_fetched_at = time.time()
+        _supabase_jwks_retry_not_before = None
         logger.info("Fetched Supabase JWKS successfully")
-        return _supabase_jwks_cache
     except Exception as e:
+        _supabase_jwks_retry_not_before = (
+            time.time() + _SUPABASE_JWKS_FAILURE_BACKOFF_SECONDS
+        )
         logger.warning(f"Failed to fetch Supabase JWKS: {e}")
         if _supabase_jwks_cache is not None:
             logger.warning("Using stale cached Supabase JWKS after refetch failure")
-            return _supabase_jwks_cache
+
+
+def _http_get_with_deadline(url: str) -> httpx.Response:
+    """``httpx.get`` with an overall deadline, not just per-phase timeouts.
+
+    The request runs in a helper thread. Past the deadline the caller gives
+    up (and releases the fetch lock); the abandoned request finishes on its
+    own and its result is discarded.
+    """
+    outcome: Dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            outcome["response"] = httpx.get(
+                url, timeout=_SUPABASE_JWKS_FETCH_TIMEOUT_SECONDS
+            )
+        except BaseException as exc:  # re-raised in the caller's thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run, name="supabase-jwks-fetch", daemon=True)
+    worker.start()
+    worker.join(_SUPABASE_JWKS_FETCH_DEADLINE_SECONDS)
+    if worker.is_alive():
+        raise TimeoutError(
+            f"JWKS fetch exceeded {_SUPABASE_JWKS_FETCH_DEADLINE_SECONDS}s deadline"
+        )
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["response"]
+
+
+def _in_jwks_failure_backoff(now: float) -> bool:
+    return (
+        _supabase_jwks_retry_not_before is not None
+        and now < _supabase_jwks_retry_not_before
+    )
+
+
+def _background_jwks_refresh() -> None:
+    global _supabase_jwks_refresh_thread
+    try:
+        if not _supabase_jwks_lock.acquire(timeout=_SUPABASE_JWKS_LOCK_WAIT_SECONDS):
+            return
+        try:
+            _fetch_supabase_jwks_now()
+        finally:
+            _supabase_jwks_lock.release()
+    finally:
+        _supabase_jwks_refresh_thread = None
+
+
+def _schedule_jwks_refresh() -> None:
+    """Start at most one background refresh of an expired JWKS cache."""
+    global _supabase_jwks_refresh_thread
+    with _supabase_jwks_refresh_guard:
+        if _supabase_jwks_refresh_thread is not None:
+            return
+        thread = threading.Thread(
+            target=_background_jwks_refresh,
+            name="supabase-jwks-refresh",
+            daemon=True,
+        )
+        _supabase_jwks_refresh_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            # Otherwise the marker stays set and no refresh ever runs again.
+            _supabase_jwks_refresh_thread = None
+            logger.warning("Could not start Supabase JWKS refresh", exc_info=True)
+
+
+def _servable_jwks(now: float) -> Optional[Dict]:
+    """The cached key set, unless it is missing or past the maximum age."""
+    cache = _supabase_jwks_cache
+    fetched_at = _supabase_jwks_cache_fetched_at
+    if cache is None or fetched_at is None:
         return None
+    if now - fetched_at >= _SUPABASE_JWKS_MAX_STALE_SECONDS:
+        return None
+    return cache
+
+
+def _supabase_jwks_needs_blocking_fetch() -> bool:
+    """True when ``_get_supabase_jwks`` would block on the network.
+
+    That is only the cold path: no servable key set (none cached, or past
+    the maximum age) and not inside the failure backoff. Otherwise expiry is
+    handled by a background refresh and lookups never wait on Supabase.
+    ``verify_token_async`` uses this as a fast path only; the inline probe
+    covers the window where the answer changes before the lookup.
+    """
+    now = time.time()
+    return _servable_jwks(now) is None and not _in_jwks_failure_backoff(now)
+
+
+def _get_supabase_jwks() -> Optional[Dict]:
+    """Return the cached Supabase JWKS for ES256 verification.
+
+    Cached for _SUPABASE_JWKS_TTL_SECONDS so a Supabase key rotation is
+    picked up without a restart. After expiry the stale key set is served
+    immediately while a single background thread refetches (stale-while-
+    revalidate): working keys are never dropped because a refresh failed,
+    and no request waits on Supabase once a key set has been fetched.
+
+    The cold fetch (nothing cached yet) is the only blocking path. It is
+    single-flight under ``_supabase_jwks_lock`` and, after a failure, skipped
+    for _SUPABASE_JWKS_FAILURE_BACKOFF_SECONDS. Async callers must reach it
+    through ``verify_token_async`` so it runs off the event loop.
+    """
+    now = time.time()
+    cache = _servable_jwks(now)
+    if cache is not None:
+        fetched_at = _supabase_jwks_cache_fetched_at or 0.0
+        expired = now - fetched_at >= _SUPABASE_JWKS_TTL_SECONDS
+        if expired and not _in_jwks_failure_backoff(now):
+            _schedule_jwks_refresh()
+        return cache
+
+    if _in_jwks_failure_backoff(now):
+        return None
+    probe = _jwks_inline_probe.get()
+    if probe is not None:
+        # Called inline on the event loop: never block here. The caller
+        # re-runs the verification in a worker thread.
+        probe.append(True)
+        return None
+    if not _supabase_jwks_lock.acquire(timeout=_SUPABASE_JWKS_LOCK_WAIT_SECONDS):
+        logger.warning("Timed out waiting for the Supabase JWKS fetch lock")
+        return None
+    try:
+        # Another thread may have filled the cache (or failed and armed the
+        # backoff) while this one waited for the lock.
+        if _servable_jwks(time.time()) is None and not _in_jwks_failure_backoff(
+            time.time()
+        ):
+            _fetch_supabase_jwks_now()
+        return _servable_jwks(time.time())
+    finally:
+        _supabase_jwks_lock.release()
 
 
 # Column limits the sign-up metadata has to fit (see src/models/user.py and
@@ -444,6 +611,45 @@ def verify_token(token: str) -> Optional[TokenData]:
         logger.error(f"ES256 verification failed: {type(e).__name__}: {e}")
 
     return None
+
+
+async def verify_token_async(
+    token: str,
+    verify: Optional[Callable[[str], Optional[TokenData]]] = None,
+) -> Optional[TokenData]:
+    """``verify_token`` for async callers (middleware, WebSocket handshake).
+
+    Verification is CPU-only except for the cold JWKS fetch. When an ES256
+    token would trigger that fetch, run the whole check in a worker thread
+    so a slow or down Supabase never blocks the event loop; otherwise run
+    inline and skip the thread hop.
+
+    ``verify`` defaults to ``verify_token``; callers pass their own imported
+    reference so a test patching ``<module>.verify_token`` still applies.
+    """
+    verifier = verify or verify_token
+    if not _is_es256_token(token):
+        return verifier(token)
+    if _supabase_jwks_needs_blocking_fetch():
+        return await anyio.to_thread.run_sync(verifier, token)
+    # Inline, but a lookup that would fetch (the backoff or the key set's
+    # age can change after the check above) bails out instead of blocking.
+    probe: List[bool] = []
+    reset_token = _jwks_inline_probe.set(probe)
+    try:
+        result = verifier(token)
+    finally:
+        _jwks_inline_probe.reset(reset_token)
+    if probe:
+        return await anyio.to_thread.run_sync(verifier, token)
+    return result
+
+
+def _is_es256_token(token: str) -> bool:
+    try:
+        return jwt.get_unverified_header(token).get("alg") == "ES256"
+    except jwt.PyJWTError:
+        return False
 
 
 def get_current_user_token(
