@@ -21,7 +21,11 @@ const replay = (): ReplayControl | undefined =>
 let probes = 0;
 
 const harness = {
-  init(useGuard: boolean): void {
+  /**
+   * `unblock` drops one selector from the app's block list, for control
+   * tests that show what the selector keeps out.
+   */
+  init(useGuard: boolean, unblock?: string): void {
     Sentry.init({
       dsn: 'https://public@sentry.replay.test/1',
       replaysSessionSampleRate: 0,
@@ -30,6 +34,7 @@ const harness = {
       integrations: [
         Sentry.replayIntegration({
           ...REPLAY_PRIVACY_OPTIONS,
+          block: REPLAY_PRIVACY_OPTIONS.block.filter((s) => s !== unblock),
           // Send soon after the error so the test is quick. Timing only:
           // what is recorded is unchanged.
           minReplayDuration: 0,

@@ -26,7 +26,8 @@
  *    navigations and history writes pass through it, and replay is stopped
  *    BEFORE the address bar shows a sensitive URL.
  * 3. Links whose target carries a query are blocked (`REPLAY_BLOCK_SELECTORS`):
- *    recorded as empty placeholders, with no `href`.
+ *    recorded as empty placeholders, with no `href`. So is every `iframe`,
+ *    whose `srcdoc`/`src` would otherwise be recorded verbatim (GOO-746).
  *
  * This module deliberately imports no Sentry runtime: callers pass the replay
  * integration, so the browser test can drive the real SDK with these exact
@@ -153,9 +154,16 @@ let uninstall: (() => void) | undefined;
  * through this guard: client navigations, `router.refresh()`, Next's own
  * URL writes and code calling `history` directly. A change TO a sensitive
  * URL stops replay before the address bar changes; a change to a clean URL
- * resumes it afterwards. Back/forward arrive as `popstate`; in the app,
- * Next's restore then also writes the URL with `replaceState`, which passes
- * the wrapper too (the listener covers entries Next does not manage).
+ * resumes it afterwards.
+ *
+ * Back/forward arrive as `popstate`, and the listener is what stops replay in
+ * time. For an entry Next created, Next's restore also writes the URL with
+ * `replaceState` (through the wrapper), but only after the restore, which can
+ * take seconds. For an entry the browser created itself (a fragment
+ * navigation such as an auth redirect to `#access_token=…`, whose history
+ * state is null), Next does nothing at all, and no `hashchange` fires when the
+ * path differs too, so `popstate` is the only signal (GOO-746; the router
+ * browser test covers that case).
  */
 export function installReplayUrlGuard(
   getReplay: () => ReplayControl | undefined
@@ -213,8 +221,16 @@ export function resetReplayPrivacyForTests(): void {
  * `href`/`src` to absolute URLs and never applies the attribute mask to them
  * (SDK 10.78 `transformAttribute`), so `block` is the option that works.
  * Stylesheet `<link>`s are left alone so replays keep their styling.
+ *
+ * Every `iframe` is blocked too (GOO-746). Attributes are recorded verbatim
+ * and text masking never applies to them, so an artifact preview's `srcdoc`
+ * (model-written HTML that can hold user or document content) and a viewer's
+ * `src` would be sent whole; a blocked iframe is a sized placeholder with no
+ * attributes and no contents. `blockAllMedia` already covers `object` and
+ * `embed`, but not `iframe`.
  */
 export const REPLAY_BLOCK_SELECTORS = [
+  'iframe',
   'a[href*="?"]',
   'area[href*="?"]',
   'a[href*="#"][href*="="]',
