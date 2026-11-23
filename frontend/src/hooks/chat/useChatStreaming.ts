@@ -478,6 +478,8 @@ export interface UseChatStreamingReturn {
   input: string;
   setInput: React.Dispatch<React.SetStateAction<string>>;
   isLoading: boolean;
+  /** Loading, streaming, a pending confirmation or an active harness run. */
+  isBusy: boolean;
   handleSubmit: (
     contentOverride?: string,
     historyOverride?: ChatPageMessage[],
@@ -807,6 +809,14 @@ export function useChatStreaming(
   const pendingConfirmation = activeThreadId
     ? (pendingConfirmations[activeThreadId] ?? null)
     : null;
+  /** The one "a turn is in progress" check (GOO-751). Submit, slash commands,
+   * regenerate/edit and the Commands button all gate on it, so none of them
+   * can replace the draft for a send that is then dropped. */
+  const isBusy =
+    isLoading ||
+    storeIsStreaming ||
+    confirmationBelongsToThread(pendingConfirmation, activeThreadId) ||
+    Boolean(harnessConnection.runId);
   // `ownerThreadId` names the thread the confirmation belongs to. It matters
   // on the clear path: falling back to the *viewed* thread deleted the wrong
   // key whenever the user switched threads mid-confirm, stranding a settled
@@ -2139,8 +2149,22 @@ export function useChatStreaming(
       // This identity must be captured before the stream's token refresh can
       // synchronously emit SIGNED_OUT and clear the auth store.
       if (!ownsRenderedSession()) return;
+      const rawContent =
+        typeof contentOverride === 'string' ? contentOverride : input;
+      // A regenerate or edit (`historyOverride`) never owns the composer
+      // draft: whatever the user is typing stays put whether the send is
+      // accepted or rejected. A new turn does: the composer has already
+      // cleared its text, so a rejection puts it back (unless the user has
+      // started typing again) and always says why, instead of dropping it.
+      const ownsDraft = !historyOverride;
+      const rejectSend = (message: string): void => {
+        toast.error(message);
+        if (ownsDraft && !inputValueRef.current && rawContent.trim()) {
+          setInput(rawContent);
+        }
+      };
       if (pdfSubmissionBlocked) {
-        toast.error(
+        rejectSend(
           'Wait for PDF access and branch history to load before sending.'
         );
         return;
@@ -2157,7 +2181,7 @@ export function useChatStreaming(
           branchPage.selectingBranch ||
           branchState.messageFreshness[branchThreadId!] !== 'fresh')
       ) {
-        toast.error('Reload this PDF chat before sending.');
+        rejectSend('Reload this PDF chat before sending.');
         return;
       }
       if (
@@ -2167,7 +2191,7 @@ export function useChatStreaming(
           (!branchPage.message_branching &&
             (branchState.messages[branchThreadId]?.length ?? 0) > 0))
       ) {
-        toast.error('Start a new PDF chat to use this document.');
+        rejectSend('Start a new PDF chat to use this document.');
         return;
       }
       if (
@@ -2181,25 +2205,25 @@ export function useChatStreaming(
               message.parent_message_id === branchIntent.parentMessageId
           ))
       ) {
-        toast.error('Reload this branch before editing or retrying.');
+        rejectSend('Reload this branch before editing or retrying.');
         return;
       }
       const branchParent = branchIntent
         ? branchIntent.parentMessageId
         : (branchPage?.selected_message_id ?? null);
       if (searchParams.get('pdfDocumentId') != null) {
-        toast.error('Resolve or dismiss the PDF request before sending.');
+        rejectSend('Resolve or dismiss the PDF request before sending.');
         return;
       }
       if (pdfContext && harnessConnection.executionProvider !== 'nous') {
-        toast.error('Select NOUS to ask about this PDF.');
+        rejectSend('Select NOUS to ask about this PDF.');
         return;
       }
       if (
         pdfContext &&
         attachmentIds?.some((id) => id !== pdfContext.documentId)
       ) {
-        toast.error('Remove other attachments before asking about one PDF.');
+        rejectSend('Remove other attachments before asking about one PDF.');
         return;
       }
       const turnAttachmentIds = pdfContext
@@ -2207,12 +2231,22 @@ export function useChatStreaming(
         : attachmentIds;
       const ownerUserId = useAuthStore.getState().user?.id;
       const isCurrentSession = captureChatSession();
-      if (submitLockRef.current) {
-        console.warn('[Chat] Send ignored: submit already in flight');
+      if (!rawContent.trim()) return;
+      if (submitLockRef.current || isBusy) {
+        rejectSend(
+          confirmationBelongsToThread(pendingConfirmation, activeThreadId)
+            ? 'Approve or reject the pending action before sending.'
+            : 'Wait for the current reply to finish before sending.'
+        );
         return;
       }
-      const rawContent =
-        typeof contentOverride === 'string' ? contentOverride : input;
+      if (!harnessConnection.canSend) {
+        rejectSend(
+          harnessConnection.disabledReason ??
+            'The selected agent can’t take a message right now.'
+        );
+        return;
+      }
       // Edit/regenerate already contains the persisted quotation. Only a new
       // composer turn owns the current transient PDF selection.
       const quoteContext =
@@ -2221,19 +2255,6 @@ export function useChatStreaming(
         ? composePdfQuestion(rawContent, quoteContext.selectionQuote!)
         : rawContent.trim();
       const originalDraft = quoteContext ? rawContent : content;
-      if (
-        !rawContent.trim() ||
-        isLoading ||
-        storeIsStreaming ||
-        !harnessConnection.canSend
-      ) {
-        console.warn('[Chat] Send ignored by submit guard', {
-          empty: !content,
-          isLoading,
-          storeIsStreaming,
-        });
-        return;
-      }
       submitLockRef.current = true;
       // Stop must also cover the first-send setup awaits before runStreamTurn
       // installs the live stream controller.
@@ -2275,7 +2296,7 @@ export function useChatStreaming(
         setMessages(messages);
         pendingPreflightDraftsRef.current.delete(preflightDraftContextKey);
         pendingPreflightDraftsRef.current.delete(preflightOwner.contextKey);
-        setInput(originalDraft);
+        if (ownsDraft) setInput(originalDraft);
         abandonPreflight();
       };
       const preflightWasSuperseded = (): boolean => {
@@ -2361,14 +2382,16 @@ export function useChatStreaming(
           userMessage,
         ];
         setMessages(newMessages);
-        setInput('');
-        // The optimistic clear above must not erase the originating context's
-        // draft before a Stop/preflight failure can restore it. A later
-        // switch to another context never reads this entry.
-        pendingPreflightDraftsRef.current.set(
-          preflightDraftContextKey,
-          originalDraft
-        );
+        if (ownsDraft) {
+          setInput('');
+          // The optimistic clear above must not erase the originating
+          // context's draft before a Stop/preflight failure can restore it. A
+          // later switch to another context never reads this entry.
+          pendingPreflightDraftsRef.current.set(
+            preflightDraftContextKey,
+            originalDraft
+          );
+        }
         setIsLoading(true);
         preflightAbort.signal.addEventListener('abort', rollbackPreflight, {
           once: true,
@@ -2652,8 +2675,9 @@ export function useChatStreaming(
     [
       ownsRenderedSession,
       input,
-      isLoading,
-      storeIsStreaming,
+      isBusy,
+      pendingConfirmation,
+      activeThreadId,
       draftContextKey,
       initialRouteOwnsDraft,
       authRecoveryRoute?.isNewChatIntent,
@@ -3908,6 +3932,7 @@ export function useChatStreaming(
     input,
     setInput,
     isLoading,
+    isBusy,
     handleSubmit,
     handleStop,
     pendingConfirmation,

@@ -349,6 +349,7 @@ async def get_evidence_meter(
         loaded, classifier_sources = await to_thread_finish_on_cancel(
             _load_sources_and_release,
             db,
+            guard_session=db,
             organization_id=current_user.organization_id,
             source_ids=parsed_source_ids,
             claim=claim,
@@ -413,6 +414,7 @@ async def get_evidence_meter(
             saved_count = await to_thread_finish_on_cancel(
                 _save_and_commit,
                 db,
+                guard_session=db,
                 classifications=classifications,
                 claim_hash=claim_hash,
                 claim_text=claim,
@@ -633,6 +635,7 @@ async def classify_sources_for_claim(
         _loaded, classifier_sources = await to_thread_finish_on_cancel(
             _load_sources_and_release,
             db,
+            guard_session=db,
             organization_id=current_user.organization_id,
             source_ids=source_ids,
             claim=claim,
@@ -662,6 +665,7 @@ async def classify_sources_for_claim(
         saved_count = await to_thread_finish_on_cancel(
             _save_and_commit,
             db,
+            guard_session=db,
             classifications=classifications,
             claim_hash=claim_hash,
             claim_text=claim,
@@ -680,7 +684,7 @@ async def classify_sources_for_claim(
     except HTTPException:
         raise
     except Exception:
-        await to_thread_finish_on_cancel(db.rollback)
+        await to_thread_finish_on_cancel(db.rollback, guard_session=db)
         logger.error("Failed to classify sources")
         raise HTTPException(status_code=500, detail="Classification failed")
 

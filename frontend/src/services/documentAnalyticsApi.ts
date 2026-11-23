@@ -267,6 +267,14 @@ function requireNumber(value: unknown, field: string): number {
   return value;
 }
 
+/**
+ * A number, or `null` when the backend says "not measured" (GOO-745, the
+ * GOO-649/GOO-732 rule): never a made-up 0. Anything else is malformed.
+ */
+function nullableNumber(value: unknown, field: string): number | null {
+  return value === null ? null : requireNumber(value, field);
+}
+
 function requireArray<T>(value: unknown, field: string): T[] {
   if (!Array.isArray(value)) {
     throw new Error(`Unexpected analytics response: ${field}`);
@@ -289,11 +297,16 @@ function requireObject(value: unknown, field: string): Record<string, unknown> {
  */
 export interface SearchPerformanceResponse {
   total_searches: number;
-  avg_response_time: number;
+  /** `null` when no search in the window was timed (GOO-732). */
+  avg_response_time: number | null;
   p95_response_time: number;
   success_rate: number;
   no_results_rate: number;
-  top_queries: Array<{ query: string; count: number; avg_response_time: number }>;
+  top_queries: Array<{
+    query: string;
+    count: number;
+    avg_response_time: number | null;
+  }>;
   search_types: Array<{ type: string; count: number }>;
   errors: unknown[];
 }
@@ -382,7 +395,7 @@ class SearchAnalyticsApiService {
           'search_types'
         ).map((t) => toType(t.type, t.count)),
         totalSearches: requireNumber(performance.total_searches, 'total_searches'),
-        avgResponseTimeMs: requireNumber(
+        avgResponseTimeMs: nullableNumber(
           performance.avg_response_time,
           'avg_response_time'
         ),
@@ -440,7 +453,8 @@ export interface CombinedSearchAnalytics {
   topQueries: CombinedSearchQueryRow[];
   searchTypes: Array<{ name: string; value: number }>;
   totalSearches: number;
-  avgResponseTimeMs: number;
+  /** `null` when no search was timed: show it as unavailable, not 0. */
+  avgResponseTimeMs: number | null;
 }
 
 /**
@@ -570,7 +584,8 @@ export interface DashboardOverview {
   /** Backend time range of the figures, e.g. `24h`. */
   timeRange: string;
   totalSearches: number;
-  avgSearchTimeMs: number;
+  /** `null` when no search was timed: show it as unavailable, not 0. */
+  avgSearchTimeMs: number | null;
   /**
    * `null` when the backend left `user_engagement` out, which it does by design
    * for callers who are not org admins.
@@ -611,7 +626,7 @@ class PerformanceApiService {
     return {
       timeRange: String(response.time_range ?? '24h'),
       totalSearches: requireNumber(search.total_searches, 'total_searches'),
-      avgSearchTimeMs: requireNumber(search.avg_response_time, 'avg_response_time'),
+      avgSearchTimeMs: nullableNumber(search.avg_response_time, 'avg_response_time'),
       engagement: engagement
         ? {
             activeUsers: requireNumber(engagement.active_users, 'active_users'),

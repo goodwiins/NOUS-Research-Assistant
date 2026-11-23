@@ -120,10 +120,18 @@ Run every blocking gate across the branch before pushing —
 ratchets changed files against the base branch the way CI does, which
 `.pre-commit-config.yaml` cannot: pre-commit only sees the files being staged,
 so one formatted in an earlier commit and edited later still fails CI.
+Untracked files that are not gitignored count as changed (and as added, for
+mypy), so a new file is ratcheted before its first `git add`. Backend tests
+run from the repo root with `-c backend/pytest.ini` and the unit job's
+placeholder env, as CI runs them; `backend/tests/unit/architecture` runs even
+with `--skip-tests`. `--frontend` also runs `pnpm test:coverage` and the
+coverage ratchet (`scripts/ci/check_frontend_coverage.mjs`) unless
+`--skip-tests` is given. `backend/tests/unit/ci/test_run_local_ci_parity.py`
+pins these against `.github/workflows/test-pipeline.yml`.
 
 ```sh
 scripts/ci/run_local_ci.sh              # blocking gates + unit tests
-scripts/ci/run_local_ci.sh --skip-tests # gates only
+scripts/ci/run_local_ci.sh --skip-tests # gates + architecture tests only
 
 ruff check backend/src
 black --check backend/src

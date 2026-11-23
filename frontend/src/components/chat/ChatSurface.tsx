@@ -8,6 +8,7 @@ import {
   type ReactElement,
 } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import toast from 'react-hot-toast';
 
 // ChatInput resolves through the barrel (not its own module path) — the
 // existing ChatPage.*.test.tsx suite mocks '@/components/chat' at exactly
@@ -167,11 +168,7 @@ export function ChatSurface({
     ? pendingConfirmation
     : null;
 
-  const isBusy =
-    isLoading ||
-    storeIsStreaming ||
-    !!activeConfirmation ||
-    Boolean(harnessConnection?.runId);
+  const { isBusy } = streaming;
 
   // The first send starts before the server has assigned a thread id. Adopt
   // that id into the current runtime identity while an optimistic message is
@@ -537,7 +534,8 @@ export function ChatSurface({
                   isInitializing,
                   initError,
                 });
-                return false;
+                toast.error('Wait for the chat to finish loading, then send.');
+                return 'rejected';
               }
             }}
             isLoading={isBusy}
