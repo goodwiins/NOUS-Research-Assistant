@@ -190,25 +190,45 @@ def pytest_drift(workflow: dict[str, Any], script: str) -> list[str]:
     return drift
 
 
-def _closes_if(line: str) -> bool:
-    return line == "fi" or (line.endswith("; fi") and not line.startswith("if "))
+_LOOP_OPENERS = ("while ", "until ", "for ")
 
 
-def _opens_if(line: str) -> bool:
-    return line.startswith("if ") and not line.endswith("; fi")
+def _closes_block(line: str) -> bool:
+    """``fi``/``done``/``esac``, alone or ending a multi-line block's last line."""
+    if line == "fi" or (line.endswith("; fi") and not line.startswith("if ")):
+        return True
+    if line == "esac" or line.startswith("esac "):
+        return True
+    # `done`, `done <<< "$LIST"`, `done < file`
+    return (
+        line == "done"
+        or line.startswith(("done ", "done<"))
+        or (line.endswith("; done") and not line.startswith(_LOOP_OPENERS))
+    )
+
+
+def _opens_block(line: str) -> bool:
+    """A multi-line ``if``, loop or ``case``; one-liners open nothing."""
+    if line.startswith("if "):
+        return not line.endswith("; fi")
+    if line.startswith(_LOOP_OPENERS):
+        return not re.search(r"\bdone\b", line)
+    return line.startswith("case ") and line.endswith(" in")
 
 
 def enclosing_conditions(script: str, index: int) -> list[str]:
-    """The ``if``/``elif``/``else`` lines around line ``index``, innermost first.
+    """The ``if``/``elif``/``else`` and loop/``case`` headers around line
+    ``index``, innermost first.
 
-    A one-line ``if ...; fi`` neither opens nor encloses anything."""
+    A one-line ``if ...; fi`` or ``for ...; done`` neither opens nor encloses
+    anything."""
     lines = [ln.strip() for ln in script.splitlines()]
     depth = 0
     found: list[str] = []
     for line in reversed(lines[:index]):
-        if _closes_if(line):
+        if _closes_block(line):
             depth += 1
-        elif _opens_if(line):
+        elif _opens_block(line):
             if depth:
                 depth -= 1
             else:
@@ -216,6 +236,23 @@ def enclosing_conditions(script: str, index: int) -> list[str]:
         elif depth == 0 and (line.startswith("elif ") or line == "else"):
             found.append(line)
     return found
+
+
+# A line ending in one of these runs the next line as part of the same
+# command list, so `cond && \` + an exact gate line is still conditional.
+_CONTINUATIONS = ("\\", "&&", "||", "|")
+
+
+def _continuation_problem(lines: list[str], index: int, command: str) -> list[str]:
+    previous = next(
+        (ln for ln in reversed(lines[:index]) if ln and not ln.startswith("#")), ""
+    )
+    if previous.endswith(_CONTINUATIONS):
+        return [
+            f"{command!r} continues the line before it ({previous!r}); "
+            "it must be a command of its own"
+        ]
+    return []
 
 
 def _command_line(script: str, command: str) -> tuple[int | None, list[str]]:
@@ -244,10 +281,17 @@ def _gated_step_problems(
     if index is None:
         return problems
     lines = [ln.strip() for ln in script.splitlines()]
+    problems += _continuation_problem(lines, index, command)
     following = next((ln for ln in lines[index + 1 :] if ln), "")
     if following != check:
         problems.append(f"{command!r} must be followed by {check!r}, not {following!r}")
-    gated = any("SKIP_TESTS" in c for c in enclosing_conditions(script, index))
+    enclosing = enclosing_conditions(script, index)
+    loops = [c for c in enclosing if c.startswith(_LOOP_OPENERS)]
+    if loops:
+        # A loop can skip the gate (`while false`) or hide a --skip-tests
+        # gate; a gate runs once, so no loop wrapper is legitimate.
+        problems.append(f"{command!r} must not run inside a loop: {loops}")
+    gated = any("SKIP_TESTS" in c for c in enclosing)
     if gated != under_skip_tests:
         problems.append(
             f"{command!r} is {'inside' if gated else 'outside'} the --skip-tests "
@@ -446,6 +490,46 @@ SCRIPT_PLANTS: dict[str, tuple[str, str]] = {
         '    if [ "$SKIP_TESTS" -eq 0 ]; then\n      step "Trigger.dev node tests',
         '    if [ "$DO_FRONTEND" -eq 1 ]; then\n      step "Trigger.dev node tests',
     ),
+    # GOO-782: a gate whose line is still exact, made conditional by the line
+    # before it (a `&& \` continuation, or a trailing `||`)...
+    "`&& \\` continuation gates the architecture step": (
+        f"\n{ARCHITECTURE_COMMAND}\n",
+        f'\n[ "$SKIP_TESTS" -eq 0 ] && \\\n  {ARCHITECTURE_COMMAND}\n',
+    ),
+    "`&& \\` continuation gates the Trigger tsc": (
+        f"    {_TSC}\n",
+        f'    [ "$SKIP_TESTS" -eq 0 ] && \\\n    {_TSC}\n',
+    ),
+    "trailing `||` continuation before the architecture step": (
+        f"\n{ARCHITECTURE_COMMAND}\n",
+        f"\ntrue ||\n{ARCHITECTURE_COMMAND}\n",
+    ),
+    # ...or wrapped in a loop that gates it, or never runs it.
+    "`while` --skip-tests wrapper on the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f'\nwhile [ "$SKIP_TESTS" -eq 0 ]; do\n  {ARCHITECTURE_COMMAND}\n'
+        '  check $? "backend architecture tests"\n  break\ndone\n',
+    ),
+    "`while` --skip-tests wrapper on the Trigger tsc": (
+        f'    {_TSC}\n    check $? "Trigger.dev tsc"\n',
+        f'    while [ "$SKIP_TESTS" -eq 0 ]; do\n    {_TSC}\n'
+        '    check $? "Trigger.dev tsc"\n    break\n    done\n',
+    ),
+    "`while false` around the Trigger node tests": (
+        '      step "Trigger.dev node tests (blocking)"\n',
+        '      step "Trigger.dev node tests (blocking)"\n      while false; do\n',
+    ),
+}
+# Plants that open a block on their anchor and close it after this line.
+_CLOSE_AFTER = {
+    "Trigger tsc inside the --skip-tests gate": (
+        '    check $? "Trigger.dev tsc"\n',
+        "    fi\n",
+    ),
+    "`while false` around the Trigger node tests": (
+        '      check $? "Trigger.dev node tests"\n',
+        "      done\n",
+    ),
 }
 
 
@@ -456,10 +540,11 @@ def test_a_planted_script_divergence_is_reported(name: str) -> None:
     script = _script()
     assert script.count(old) == 1, f"plant anchor for {name!r} is stale"
     planted = script.replace(old, new, 1)
-    if name == "Trigger tsc inside the --skip-tests gate":
-        # Close the new if right after the tsc's status check.
-        check = '    check $? "Trigger.dev tsc"\n'
-        planted = planted.replace(check, check + "    fi\n", 1)
+    if name in _CLOSE_AFTER:
+        # Close the opened block right after the gate's status check.
+        check, closer = _CLOSE_AFTER[name]
+        assert planted.count(check) == 1, f"close anchor for {name!r} is stale"
+        planted = planted.replace(check, check + closer, 1)
     assert script_problems(_workflow(), planted), name
 
 
