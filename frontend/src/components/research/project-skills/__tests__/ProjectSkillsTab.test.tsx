@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils';
@@ -57,7 +59,8 @@ const pending = {
 };
 
 function renderCatalog(
-  overrides: Record<string, unknown> = {}
+  overrides: Record<string, unknown> = {},
+  wrapper?: (props: { children: ReactNode }) => ReactNode
 ): ReturnType<typeof render> {
   vi.mocked(projectSkillService.list).mockResolvedValue({
     skills: [skill],
@@ -70,7 +73,7 @@ function renderCatalog(
     to_version: 2,
     diff: '',
   } as never);
-  return render(<ProjectSkillsTab projectId="project-1" />);
+  return render(<ProjectSkillsTab projectId="project-1" />, wrapper ? { wrapper } : undefined);
 }
 
 describe('ProjectSkillsTab', () => {
@@ -291,4 +294,121 @@ describe('ProjectSkillsTab', () => {
       await screen.findByText(/superseded by a newer change/i)
     ).toBeInTheDocument();
   });
+
+  it('does not carry a warning acknowledgement over to another skill (FR-6)', async () => {
+    const warningVersion = (id: string, name: string, message: string): Record<string, unknown> => ({
+      ...skill.active_version,
+      id,
+      name,
+      version: 2,
+      scan_state: 'warning',
+      scan_findings: [{ code: 'link', severity: 'warning', message, line: 1 }],
+    });
+    const other = {
+      ...skill,
+      id: 'skill-2',
+      name: 'lit-review',
+      active_version: { ...skill.active_version, id: 'version-3', name: 'lit-review' },
+    };
+    vi.mocked(projectSkillService.get).mockImplementation(((
+      _projectId: string,
+      name: string
+    ) =>
+      Promise.resolve(
+        name === 'lit-review'
+          ? { ...other, versions: [warningVersion('version-4', name, 'Second warning')] }
+          : { ...skill, versions: [warningVersion('version-2', name, 'First warning')] }
+      )) as never);
+    // The shared test client uses gcTime: 0, which drops skill A's detail as
+    // soon as it is unobserved; switching back would then show a loading
+    // state and remount the panel even without the key. Keep the cache like
+    // the app does, so only the key can reset the acknowledgement.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    const cachingWrapper = ({ children }: { children: ReactNode }): ReactNode => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    renderCatalog({
+      skills: [skill, other],
+      pending_change_requests: [
+        pending,
+        {
+          ...pending,
+          id: 'request-2',
+          skill_id: 'skill-2',
+          skill_name: 'lit-review',
+          proposed_version_id: 'version-4',
+        },
+      ],
+    }, cachingWrapper);
+    await screen.findByText('release-notes');
+
+    fireEvent.click(screen.getByRole('button', { name: /review release-notes/i }));
+    await screen.findByText(/First warning/);
+    const firstAck = screen.getByRole('checkbox', { name: /acknowledge the scanner warnings/i });
+    fireEvent.click(firstAck);
+    expect(firstAck).toBeChecked();
+
+    fireEvent.click(screen.getByRole('button', { name: /review lit-review/i }));
+    await screen.findByText(/Second warning/);
+    const secondAck = screen.getByRole('checkbox', { name: /acknowledge the scanner warnings/i });
+    expect(secondAck).not.toBeChecked();
+    fireEvent.click(secondAck);
+    expect(secondAck).toBeChecked();
+
+    // Switching back to a skill whose detail is already cached does not
+    // unmount the panel, so only the key stops the state carrying over.
+    fireEvent.click(screen.getByRole('button', { name: /review release-notes/i }));
+    expect(screen.queryByLabelText('Loading skill details')).not.toBeInTheDocument();
+    await screen.findByText(/First warning/);
+    expect(
+      screen.getByRole('checkbox', { name: /acknowledge the scanner warnings/i })
+    ).not.toBeChecked();
+  });
+
+  it('resets the warning acknowledgement when the same skill gets a new proposed version (FR-6)', async () => {
+    const warningVersion = (id: string, version: number, message: string): Record<string, unknown> => ({
+      ...skill.active_version,
+      id,
+      version,
+      scan_state: 'warning',
+      scan_findings: [{ code: 'link', severity: 'warning', message, line: 1 }],
+    });
+    vi.mocked(projectSkillService.get)
+      .mockResolvedValueOnce({
+        ...skill,
+        versions: [warningVersion('version-2', 2, 'Old warning')],
+      } as never)
+      .mockResolvedValue({
+        ...skill,
+        versions: [
+          warningVersion('version-2', 2, 'Old warning'),
+          warningVersion('version-5', 3, 'New warning'),
+        ],
+      } as never);
+    vi.mocked(projectSkillService.rescan).mockResolvedValue(pending as never);
+    renderCatalog();
+    vi.mocked(projectSkillService.list).mockResolvedValue({
+      skills: [skill],
+      pending_change_requests: [
+        { ...pending, id: 'request-3', proposed_version_id: 'version-5' },
+      ],
+      capabilities: { can_edit: true, can_admin: true },
+    } as never);
+    await screen.findByText('release-notes');
+
+    fireEvent.click(screen.getByRole('button', { name: /review release-notes/i }));
+    await screen.findByText(/Old warning/);
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: /acknowledge the scanner warnings/i })
+    );
+    fireEvent.click(screen.getByRole('button', { name: /rescan/i }));
+
+    await screen.findByText(/New warning/);
+    expect(
+      screen.getByRole('checkbox', { name: /acknowledge the scanner warnings/i })
+    ).not.toBeChecked();
+  });
 });
+

@@ -100,8 +100,9 @@ export function SkillReviewPanel({
     setMessage(undefined);
     try {
       await onApprove(request.id, {
-        self_approval_acknowledged: selfApprovalAcknowledged,
-        warning_acknowledged: warningAcknowledged,
+        // Only claim an acknowledgement for a prompt that is on screen now.
+        self_approval_acknowledged: isSelfApproval && selfApprovalAcknowledged,
+        warning_acknowledged: warnings.length > 0 && warningAcknowledged,
         audit_note: note.trim() || null,
       });
       setMessage({
