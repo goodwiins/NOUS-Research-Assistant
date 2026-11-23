@@ -10,7 +10,7 @@
 // Run: node --experimental-transform-types --experimental-test-module-mocks \
 //        --test tests/trigger/*.test.mjs
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -58,17 +58,32 @@ export function normalize(raw) {
   return raw.replace(/\$\{[^}]*\}/g, "{param}").split("?")[0];
 }
 
+/**
+ * Segment-wise match, no regex built from route text. A `{name}` route segment
+ * matches any one segment; every other segment must be equal. A caller's
+ * `{param}` (a template expression) therefore only matches a route parameter.
+ */
+export function pathMatches(route, path) {
+  const want = route.split("/");
+  const got = path.split("/");
+  return (
+    want.length === got.length &&
+    want.every((seg, i) => /^\{[^}]+\}$/.test(seg) || seg === got[i])
+  );
+}
+
 function routeExists(method, path) {
-  return Object.entries(openapi.paths).some(([route, ops]) => {
-    const pattern = new RegExp(
-      "^" + route.replace(/\{[^}]+\}/g, "[^/]+").replace(/[.]/g, "\\.") + "$",
-    );
-    return pattern.test(path.replace(/\{param\}/g, "x")) && method.toLowerCase() in ops;
-  });
+  return Object.entries(openapi.paths).some(
+    ([route, ops]) => pathMatches(route, path) && method.toLowerCase() in ops,
+  );
 }
 
 const found = [];
+const taskIds = new Set();
 for (const file of tsFiles(join(root, "src/trigger"))) {
+  for (const m of readFileSync(file, "utf8").matchAll(/^\s*id:\s*["']([\w-]+)["']/gm)) {
+    taskIds.add(m[1]);
+  }
   for (const call of backendCalls(readFileSync(file, "utf8"))) {
     found.push({ ...call, path: normalize(call.raw), file: relative(root, file) });
   }
@@ -113,4 +128,55 @@ test("the scanner normalizes templates and query strings", () => {
       ["GET", "/c"],
     ],
   );
+});
+
+// A Next route that triggers a task by id over the Trigger.dev REST API is
+// invisible to the backend-path scan. Retiring a task must also retire its
+// callers (GOO-678: the GitHub webhook kept triggering github-push-reindex).
+function* sourceFiles(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) yield* sourceFiles(path);
+    else if (/\.(ts|tsx|mjs|js)$/.test(entry.name) && !/\.test\./.test(entry.name)) {
+      yield path;
+    }
+  }
+}
+
+const TASK_CALLER_DIRS = ["frontend/app", "frontend/src", "src", "terminal/src", "packages"];
+
+function taskCallers() {
+  const callers = [];
+  for (const dir of TASK_CALLER_DIRS) {
+    if (!existsSync(join(root, dir))) continue;
+    for (const file of sourceFiles(join(root, dir))) {
+      const text = readFileSync(file, "utf8");
+      const patterns = [
+        /\/api\/v1\/tasks\/([\w-]+)\/(?:trigger|batch)/g,
+        /tasks\.(?:trigger|batchTrigger|triggerAndWait)\s*(?:<[^>]*>)?\(\s*["']([\w-]+)["']/g,
+      ];
+      for (const re of patterns) {
+        for (const m of text.matchAll(re)) callers.push({ id: m[1], file: relative(root, file) });
+      }
+    }
+  }
+  return callers;
+}
+
+test("every Trigger.dev task triggered by id is defined in src/trigger", () => {
+  assert.ok(taskIds.has("execute-agent") && taskIds.has("batch-process-documents"));
+  const callers = taskCallers();
+  // Guards the scanner: the agent and batch routes trigger tasks by id.
+  assert.ok(callers.length >= 2, `only ${callers.length} task callers found`);
+  const orphans = callers.filter((c) => !taskIds.has(c.id)).map((c) => `${c.id} (${c.file})`);
+  assert.deepEqual(orphans, [], `callers of undefined tasks:\n${orphans.join("\n")}`);
+});
+
+test("route matching compares whole segments", () => {
+  assert.ok(pathMatches("/api/v1/agent/jobs/{job_id}", "/api/v1/agent/jobs/{param}"));
+  assert.ok(pathMatches("/api/v1/agent/jobs/{job_id}", "/api/v1/agent/jobs/abc"));
+  assert.ok(!pathMatches("/api/v1/workers/status", "/api/v1/workers/status/x"));
+  assert.ok(!pathMatches("/api/v1/a.b", "/api/v1/axb"));
+  assert.ok(!pathMatches("/api/v1/x", "/api/v1/{param}"));
 });
