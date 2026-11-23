@@ -625,6 +625,22 @@ def _patch_multi_tenancy_middleware(monkeypatch):
     monkeypatch.setattr(_mt, "AsyncSessionLocal", MagicMock(return_value=session_cm))
 
 
+@pytest.fixture
+def field_encryption():
+    """Field encryption with a fixed test key, for this test only (GOO-785).
+
+    Encrypted columns (``User.first_name``/``last_name``) need the module
+    globals in ``src.core.encryption``. A test that writes them must set them
+    up itself: relying on an earlier test's ``initialize_encryption()`` makes
+    it pass or fail by test order. The globals are restored afterwards, so
+    this test leaks nothing either.
+    """
+    from tests.utils.field_encryption import scoped_field_encryption
+
+    with scoped_field_encryption() as field:
+        yield field
+
+
 def _test_auth_headers() -> dict:
     """Default Authorization header carrying the fixed test token."""
     return {"Authorization": f"Bearer {_TEST_BEARER_TOKEN}"}

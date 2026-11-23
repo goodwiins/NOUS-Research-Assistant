@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
 @pytest.fixture
-async def cancel_db():
+async def cancel_db(field_encryption):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")

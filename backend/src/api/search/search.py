@@ -1129,9 +1129,11 @@ def log_search_query(
             )
         )
         db.commit()
-    except Exception as e:
+    except Exception:
+        # Fire-and-forget analytics: the search already answered, so a
+        # failed write loses one row. Keep the traceback, not str(e).
         db.rollback()
-        logger.error(f"Error logging search query: {e}")
+        logger.warning("Error logging search query", exc_info=True)
     finally:
         db.close()
 
