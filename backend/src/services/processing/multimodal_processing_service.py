@@ -229,6 +229,9 @@ class MultimodalProcessingService:
         Main processing pipeline for multimodal documents
         """
         start_time = time.time()
+        # Read while the session is healthy: after a failed flush, reading an
+        # expired attribute raises PendingRollbackError (GOO-743).
+        document_id = getattr(document, "id", "?")
         processing_results = {
             "text_extraction": {},
             "entity_extraction": {},
@@ -362,17 +365,15 @@ class MultimodalProcessingService:
 
         except Exception:
             error_msg = "Document processing failed"
-            logger.exception(
-                "Document processing failed for document %s",
-                getattr(document, "id", "?"),
-            )
             processing_results["errors"].append(error_msg)
-            # The failure may be the session itself (a rejected commit); start
-            # clean so the FAILED state below can be written (GOO-743).
+            # The failure may be the session itself (a rejected flush), which
+            # expires every loaded attribute: roll back before reading any,
+            # so the FAILED state below can be written (GOO-743).
             try:
                 self.db.rollback()
             except Exception:
                 logger.warning("rollback after a failed run failed", exc_info=True)
+            logger.exception("Document processing failed for document %s", document_id)
 
             job.fail_job(error_msg)
             # End terminal: a document left in PROCESSING is never retried.
@@ -396,7 +397,7 @@ class MultimodalProcessingService:
             except Exception:
                 logger.error(
                     "could not record the failure of document %s",
-                    getattr(document, "id", "?"),
+                    document_id,
                     exc_info=True,
                 )
                 self.db.rollback()
