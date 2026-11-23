@@ -13,6 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DURABLE_CONFIRMATION_CHANGED_NOTICE,
   MAX_DURABLE_POLL_FAILURES,
   useAgentChatStore,
 } from '@/store/agentChatStore';
@@ -176,11 +177,17 @@ describe('durable confirmations take the durable path (FL2D-1)', () => {
 describe('a durable card clicked before its wait token lands (GOO-748)', () => {
   const STILL_PREPARING = 'Still preparing this step — try again in a moment.';
 
-  function awaiting(waitTokenId?: string): ReturnType<typeof runStatus> {
+  const CARD_APPROVAL_ID = 'a'.repeat(64);
+
+  function awaiting(
+    waitTokenId?: string,
+    approvalId: string = CARD_APPROVAL_ID
+  ): ReturnType<typeof runStatus> {
     return {
       ...runStatus('WAITING'),
       metadata: {
         status: 'awaiting_confirmation',
+        confirmation: { approval_id: approvalId },
         ...(waitTokenId ? { waitTokenId } : {}),
       },
     };
@@ -248,6 +255,106 @@ describe('a durable card clicked before its wait token lands (GOO-748)', () => {
     expect(state.messages[0].content).toBe(STILL_PREPARING);
     expect(state.isConfirming).toBe(false);
     expect(state.isStreaming).toBe(false);
+  });
+});
+
+describe('a stale durable card never approves a newer confirmation (GOO-748 F1/F2)', () => {
+  const CARD_APPROVAL_ID = 'a'.repeat(64);
+  const NEWER_APPROVAL_ID = 'b'.repeat(64);
+
+  beforeEach(() => {
+    useAgentChatStore.getState().reset();
+    vi.clearAllMocks();
+    serviceMocks.getDurableRunStatus.mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('does not complete a token minted for a confirmation the user never saw', async () => {
+    // 1. Click 1 completed token T1, but its response was lost.
+    // 2. The card came back without a token.
+    // 3. The run parked a NEW nested confirmation: new token, new approval_id.
+    parkDurableConfirmation(null);
+    serviceMocks.getDurableRunStatus.mockResolvedValue({
+      ...runStatus('WAITING'),
+      metadata: {
+        status: 'awaiting_confirmation',
+        confirmation: { approval_id: NEWER_APPROVAL_ID },
+        waitTokenId: 'wait-T2',
+      },
+    });
+
+    // 4. Click 2 on the stale card.
+    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+
+    expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+    expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+    const state = useAgentChatStore.getState();
+    // The stale card is gone, so it cannot be clicked into the new step.
+    expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+    expect(state.messages[0].content).toBe(DURABLE_CONFIRMATION_CHANGED_NOTICE);
+    expect(state.isConfirming).toBe(false);
+    expect(state.isStreaming).toBe(false);
+  });
+
+  it('completes when the late token belongs to the card’s own confirmation', async () => {
+    parkDurableConfirmation(null);
+    serviceMocks.getDurableRunStatus
+      .mockResolvedValueOnce({
+        ...runStatus('WAITING'),
+        metadata: {
+          status: 'awaiting_confirmation',
+          confirmation: { approval_id: CARD_APPROVAL_ID },
+          waitTokenId: 'wait-T1',
+        },
+      })
+      .mockResolvedValue(
+        runStatus('COMPLETED', { result: { message: 'Done.' } })
+      );
+
+    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+    await vi.advanceTimersByTimeAsync(2 * 3000);
+    await p;
+
+    expect(serviceMocks.completeDurableConfirmation).toHaveBeenCalledWith(
+      'run_cmabc123',
+      'wait-T1',
+      true
+    );
+  });
+
+  it('does not complete a late token when the user stopped during the re-read', async () => {
+    parkDurableConfirmation(null);
+    let answer!: (value: unknown) => void;
+    serviceMocks.getDurableRunStatus.mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      })
+    );
+
+    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+    await vi.waitFor(() =>
+      expect(serviceMocks.getDurableRunStatus).toHaveBeenCalled()
+    );
+    useAgentChatStore.getState().stopGeneration();
+    answer({
+      ...runStatus('WAITING'),
+      metadata: {
+        status: 'awaiting_confirmation',
+        confirmation: { approval_id: CARD_APPROVAL_ID },
+        waitTokenId: 'wait-T1',
+      },
+    });
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+
+    expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+    // The card survives the stop, so the user can still decide.
+    expect(
+      useAgentChatStore.getState().pendingConfirmations['thread-A']?.jobId
+    ).toBe('run_cmabc123');
   });
 });
 

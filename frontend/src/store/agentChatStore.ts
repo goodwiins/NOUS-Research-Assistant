@@ -85,6 +85,17 @@ class SkipStreamConfirm extends Error {}
 /** A durable card was clicked before its run published a wait token. */
 class DurableTokenPending extends Error {}
 
+/**
+ * The run parked a different confirmation than the card shows (GOO-748 F1):
+ * an earlier click went through, its response was lost, and the run moved
+ * on to a new step. The stale card must not approve that step.
+ */
+class DurableConfirmationChanged extends Error {}
+
+/** Shown in place of a stale durable card whose run asks something new. */
+export const DURABLE_CONFIRMATION_CHANGED_NOTICE =
+  'This step has changed since it was shown. Reload the chat to review the new request.';
+
 /** Shown on a restored durable card whose wait token has not landed yet. */
 export const DURABLE_TOKEN_PENDING_NOTICE =
   'Still preparing this step — try again in a moment.';
@@ -1350,6 +1361,7 @@ export const useAgentChatStore = create<AgentChatStore>()(
         // up-front (before pendingConfirmation was nulled) so this branch is
         // actually reachable for durable runs.
         let resumeToken = waitTokenId;
+        let staleCard = false;
         if (isDurable && !resumeToken) {
           // GOO-748: the card can show before its token lands (the send poll
           // stops waiting after a couple of tokenless ticks and never polls
@@ -1362,12 +1374,23 @@ export const useAgentChatStore = create<AgentChatStore>()(
               meta.status === 'awaiting_confirmation' &&
               typeof meta.waitTokenId === 'string'
             ) {
-              resumeToken = meta.waitTokenId;
+              // The token is only this card's if the run is still asking the
+              // question the card shows; otherwise it belongs to a newer
+              // confirmation the user has never seen.
+              const parkedApprovalId = (
+                meta.confirmation as Record<string, unknown> | undefined
+              )?.approval_id;
+              if (parkedApprovalId === pendingConfirmation.approvalId) {
+                resumeToken = meta.waitTokenId;
+              } else {
+                staleCard = true;
+              }
             }
           } catch {
             // Treated as "no token yet": the card stays, with the notice.
           }
           if (abortController.signal.aborted) throw new SkipStreamConfirm();
+          if (staleCard) throw new DurableConfirmationChanged();
           if (!resumeToken) throw new DurableTokenPending();
         }
         if (resumeToken) {
@@ -1622,6 +1645,22 @@ export const useAgentChatStore = create<AgentChatStore>()(
               state.pendingConfirmations[threadId] ??= pendingConfirmation;
             });
           }
+          return;
+        }
+        if (error instanceof DurableConfirmationChanged) {
+          set((state) => {
+            state.isStreaming = false;
+            state.isConfirming = false;
+            // The click already took the card down; it is not restored.
+            const idx = state.messages.findIndex(
+              (message) => message.id === targetMessageId
+            );
+            if (idx !== -1) {
+              state.messages[idx].isStreaming = false;
+              state.messages[idx].content = DURABLE_CONFIRMATION_CHANGED_NOTICE;
+            }
+            (state as unknown as AgentChatStore)._abortController = null;
+          });
           return;
         }
         set((state) => {
