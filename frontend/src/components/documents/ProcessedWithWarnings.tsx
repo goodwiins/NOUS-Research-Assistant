@@ -1,38 +1,25 @@
-'use client';
-
-import { useState } from 'react';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 
 interface ProcessedWithWarningsProps {
   warnings: string[];
   /** Already formatted for display. */
   completedAt?: string | null;
-  /** Re-runs processing; omitted where the app has no reprocess action. */
-  onReprocess?: () => void | Promise<void>;
 }
 
 /**
  * Status line for a document that finished processing without some optional
  * output (GOO-744). It replaces the plain "Indexed" confirmation so a partial
  * run never reads as a clean one, and lists each step's warning.
+ *
+ * There is deliberately no Reprocess action: a forced reprocess runs the
+ * ingestion pipeline, which neither re-runs the failed optional steps nor
+ * clears the warnings, and takes the document out of search meanwhile
+ * (GOO-744 review; a real "re-run failed steps" action belongs to GOO-700).
  */
 export function ProcessedWithWarnings({
   warnings,
   completedAt,
-  onReprocess,
 }: ProcessedWithWarningsProps): React.JSX.Element {
-  const [busy, setBusy] = useState(false);
-
-  const reprocess = async (): Promise<void> => {
-    if (!onReprocess || busy) return;
-    setBusy(true);
-    try {
-      await onReprocess();
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <section
       aria-label="Processing status"
@@ -40,9 +27,10 @@ export function ProcessedWithWarnings({
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
+          {/* fg-accent-safe: 4.89:1 on white (sol-safe), helios on dark. */}
           <AlertTriangle
             aria-hidden="true"
-            className="h-4 w-4 shrink-0 text-(--nous-aurum)"
+            className="h-4 w-4 shrink-0 text-(--nous-fg-accent-safe)"
           />
           <span className="text-sm font-medium text-foreground">
             Processed with warnings
@@ -51,24 +39,11 @@ export function ProcessedWithWarnings({
             searchable, but some steps didn&apos;t finish
           </span>
         </div>
-        <div className="flex shrink-0 items-center gap-3">
-          {completedAt && (
-            <span className="text-xs text-muted-foreground tabular-nums">
-              {completedAt}
-            </span>
-          )}
-          {onReprocess && (
-            <button
-              type="button"
-              onClick={() => void reprocess()}
-              disabled={busy}
-              className="inline-flex items-center gap-1.5 rounded text-xs font-medium text-primary hover:underline underline-offset-4 disabled:opacity-60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            >
-              <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
-              Reprocess
-            </button>
-          )}
-        </div>
+        {completedAt && (
+          <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+            {completedAt}
+          </span>
+        )}
       </div>
       {warnings.length > 0 ? (
         <ul

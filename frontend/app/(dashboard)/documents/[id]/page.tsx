@@ -56,6 +56,21 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
+/**
+ * What the user sees when a retry is refused (GOO-744 review): the route's
+ * 409 (a run is already active) and 403 (only the uploader or an admin may
+ * reprocess) get their own stable message; anything else a generic one.
+ */
+function retryErrorMessage(err: unknown): string {
+  const status =
+    err instanceof APIErrorClass ? err.error.status_code : undefined;
+  if (status === 409) return 'Processing is already running for this document.';
+  if (status === 403) {
+    return 'Only the uploader or an admin can reprocess this document.';
+  }
+  return "Couldn't start processing. Try again in a moment.";
+}
+
 export default function DocumentDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -64,6 +79,9 @@ export default function DocumentDetailPage() {
   const [document, setDocument] = useState<Document | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const retryInFlight = useRef(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<
     'overview' | 'metadata' | 'preview' | 'tables'
   >('overview');
@@ -147,17 +165,23 @@ export default function DocumentDetailPage() {
   };
 
   const handleRetry = async () => {
-    if (!document) return;
+    // One request at a time: a second click while the first is in flight
+    // would only earn a 409. A ref, because two clicks in one tick both see
+    // the same `retrying` state; `disabled` covers the clicks after that.
+    if (!document || retryInFlight.current) return;
 
+    retryInFlight.current = true;
+    setRetrying(true);
+    setRetryError(null);
     try {
-      // An indexed document is a no-op without force_reprocess: the route
-      // answers 200 "already processed" and changes nothing (GOO-744).
-      const force =
-        document.processing_status === 'indexed' ? '?force_reprocess=true' : '';
-      await api.post(`/documents/${document.id}/reprocess${force}`);
-      void fetchDocument();
+      await api.post(`/documents/${document.id}/reprocess`);
+      fetchDocument();
     } catch (err) {
       console.error('Failed to retry processing:', err);
+      setRetryError(retryErrorMessage(err));
+    } finally {
+      retryInFlight.current = false;
+      setRetrying(false);
     }
   };
 
@@ -391,7 +415,6 @@ export default function DocumentDetailPage() {
                     ? formatDate(document.processing_completed_at)
                     : null
                 }
-                onReprocess={handleRetry}
               />
             ) : isIndexed ? (
               <section className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-5 py-3 shadow-xs">
@@ -427,7 +450,8 @@ export default function DocumentDetailPage() {
                     <button
                       type="button"
                       onClick={handleRetry}
-                      className="text-xs font-medium text-primary hover:underline underline-offset-4 inline-flex items-center gap-1.5 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
+                      disabled={retrying}
+                      className="text-xs font-medium text-primary hover:underline underline-offset-4 inline-flex items-center gap-1.5 disabled:opacity-60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
                     >
                       <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
                       Retry processing
@@ -435,6 +459,11 @@ export default function DocumentDetailPage() {
                   )}
                 </div>
                 <div className="p-6">
+                  {retryError && (
+                    <p role="alert" className="mb-4 text-sm text-destructive">
+                      {retryError}
+                    </p>
+                  )}
                   <ProcessingStatus
                     document={document}
                     enableRealtime={true}

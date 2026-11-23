@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { render } from '@/test/test-utils';
 import DocumentDetailPage from '../../../../app/(dashboard)/documents/[id]/page';
 import { api } from '@/services/api-client';
 import { getProcessingWarnings } from '@/utils/documentProcessingWarnings';
+import { APIErrorClass } from '@/types';
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'doc-1' }),
@@ -195,29 +202,48 @@ describe('document detail: processed with warnings (GOO-744)', () => {
     ).toBeInTheDocument();
   });
 
-  it('Reprocess forces a re-run of the indexed document, then reloads it', async () => {
+  it('offers no Reprocess on a document processed with warnings', async () => {
+    // A forced reprocess re-runs ingestion, which neither retries the failed
+    // steps nor clears the warnings (GOO-744 review).
     get.mockResolvedValue(
       detail('indexed', {
         processing_partial: true,
         processing_warnings: WARNINGS,
       })
     );
-    post.mockResolvedValue({});
 
     render(<DocumentDetailPage />);
 
     const section = await statusSection();
-    fireEvent.click(within(section).getByRole('button', { name: 'Reprocess' }));
-
-    await waitFor(() =>
-      expect(post).toHaveBeenCalledWith(
-        '/documents/doc-1/reprocess?force_reprocess=true'
-      )
-    );
-    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    expect(
+      within(section).getByText('Processed with warnings')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /reprocess|retry/i })
+    ).toBeNull();
   });
 
-  it('retrying a failed document does not force', async () => {
+  it.each(['queued', 'processing', 'failed'])(
+    'a %s document never shows the warnings state, even with the flag left over',
+    async (status) => {
+      get.mockResolvedValue(
+        detail(status, {
+          processing_partial: true,
+          processing_warnings: WARNINGS,
+        })
+      );
+
+      render(<DocumentDetailPage />);
+
+      expect(
+        await screen.findByText('live processing status')
+      ).toBeInTheDocument();
+      expect(screen.queryByText('Processed with warnings')).toBeNull();
+      expect(screen.queryByText(WARNINGS[0])).toBeNull();
+    }
+  );
+
+  it('retrying a failed document posts a plain reprocess, then reloads it', async () => {
     get.mockResolvedValue(detail('failed', null));
     post.mockResolvedValue({});
 
@@ -230,5 +256,111 @@ describe('document detail: processed with warnings (GOO-744)', () => {
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith('/documents/doc-1/reprocess')
     );
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+  });
+
+  it('a second click while the retry is in flight sends nothing more', async () => {
+    get.mockResolvedValue(detail('failed', null));
+    let finish!: () => void;
+    post.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      })
+    );
+
+    render(<DocumentDetailPage />);
+
+    const retry = await screen.findByRole('button', {
+      name: /Retry processing/,
+    });
+    // Two clicks in one tick: both land before React re-renders the button
+    // as disabled, so only the in-flight guard can stop the second.
+    act(() => {
+      retry.click();
+      retry.click();
+    });
+    await waitFor(() => expect(retry).toBeDisabled());
+    // Later clicks hit the disabled button.
+    fireEvent.click(retry);
+    expect(post).toHaveBeenCalledTimes(1);
+
+    finish();
+    // The reload renders the page afresh; its Retry is usable again.
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByRole('button', { name: /Retry processing/ })
+    ).not.toBeDisabled();
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [409, 'Processing is already running for this document.'],
+    [403, 'Only the uploader or an admin can reprocess this document.'],
+    [500, "Couldn't start processing. Try again in a moment."],
+  ])('a refused retry (%i) is shown to the user', async (status, message) => {
+    get.mockResolvedValue(detail('failed', null));
+    post.mockRejectedValueOnce(
+      new APIErrorClass({
+        message: 'raw backend detail',
+        status_code: status,
+        type: 'http_error',
+      })
+    );
+
+    render(<DocumentDetailPage />);
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Retry processing/ })
+    );
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(message);
+    expect(alert).not.toHaveTextContent('raw backend detail');
+    // The button is usable again for another try.
+    expect(
+      screen.getByRole('button', { name: /Retry processing/ })
+    ).not.toBeDisabled();
+  });
+
+  it('a network failure without a status gets the generic message', async () => {
+    get.mockResolvedValue(detail('failed', null));
+    post.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+    render(<DocumentDetailPage />);
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Retry processing/ })
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "Couldn't start processing. Try again in a moment."
+    );
+  });
+
+  it('a new retry clears the previous error', async () => {
+    get.mockResolvedValue(detail('failed', null));
+    post
+      .mockRejectedValueOnce(
+        new APIErrorClass({
+          message: 'x',
+          status_code: 409,
+          type: 'http_error',
+        })
+      )
+      .mockResolvedValueOnce({});
+
+    render(<DocumentDetailPage />);
+
+    const retry = await screen.findByRole('button', {
+      name: /Retry processing/,
+    });
+    fireEvent.click(retry);
+    await screen.findByRole('alert');
+    fireEvent.click(retry);
+
+    // Wait for the reload to render the page again, then check.
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    await screen.findByRole('button', { name: /Retry processing/ });
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });
