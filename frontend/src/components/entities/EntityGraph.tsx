@@ -20,7 +20,31 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import React, { useEffect, useRef, useState } from 'react';
 // Bundled from npm. The graph used to inject an unpinned d3js.org script at
 // runtime (no SRI, no onerror) that the CSP blocks, leaving it blank (FR-4).
-import * as d3 from 'd3';
+import { select } from 'd3-selection';
+import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+} from 'd3-force';
+import { zoom as d3Zoom, zoomIdentity } from 'd3-zoom';
+import { drag } from 'd3-drag';
+// Side-effect import: adds selection.transition(), used by the zoom buttons.
+import 'd3-transition';
+
+// Only the d3 modules this graph uses, so the full d3 bundle is not shipped.
+const d3 = {
+  select,
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  zoom: d3Zoom,
+  zoomIdentity,
+  drag,
+};
 
 interface EntityGraphProps {
   entities: Entity[];

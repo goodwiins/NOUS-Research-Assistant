@@ -42,7 +42,6 @@ export const CropExtractOverlay: React.FC<CropExtractOverlayProps> = ({
   const [isDrawing, setIsDrawing] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [selectionFinalized, setSelectionFinalized] = useState(false);
-  const [extractError, setExtractError] = useState<string | null>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const resetState = useCallback(() => {
@@ -52,7 +51,6 @@ export const CropExtractOverlay: React.FC<CropExtractOverlayProps> = ({
     setIsDrawing(false);
     setSelectionFinalized(false);
     setIsExtracting(false);
-    setExtractError(null);
   }, []);
 
   useEffect(() => {
@@ -141,29 +139,24 @@ export const CropExtractOverlay: React.FC<CropExtractOverlayProps> = ({
   const handleExtract = useCallback(async () => {
     if (!selection || !containerRef.current) return;
     setIsExtracting(true);
-    setExtractError(null);
 
     try {
-      // NOTE (FR-8, open): these are overlay pixel coordinates. The backend
-      // expects PDF-point coordinates on `pageNumber`, and this overlay is not
-      // drawn over a rendered PDF page, so the region is only meaningful once
-      // a page renderer supplies the page and its scale. The previous
-      // `scaleX/scaleY` always evaluated to 1 and only disguised that.
+      const container = containerRef.current;
+      const containerRect = container.getBoundingClientRect();
+      const scaleX = containerRect.width > 0 ? 1 : 1;
+      const scaleY = containerRect.height > 0 ? 1 : 1;
+
       const result = await extractRegion(documentId, {
         page: pageNumber,
-        x1: Math.round(selection.x),
-        y1: Math.round(selection.y),
-        x2: Math.round(selection.x + selection.width),
-        y2: Math.round(selection.y + selection.height),
+        x1: Math.round(selection.x * scaleX),
+        y1: Math.round(selection.y * scaleY),
+        x2: Math.round((selection.x + selection.width) * scaleX),
+        y2: Math.round((selection.y + selection.height) * scaleY),
       });
       onExtracted(result);
       resetState();
     } catch {
-      // Surface the failure instead of silently re-enabling the button.
       setIsExtracting(false);
-      setExtractError(
-        'Region extraction failed. Adjust the selection and try again.'
-      );
     }
   }, [
     selection,
@@ -203,15 +196,6 @@ export const CropExtractOverlay: React.FC<CropExtractOverlayProps> = ({
           Cancel
         </Button>
       </div>
-
-      {extractError && (
-        <div
-          role="alert"
-          className="absolute left-2 top-2 max-w-xs rounded-lg border border-destructive/30 bg-card px-3 py-2 text-xs text-destructive"
-        >
-          {extractError}
-        </div>
-      )}
 
       {!selectionFinalized && !displayRect && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">

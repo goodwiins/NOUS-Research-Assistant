@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fireEvent, render, screen, waitFor } from '@/test/test-utils';
@@ -57,7 +59,8 @@ const pending = {
 };
 
 function renderCatalog(
-  overrides: Record<string, unknown> = {}
+  overrides: Record<string, unknown> = {},
+  wrapper?: (props: { children: ReactNode }) => ReactNode
 ): ReturnType<typeof render> {
   vi.mocked(projectSkillService.list).mockResolvedValue({
     skills: [skill],
@@ -70,7 +73,7 @@ function renderCatalog(
     to_version: 2,
     diff: '',
   } as never);
-  return render(<ProjectSkillsTab projectId="project-1" />);
+  return render(<ProjectSkillsTab projectId="project-1" />, wrapper ? { wrapper } : undefined);
 }
 
 describe('ProjectSkillsTab', () => {
@@ -316,6 +319,16 @@ describe('ProjectSkillsTab', () => {
           ? { ...other, versions: [warningVersion('version-4', name, 'Second warning')] }
           : { ...skill, versions: [warningVersion('version-2', name, 'First warning')] }
       )) as never);
+    // The shared test client uses gcTime: 0, which drops skill A's detail as
+    // soon as it is unobserved; switching back would then show a loading
+    // state and remount the panel even without the key. Keep the cache like
+    // the app does, so only the key can reset the acknowledgement.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    const cachingWrapper = ({ children }: { children: ReactNode }): ReactNode => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
     renderCatalog({
       skills: [skill, other],
       pending_change_requests: [
@@ -328,7 +341,7 @@ describe('ProjectSkillsTab', () => {
           proposed_version_id: 'version-4',
         },
       ],
-    });
+    }, cachingWrapper);
     await screen.findByText('release-notes');
 
     fireEvent.click(screen.getByRole('button', { name: /review release-notes/i }));
@@ -347,6 +360,7 @@ describe('ProjectSkillsTab', () => {
     // Switching back to a skill whose detail is already cached does not
     // unmount the panel, so only the key stops the state carrying over.
     fireEvent.click(screen.getByRole('button', { name: /review release-notes/i }));
+    expect(screen.queryByLabelText('Loading skill details')).not.toBeInTheDocument();
     await screen.findByText(/First warning/);
     expect(
       screen.getByRole('checkbox', { name: /acknowledge the scanner warnings/i })
