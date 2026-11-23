@@ -153,8 +153,16 @@ def retry_failed_processing(self, job_id: str):
             processing_service.process_document(document, job)
         )
 
+        # The job row is the record clients poll: report what was committed,
+        # not what the returned dict claims (GOO-776).
+        db.refresh(job)
+        succeeded = (
+            processing_results.get("success") is True
+            and job.status == JobStatus.COMPLETED
+        )
+
         return {
-            "status": "completed" if processing_results["success"] else "failed",
+            "status": "completed" if succeeded else "failed",
             "job_id": job_id,
             "document_id": str(document.id),
             "retry_attempt": job.retry_count,
