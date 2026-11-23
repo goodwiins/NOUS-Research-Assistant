@@ -14,10 +14,22 @@ export interface ExtractionColumn {
   description?: string;
 }
 
+/**
+ * GET /matrices/{id} is an untyped dict, so a cell value is typed as any
+ * JSON value. Turn it into text with `extractionCellText` (GOO-763).
+ */
+export type ExtractionCellValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ExtractionCellValue[]
+  | { [key: string]: ExtractionCellValue };
+
 export interface ExtractionCell {
   document_id: string;
   column_name: string;
-  value: string | null;
+  value: ExtractionCellValue;
   citation_snippet: string | null;
   confidence: number | null;
   // GOO-304 keys; hand-written because GET /matrices/{id} is an untyped dict.
