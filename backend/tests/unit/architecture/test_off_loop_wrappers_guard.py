@@ -1127,6 +1127,31 @@ async def planted(db=None):
 async def ok_no_session():
     await offload(render, 1)
 """,
+    "alias_last_binding_wins": """
+import asyncio
+
+def _onloop(fn):
+    return fn()
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+x = _onloop
+x = _offload
+y = _offload
+y = None
+z = _offload
+z = _onloop
+
+async def planted(db=None):
+    await x(db.commit)
+
+async def ok_rebound_to_none(db=None):
+    y(db.commit)
+
+async def ok_rebound_on_the_loop(db=None):
+    z(db.commit)
+""",
     "imported_src_alias": """
 from src.services.integrations.arxiv_fulltext import run_in_subprocess
 
