@@ -187,7 +187,9 @@ class SearchAnalytics(BaseModel):
     """Search analytics data"""
 
     total_searches: int = Field(..., description="Total number of searches")
-    average_search_time_ms: float = Field(..., description="Average search time")
+    average_search_time_ms: Optional[float] = Field(
+        ..., description="Average search time; null when no search was timed"
+    )
     most_common_queries: List[Dict[str, Any]] = Field(
         ..., description="Most common search queries"
     )

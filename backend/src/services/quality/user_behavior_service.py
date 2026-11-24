@@ -23,6 +23,12 @@ from src.models.user import User
 logger = logging.getLogger(__name__)
 
 
+def _measured(value: Any) -> Optional[float]:
+    """An SQL average as a float, or None when nothing was measured: no data
+    is not 0 seconds (GOO-761)."""
+    return None if value is None else float(value)
+
+
 def analytics_window(
     days_back: int,
     start_date: Optional[datetime],
@@ -540,7 +546,7 @@ class UserBehaviorService:
                     {
                         "period": str(row.period),
                         "search_count": row.search_count,
-                        "avg_response_time": float(row.avg_response_time or 0),
+                        "avg_response_time": _measured(row.avg_response_time),
                         "avg_results": float(row.avg_results or 0),
                         "total_clicks": row.total_clicks,
                     }
@@ -813,7 +819,7 @@ class UserBehaviorService:
                 "search_types_distribution": {
                     st.search_type: {
                         "count": st.count,
-                        "avg_response_time": float(st.avg_response_time or 0),
+                        "avg_response_time": _measured(st.avg_response_time),
                     }
                     for st in search_types
                 },

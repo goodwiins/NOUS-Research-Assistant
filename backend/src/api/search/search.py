@@ -1057,7 +1057,8 @@ def _load_search_analytics(organization_id: str, days: int) -> Dict[str, Any]:
         total, average_time, average_results = (
             db.query(
                 func.count(SearchAnalyticsEvent.id),
-                func.coalesce(func.avg(SearchAnalyticsEvent.search_time_ms), 0.0),
+                # NULL when nothing was timed: no data, not 0 ms (GOO-761).
+                func.avg(SearchAnalyticsEvent.search_time_ms),
                 func.coalesce(func.avg(SearchAnalyticsEvent.result_count), 0.0),
             )
             .filter(*filters)
@@ -1089,7 +1090,9 @@ def _load_search_analytics(organization_id: str, days: int) -> Dict[str, Any]:
         )
         return {
             "total_searches": int(total),
-            "average_search_time_ms": float(average_time),
+            "average_search_time_ms": (
+                None if average_time is None else float(average_time)
+            ),
             "most_common_queries": [
                 {"query": query, "count": count} for query, count in common_queries
             ],

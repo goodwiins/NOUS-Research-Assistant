@@ -26225,9 +26225,16 @@
             "type": "number"
           },
           "average_search_time_ms": {
-            "description": "Average search time",
-            "title": "Average Search Time Ms",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Average search time; null when no search was timed",
+            "title": "Average Search Time Ms"
           },
           "most_common_queries": {
             "description": "Most common search queries",

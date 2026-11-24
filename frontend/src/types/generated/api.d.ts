@@ -22353,9 +22353,9 @@ export interface components {
             average_results_per_search: number;
             /**
              * Average Search Time Ms
-             * @description Average search time
+             * @description Average search time; null when no search was timed
              */
-            average_search_time_ms: number;
+            average_search_time_ms: number | null;
             /**
              * Most Common Queries
              * @description Most common search queries
