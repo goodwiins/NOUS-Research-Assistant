@@ -226,7 +226,6 @@ ignore:
     - "backend/src/api/quality/quality_recommendations.py"
     - "backend/src/api/quality/user_behavior.py"
     - "backend/src/api/realtime/realtime_document_status.py"
-    - "backend/src/api/realtime/realtime_quality_metrics.py"
     - "backend/src/api/realtime/websocket_v2.py"
     - "backend/src/api/research/chat.py"
     - "backend/src/api/research/citations.py"

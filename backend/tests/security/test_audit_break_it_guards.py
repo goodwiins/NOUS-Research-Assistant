@@ -222,7 +222,6 @@ def test_collection_attach_scopes_to_caller_org() -> None:
 # WebSocketConnectionManager.authenticate_websocket were dangerous.
 _JWT_DECODE_ALLOWLIST = {
     "src/core/security.py",  # verify_token: Supabase + CLI tokens
-    "src/websocket/auth.py",  # WebSocket authenticator (DB-backed)
     # Unimported today and pinned only by tests/scripts; candidates for removal
     # in a follow-up. Do not wire these up without a DB-backed rewrite.
     "src/security/enhanced_auth.py",

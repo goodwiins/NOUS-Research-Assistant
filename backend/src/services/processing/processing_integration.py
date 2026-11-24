@@ -34,6 +34,15 @@ from src.services.websocket.websocket_manager import (
 logger = logging.getLogger(__name__)
 
 
+def _uploader_targets(user_id: Optional[str]) -> Optional[List[str]]:
+    """Address a document notification to its uploader (GOO-740).
+
+    None leaves the notification untargeted, which the status service drops
+    rather than broadcasting to every organization.
+    """
+    return [user_id] if user_id else None
+
+
 @dataclass
 class ProcessingStep:
     """Definition of a processing step"""
@@ -199,6 +208,12 @@ class ProcessingIntegrationService(BaseService):
                 "job_id": job_id,
                 "document_type": document.document_type,
                 "organization_id": str(document.organization_id),
+                # Notifications go to the uploader only (GOO-740).
+                "user_id": (
+                    str(document.uploaded_by_user_id)
+                    if document.uploaded_by_user_id
+                    else None
+                ),
                 "processing_steps": processing_steps,
                 "total_weight": total_weight,
                 "completed_weight": 0.0,
@@ -339,7 +354,9 @@ class ProcessingIntegrationService(BaseService):
             "result": result or {},
         }
 
-        await self._broadcast_step_completion(document_id, completion_data)
+        await self._broadcast_step_completion(
+            document_id, completion_data, target_user=context.get("user_id")
+        )
 
         # Update job if available
         if context["job_id"]:
@@ -365,7 +382,10 @@ class ProcessingIntegrationService(BaseService):
 
         # Broadcast warning
         await self._broadcast_processing_warning(
-            context["document_id"], warning, details
+            context["document_id"],
+            warning,
+            details,
+            target_user=context.get("user_id"),
         )
 
     async def complete_processing(
@@ -397,7 +417,15 @@ class ProcessingIntegrationService(BaseService):
                 await session.commit()
 
             # Broadcast completion
-            await self._broadcast_processing_completion(document_id, result or {})
+            await self._broadcast_processing_completion(
+                document_id,
+                result or {},
+                target_user=(
+                    str(document.uploaded_by_user_id)
+                    if document.uploaded_by_user_id
+                    else None
+                ),
+            )
 
             logger.info(f"Document processing completed: {document_id}")
 
@@ -558,6 +586,7 @@ class ProcessingIntegrationService(BaseService):
             title="Processing Started",
             message=f"Document processing has started for document ID: {document_id}",
             notification_type="info",
+            target_users=_uploader_targets(context.get("user_id")),
         )
 
     async def _broadcast_processing_progress(
@@ -584,27 +613,36 @@ class ProcessingIntegrationService(BaseService):
         )
 
     async def _broadcast_step_completion(
-        self, document_id: str, completion_data: Dict[str, Any]
+        self,
+        document_id: str,
+        completion_data: Dict[str, Any],
+        target_user: Optional[str] = None,
     ):
         """Broadcast step completion notification"""
         await status_update_service.broadcast_system_notification(
             title=f"Step Completed: {completion_data['completed_step']}",
             message=f"Processing step '{completion_data['step_description']}' has been completed.",
             notification_type="success",
+            target_users=_uploader_targets(target_user),
         )
 
     async def _broadcast_processing_warning(
-        self, document_id: str, warning: str, details: Dict[str, Any]
+        self,
+        document_id: str,
+        warning: str,
+        details: Dict[str, Any],
+        target_user: Optional[str] = None,
     ):
         """Broadcast processing warning"""
         await status_update_service.broadcast_system_notification(
             title="Processing Warning",
             message=f"Warning during document processing: {warning}",
             notification_type="warning",
+            target_users=_uploader_targets(target_user),
         )
 
     async def _broadcast_processing_error(
-        self, document_id: str, error: str, context: Dict[str, Any]
+        self, document_id: str, error: str, context: Optional[Dict[str, Any]]
     ):
         """Broadcast processing error"""
         await status_update_service.broadcast_document_update(
@@ -615,10 +653,14 @@ class ProcessingIntegrationService(BaseService):
             title="Processing Failed",
             message=f"Document processing failed: {error}",
             notification_type="error",
+            target_users=_uploader_targets((context or {}).get("user_id")),
         )
 
     async def _broadcast_processing_completion(
-        self, document_id: str, result: Dict[str, Any]
+        self,
+        document_id: str,
+        result: Dict[str, Any],
+        target_user: Optional[str] = None,
     ):
         """Broadcast processing completion"""
         await status_update_service.broadcast_document_update(
@@ -630,6 +672,7 @@ class ProcessingIntegrationService(BaseService):
             message=f"Document processing has completed successfully for document ID: {document_id}",
             notification_type="success",
             action_url=f"/documents/{document_id}",
+            target_users=_uploader_targets(target_user),
         )
 
     def _calculate_remaining_time(

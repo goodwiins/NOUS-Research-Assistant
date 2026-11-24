@@ -109,7 +109,6 @@ ignore = [
 "!backend/src/**" = ["ASYNC"]
 "__init__.py" = ["F401", "F403", "F405"]
 "backend/src/tasks/*.py" = ["E402"]
-"backend/src/websocket/*.py" = ["F401", "F841"]
 
 [dependency-groups]
 dev = [

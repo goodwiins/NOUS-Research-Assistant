@@ -18,9 +18,6 @@ __all__ = [
     "RecommendationCategory",
     "RecommendationPriority",
     "RecommendationStatus",
-    # Realtime metrics
-    "RealTimeQualityMetricsService",
-    "RealTimeQualityMetrics",
     # User behavior
     "UserBehaviorService",
     "UserBehaviorMetrics",
@@ -76,15 +73,6 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "RecommendationStatus": (
         "src.services.quality.quality_recommendations_service",
         "RecommendationStatus",
-    ),
-    # Realtime metrics
-    "RealTimeQualityMetricsService": (
-        "src.services.quality.realtime_quality_metrics",
-        "RealTimeQualityMetricsService",
-    ),
-    "RealTimeQualityMetrics": (
-        "src.services.quality.realtime_quality_metrics",
-        "RealTimeQualityMetrics",
     ),
     # User behavior
     "UserBehaviorService": (

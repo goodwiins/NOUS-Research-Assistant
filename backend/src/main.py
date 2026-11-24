@@ -633,8 +633,8 @@ app.include_router(
 )  # Retrieval diagnostics endpoints
 app.include_router(websocket_v2_router)  # Enhanced WebSocket v2 routes
 app.include_router(realtime_status_router)  # Real-time document status API
-# The realtime quality-metrics route (/api/v2/realtime/quality) is not
-# mounted: it streamed simulated scores and no client calls it (GOO-653).
+# The realtime quality-metrics route (/api/v2/realtime/quality) streamed
+# simulated scores; unmounted in GOO-653 and deleted in GOO-740.
 app.include_router(arxiv_router)  # ArXiv integration endpoints
 app.include_router(arxiv_papers_router)
 app.include_router(
