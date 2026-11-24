@@ -63,6 +63,10 @@ node --experimental-transform-types --experimental-test-module-mocks \
   --test tests/trigger/*.test.mjs
 ```
 
+CI (`Require Trigger.dev test files`) and `run_local_ci.sh` fail when
+`tests/trigger/*.test.mjs` matches no file, because `node --test` would
+otherwise pass with zero tests.
+
 The backend client retries GET by default and never retries a POST unless the
 caller passes `{ idempotent: true }` (a read over POST, or an endpoint that
 dedupes on a key the caller sends, such as `client_message_id` on

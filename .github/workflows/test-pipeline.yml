@@ -848,9 +848,14 @@ jobs:
         run: |
           pnpm --filter @nous/harness-bridge type-check
           pnpm --filter @nous/harness-bridge test
+      - name: Require Trigger.dev test files
+        working-directory: .
+        run: compgen -G 'tests/trigger/*.test.mjs'
       - name: Check Trigger.dev tasks (node:test)
         # src/trigger deploys from main with no other CI coverage. Includes
         # the backend-path contract against backend/openapi.json (GOO-678).
+        # node --test passes with zero tests when the glob matches no file,
+        # so the step above fails the job first.
         # src/trigger and backend/openapi.json changes select the full
         # profile, so this job runs for both.
         working-directory: .
