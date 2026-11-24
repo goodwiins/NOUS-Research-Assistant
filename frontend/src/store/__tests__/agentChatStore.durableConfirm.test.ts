@@ -14,6 +14,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DURABLE_CONFIRMATION_CHANGED_NOTICE,
+  DURABLE_CONFIRMATION_CHECK_FAILED_NOTICE,
+  DURABLE_CONFIRMATION_GONE_NOTICE,
+  DURABLE_CONFIRMATION_MOVED_ON_NOTICE,
+  DURABLE_CONFIRMATION_SEND_FAILED_NOTICE,
+  DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
   MAX_DURABLE_POLL_FAILURES,
   useAgentChatStore,
 } from '@/store/agentChatStore';
@@ -63,6 +68,13 @@ function runStatus(
   error: null;
 } {
   return { runId: 'run-42', status, metadata: {}, output, error: null };
+}
+
+/** The error getDurableRunStatus throws on a non-OK response. */
+function runStatusError(status: number, body = 'upstream'): Error {
+  return Object.assign(new Error(`Failed to get run status: ${body}`), {
+    status,
+  });
 }
 
 function parkDurableConfirmation(
@@ -128,8 +140,48 @@ describe('durable confirmations take the durable path (FL2D-1)', () => {
     expect(state.isStreaming).toBe(false);
   });
 
+  it.each<[string, unknown, string, boolean]>([
+    [
+      'an AgentMessage object',
+      {
+        status: 'completed',
+        result: {
+          message: { role: 'assistant', content: 'Ingested 1 paper.' },
+        },
+      },
+      'Ingested 1 paper.',
+      false,
+    ],
+    [
+      'a failed backend job',
+      { status: 'failed', result: { error: 'The backend job failed.' } },
+      'The backend job failed.',
+      true,
+    ],
+  ])(
+    'confirm poll settles a completed run whose output carries %s',
+    async (_label, output, expected, isError) => {
+      parkDurableConfirmation();
+      serviceMocks.getDurableRunStatus.mockResolvedValue(
+        runStatus('COMPLETED', output)
+      );
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(2 * 3000);
+      await p;
+
+      const state = useAgentChatStore.getState();
+      expect(state.messages[0].content).toBe(expected);
+      expect(Boolean(state.messages[0].isError)).toBe(isError);
+    }
+  );
+
   it('keeps the card when a durable confirmation has no wait token', async () => {
     parkDurableConfirmation(null);
+    serviceMocks.getDurableRunStatus.mockResolvedValue({
+      ...runStatus('WAITING'),
+      metadata: { status: 'awaiting_confirmation' },
+    });
 
     const p = useAgentChatStore.getState().confirmAction('thread-A', true);
     await vi.advanceTimersByTimeAsync(3000);
@@ -142,6 +194,24 @@ describe('durable confirmations take the durable path (FL2D-1)', () => {
     const state = useAgentChatStore.getState();
     expect(state.pendingConfirmations['thread-A']?.jobId).toBe('run_cmabc123');
     expect(state.isConfirming).toBe(false);
+  });
+
+  it('keeps the card with the send-failed notice when completing the token fails', async () => {
+    parkDurableConfirmation();
+    serviceMocks.completeDurableConfirmation.mockRejectedValueOnce(
+      new Error('Failed to complete token: upstream')
+    );
+
+    await useAgentChatStore.getState().confirmAction('thread-A', true);
+
+    expect(serviceMocks.getDurableRunStatus).not.toHaveBeenCalled();
+    const state = useAgentChatStore.getState();
+    expect(state.pendingConfirmations['thread-A']?.waitTokenId).toBe('wait-7');
+    expect(state.messages[0].content).toBe(
+      DURABLE_CONFIRMATION_SEND_FAILED_NOTICE
+    );
+    expect(state.isConfirming).toBe(false);
+    expect(state.isStreaming).toBe(false);
   });
 
   it('still tries the stream first for an SSE confirmation', async () => {
@@ -227,38 +297,311 @@ describe('a durable card clicked before its wait token lands (GOO-748)', () => {
     expect(state.pendingConfirmations['thread-A']).toBeUndefined();
   });
 
-  it.each([
-    ['the run still has no token', () => Promise.resolve(awaiting())],
+  it.each<[string, () => Promise<unknown>, string]>([
     [
-      'the run has moved on',
-      () =>
-        Promise.resolve({
-          ...runStatus('EXECUTING'),
-          metadata: { status: 'running', waitTokenId: 'wait-old' },
-        }),
+      'the run still has no token',
+      () => Promise.resolve(awaiting()),
+      STILL_PREPARING,
     ],
     [
       'the status read fails',
-      () => Promise.reject(new Error('Failed to get run status: 502')),
+      () => Promise.reject(runStatusError(502)),
+      DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
     ],
-  ])('keeps the card with a visible message when %s', async (_label, read) => {
+    [
+      'the status read gets a 503',
+      () => Promise.reject(runStatusError(503)),
+      DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
+    ],
+    [
+      'the status read hits a network error',
+      () => Promise.reject(new TypeError('Failed to fetch')),
+      DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
+    ],
+  ])(
+    'keeps the card with a visible message when %s',
+    async (_label, read, notice) => {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockImplementation(read);
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      expect(serviceMocks.getDurableRunStatus).toHaveBeenCalledWith(
+        'run_cmabc123'
+      );
+      expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+      expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']?.jobId).toBe(
+        'run_cmabc123'
+      );
+      expect(state.messages[0].content).toBe(notice);
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
+
+  it.each<[string, Record<string, unknown>]>([
+    ['with an old token', { status: 'running', waitTokenId: 'wait-old' }],
+    ['without a token', { status: 'running' }],
+  ])(
+    'settles with the moved-on notice when the run has moved on %s',
+    async (_label, metadata) => {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockResolvedValue({
+        ...runStatus('EXECUTING'),
+        metadata,
+      });
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+      expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+      expect(state.messages[0].content).toBe(
+        DURABLE_CONFIRMATION_MOVED_ON_NOTICE
+      );
+      expect(state.messages[0].content).not.toBe(STILL_PREPARING);
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
+
+  it.each<[string, unknown, string, boolean]>([
+    [
+      // The real task output: result is the backend job's
+      // AgentExecuteResponse, whose message is an AgentMessage object.
+      'COMPLETED',
+      runStatus('COMPLETED', {
+        status: 'completed',
+        result: {
+          message: { role: 'assistant', content: 'Ingested 1 paper.' },
+        },
+      }),
+      'Ingested 1 paper.',
+      false,
+    ],
+    [
+      // The backend job failed, but the Trigger run still COMPLETED.
+      'COMPLETED-with-a-failed-job',
+      runStatus('COMPLETED', {
+        status: 'failed',
+        result: { error: 'The backend job failed.' },
+      }),
+      'The backend job failed.',
+      true,
+    ],
+    [
+      'COMPLETED-with-a-timed-out-job',
+      runStatus('COMPLETED', { status: 'timeout' }),
+      'Action failed.',
+      true,
+    ],
+    [
+      'FAILED',
+      { ...runStatus('FAILED'), error: 'The ingest step crashed.' },
+      'The ingest step crashed.',
+      true,
+    ],
+    ['CANCELED', runStatus('CANCELED'), 'This request was cancelled.', true],
+  ])(
+    'settles from a %s run and completes nothing',
+    async (_status, run, expected, isError) => {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockResolvedValue(run);
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      expect(serviceMocks.getDurableRunStatus).toHaveBeenCalledOnce();
+      expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+      expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+      expect(serviceMocks.pollJob).not.toHaveBeenCalled();
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+      expect(state.messages[0].content).toBe(expected);
+      expect(state.messages[0].content).not.toContain('[object Object]');
+      expect(Boolean(state.messages[0].isError)).toBe(isError);
+      expect(state.messages[0].isStreaming).toBe(false);
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
+
+  it('settles with the changed notice when a tokenless run parked a different step', async () => {
     parkDurableConfirmation(null);
-    serviceMocks.getDurableRunStatus.mockImplementation(read);
+    serviceMocks.getDurableRunStatus.mockResolvedValue(
+      awaiting(undefined, 'b'.repeat(64))
+    );
 
     const p = useAgentChatStore.getState().confirmAction('thread-A', true);
     await vi.advanceTimersByTimeAsync(3000);
     await p;
 
-    expect(serviceMocks.getDurableRunStatus).toHaveBeenCalledWith(
-      'run_cmabc123'
-    );
     expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
-    expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+    const state = useAgentChatStore.getState();
+    expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+    expect(state.messages[0].content).toBe(DURABLE_CONFIRMATION_CHANGED_NOTICE);
+  });
+
+  it.each([
+    [403, DURABLE_CONFIRMATION_MOVED_ON_NOTICE],
+    [404, DURABLE_CONFIRMATION_GONE_NOTICE],
+  ])(
+    'settles instead of offering a retry when sending the late token gets a %i',
+    async (status, notice) => {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockResolvedValue(awaiting('wait-late'));
+      serviceMocks.completeDurableConfirmation.mockRejectedValueOnce(
+        Object.assign(new Error('Failed to confirm: SECRET-BODY'), { status })
+      );
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+      expect(state.messages[0].content).toBe(notice);
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
+
+  it.each([404, 403])(
+    'settles with the gone notice when the read gets a %i',
+    async (status) => {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockRejectedValue(
+        runStatusError(status, 'Run not found')
+      );
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+      expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+      expect(state.messages[0].content).toBe(DURABLE_CONFIRMATION_GONE_NOTICE);
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
+
+  it('logs any other read failure and never shows its text', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockRejectedValue(
+        runStatusError(401, 'SECRET-BODY')
+      );
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      expect(warn).toHaveBeenCalled();
+      expect(String(warn.mock.calls[0][0])).toMatch(/^\[agentChatStore\]/);
+      for (const call of warn.mock.calls) {
+        expect(JSON.stringify(call)).not.toContain('SECRET-BODY');
+      }
+      expect(warn).toHaveBeenCalledWith(
+        '[agentChatStore] durable confirmation re-read failed',
+        { threadId: 'thread-A', status: 401 }
+      );
+      expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']?.jobId).toBe(
+        'run_cmabc123'
+      );
+      expect(state.messages[0].content).toBe(
+        DURABLE_CONFIRMATION_CHECK_FAILED_NOTICE
+      );
+      expect(state.messages[0].content).not.toContain('SECRET-BODY');
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the card with the send-failed notice when completing the late token fails', async () => {
+    parkDurableConfirmation(null);
+    serviceMocks.getDurableRunStatus.mockResolvedValue(awaiting('wait-late'));
+    serviceMocks.completeDurableConfirmation.mockRejectedValueOnce(
+      new Error('Failed to complete token: SECRET-BODY')
+    );
+
+    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+
+    expect(serviceMocks.completeDurableConfirmation).toHaveBeenCalledWith(
+      'run_cmabc123',
+      'wait-late',
+      true
+    );
     const state = useAgentChatStore.getState();
     expect(state.pendingConfirmations['thread-A']?.jobId).toBe('run_cmabc123');
-    expect(state.messages[0].content).toBe(STILL_PREPARING);
+    expect(state.messages[0].content).toBe(
+      DURABLE_CONFIRMATION_SEND_FAILED_NOTICE
+    );
+    expect(state.messages[0].content).not.toBe(
+      'Waiting for your confirmation...'
+    );
     expect(state.isConfirming).toBe(false);
     expect(state.isStreaming).toBe(false);
+  });
+
+  it('leaves thread B alone when the user switches threads during the re-read', async () => {
+    parkDurableConfirmation(null);
+    let answer!: (value: unknown) => void;
+    serviceMocks.getDurableRunStatus.mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      })
+    );
+
+    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+    await vi.waitFor(() =>
+      expect(serviceMocks.getDurableRunStatus).toHaveBeenCalled()
+    );
+    useAgentChatStore.getState().selectThread('thread-B');
+    const threadBMessages = [
+      {
+        id: 'b-1',
+        role: 'assistant' as const,
+        content: 'Thread B answer.',
+        timestamp: new Date(),
+      },
+    ];
+    useAgentChatStore.setState({ messages: threadBMessages });
+    answer(
+      runStatus('COMPLETED', { result: { message: 'Ingested 1 paper.' } })
+    );
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+
+    expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+    const state = useAgentChatStore.getState();
+    expect(state.pendingConfirmations['thread-A']?.jobId).toBe('run_cmabc123');
+    expect(state.activeThreadId).toBe('thread-B');
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toMatchObject({
+      id: 'b-1',
+      content: 'Thread B answer.',
+    });
+    expect(state.pendingConfirmations['thread-B']).toBeUndefined();
+    expect(state.isStreaming).toBe(false);
+    expect(state.isConfirming).toBe(false);
   });
 });
 
@@ -380,8 +723,16 @@ describe('a durable card never approves a confirmation it cannot identify (GOO-7
     ['both ids are empty strings', '', { approval_id: '' }],
     ['neither the card nor the confirmation has an id', null, {}],
     ['the card has no id and the run has none either', null, undefined],
-    ['the card has no id and the confirmation id is empty', null, { approval_id: '' }],
-    ['the card has no id and the confirmation id is null', null, { approval_id: null }],
+    [
+      'the card has no id and the confirmation id is empty',
+      null,
+      { approval_id: '' },
+    ],
+    [
+      'the card has no id and the confirmation id is null',
+      null,
+      { approval_id: null },
+    ],
   ])(
     'does not complete a late token when %s',
     async (_label, cardApprovalId, confirmation) => {
@@ -488,6 +839,8 @@ describe('durable polls survive a dropped request (FL2D-2)', () => {
     // The wait token was consumed, so Approve must not come back.
     expect(state.pendingConfirmations['thread-A']).toBeUndefined();
     expect(state.messages[0].content).toMatch(/may still be running/);
+    // The card is gone, so the copy must not ask the user to try again.
+    expect(state.messages[0].content).not.toMatch(/try again/);
   });
 
   it('send poll keeps going after one failed poll', async () => {
@@ -506,6 +859,36 @@ describe('durable polls survive a dropped request (FL2D-2)', () => {
     expect(state.isStreaming).toBe(false);
     expect(last.isError).toBeFalsy();
   });
+
+  it.each<[string, unknown, string, boolean]>([
+    [
+      'an AgentMessage object',
+      {
+        status: 'completed',
+        result: { message: { role: 'assistant', content: 'Here you go.' } },
+      },
+      'Here you go.',
+      false,
+    ],
+    ['a timed-out backend job', { status: 'timeout' }, 'Action failed.', true],
+  ])(
+    'send poll settles a completed run whose output carries %s',
+    async (_label, output, expected, isError) => {
+      serviceMocks.getDurableRunStatus.mockResolvedValue(
+        runStatus('COMPLETED', output)
+      );
+
+      useAgentChatStore.getState().setInputValue('hello');
+      const p = useAgentChatStore.getState().sendMessage();
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      const state = useAgentChatStore.getState();
+      const last = state.messages[state.messages.length - 1];
+      expect(last.content).toBe(expected);
+      expect(Boolean(last.isError)).toBe(isError);
+    }
+  );
 
   it('send poll counts only consecutive failures', async () => {
     const blip = new Error('Failed to fetch');
