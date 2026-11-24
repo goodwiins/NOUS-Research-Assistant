@@ -58,7 +58,7 @@ actually required by the repository.
 | `helm-validate.yml` | Push and pull request | Validate the Helm chart and environment values. |
 | `workflow-lint.yml` | Workflow changes | Run `actionlint` across all workflows. |
 | `supabase-migrations.yml` | Push to `develop` touching `supabase/migrations/`, or manual dispatch | Apply pending Supabase migrations to the hosted project with `supabase db push` (repository secret `SUPABASE_DB_URL`; the job runs only on `develop`). |
-| `agent-eval.yml` | Weekly schedule (Monday 06:00 UTC) or manual dispatch | LangSmith golden-set regression sweep against the compiled agent graph. Runs on a `[self-hosted, linux]` runner whose current status is unverified (see [the runner page](../../infrastructure/runner/README.md)). |
+| `agent-eval.yml` | Weekly schedule (Monday 06:00 UTC) or manual dispatch | LangSmith golden-set regression sweep against the compiled agent graph, run with the live dev KB flag (`DO_KB_ENABLED=false`); it records the rerun count in the job summary. Runs on a `[self-hosted, linux]` runner whose current status is unverified (see [the runner page](../../infrastructure/runner/README.md)). |
 | `opencode.yml` | `/oc` or `/opencode` issue or review comments from an owner, member or collaborator | Runs the opencode assistant; uses `OPENCODE_API_KEY`. |
 | `secret-scan.yml` | Pull request or push on `main`/`develop`, or manual dispatch | Gitleaks scan of the repository history. |
 | `trigger-deploy.yml` | Push to `main` touching `src/trigger/**`, `trigger.config.ts` or `package.json` | Deploys Trigger.dev tasks with secrets from Infisical. Not part of the AWS dev release path. |
