@@ -14,12 +14,25 @@
  * other recorder) needs a privacy config at least as strict as Sentry's,
  * verified in a real browser, and an entry here in the same PR.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(__dirname, '../../..');
-const SOURCE_DIRS = ['app', 'src'];
+/**
+ * Shipped source trees. `config/` holds runtime config that `next.config.js`
+ * loads (GOO-795); the root's own entry points are scanned separately.
+ */
+const SOURCE_DIRS = ['app', 'src', 'config'];
 const SOURCE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
 const SKIPPED_DIRS = new Set(['node_modules', '.next', '__tests__', '__mocks__']);
 const TEST_FILE = /\.(test|spec)\.[jt]sx?$/;
@@ -63,13 +76,13 @@ function walk(dir: string, out: string[]): string[] {
   return out;
 }
 
-function shippedSourceFiles(): string[] {
+function shippedSourceFiles(root: string = ROOT): string[] {
   const files: string[] = [];
-  for (const dir of SOURCE_DIRS) walk(path.join(ROOT, dir), files);
+  for (const dir of SOURCE_DIRS) walk(path.join(root, dir), files);
   // Root-level entry points: instrumentation, Sentry and Next configs.
-  for (const entry of readdirSync(ROOT)) {
+  for (const entry of readdirSync(root)) {
     if (SOURCE_FILE.test(entry) && !TEST_FILE.test(entry)) {
-      files.push(path.join(ROOT, entry));
+      files.push(path.join(root, entry));
     }
   }
   return files;
@@ -82,14 +95,16 @@ function stripComments(source: string): string {
     .replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 }
 
-function recorderRegistrations(): Array<{ file: string; match: string }> {
+function recorderRegistrations(
+  root: string = ROOT
+): Array<{ file: string; match: string }> {
   const found: Array<{ file: string; match: string }> = [];
-  for (const file of shippedSourceFiles()) {
+  for (const file of shippedSourceFiles(root)) {
     const source = stripComments(readFileSync(file, 'utf8'));
     for (const pattern of RECORDER_PATTERNS) {
       for (const match of source.matchAll(pattern)) {
         found.push({
-          file: path.relative(ROOT, file),
+          file: path.relative(root, file),
           match: match[0].replace(/\s+/g, ''),
         });
       }
@@ -182,6 +197,85 @@ describe('session replay registration (GOO-774)', () => {
     ]) {
       expect(RECORDER_PACKAGE.test(name)).toBe(false);
     }
+  });
+
+  it('scans the root runtime config and instrumentation files (GOO-795)', () => {
+    const scanned = new Set(
+      shippedSourceFiles().map((file) => path.relative(ROOT, file))
+    );
+
+    for (const file of [
+      'next.config.js',
+      'instrumentation.ts',
+      'instrumentation-client.ts',
+      'sentry.client.config.ts',
+      'sentry.server.config.ts',
+      'sentry.edge.config.ts',
+      path.join('config', 'resolveSentryEnvironment.js'),
+    ]) {
+      expect(scanned.has(file), file).toBe(true);
+    }
+  });
+
+  describe('in a planted frontend root (GOO-795)', () => {
+    const plant = (files: Record<string, string>): string => {
+      const root = mkdtempSync(path.join(tmpdir(), 'recorder-guard-'));
+      for (const [file, source] of Object.entries(files)) {
+        mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+        writeFileSync(path.join(root, file), source);
+      }
+      for (const dir of SOURCE_DIRS) {
+        mkdirSync(path.join(root, dir), { recursive: true });
+      }
+      return root;
+    };
+    const unapprovedIn = (
+      files: Record<string, string>
+    ): Array<{ file: string; match: string }> => {
+      const root = plant(files);
+      try {
+        return recorderRegistrations(root)
+          .filter((hit) => !isApproved(hit))
+          .sort((a, b) => a.file.localeCompare(b.file));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    };
+
+    it('flags a recorder set up in a root config or instrumentation file', () => {
+      expect(
+        unapprovedIn({
+          'next.config.mjs':
+            "import { runStatsigAutoCapture } from '@statsig/web-analytics';\n",
+          'instrumentation-node.ts':
+            'Sentry.init({ integrations: [Sentry.replayIntegration()] });\n',
+          'instrumentation-client.ts':
+            'Sentry.replayIntegration({ maskAllText: false });\n',
+          'config/analytics.js': 'new StatsigAutoCapturePlugin();\n',
+        })
+      ).toEqual([
+        { file: 'config/analytics.js', match: 'StatsigAutoCapturePlugin(' },
+        {
+          file: 'instrumentation-client.ts',
+          match: 'replayIntegration({maskAllText:false})',
+        },
+        { file: 'instrumentation-node.ts', match: 'replayIntegration()' },
+        { file: 'next.config.mjs', match: "'@statsig/web-analytics'" },
+      ]);
+    });
+
+    it('passes root files that start no recorder or only the approved one', () => {
+      expect(
+        unapprovedIn({
+          'next.config.js': "module.exports = { output: 'standalone' };\n",
+          'instrumentation.ts': 'export async function register() {}\n',
+          'instrumentation-client.ts':
+            'Sentry.init({ integrations: [Sentry.replayIntegration(REPLAY_PRIVACY_OPTIONS)] });\n',
+          'config/resolveSentryEnvironment.js': 'module.exports = () => "dev";\n',
+          'next.config.test.ts': 'new StatsigAutoCapturePlugin();\n',
+        })
+      ).toEqual([]);
+    });
   });
 
   it('depends on no session-recording or auto-capture package besides Sentry', () => {

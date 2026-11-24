@@ -269,18 +269,50 @@ def _command_line(script: str, command: str) -> tuple[int | None, list[str]]:
 
 
 # `cat <<EOF`, `: <<'X'`, `<<-"X"`; not the `<<<` here-string.
-_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_]\w*)\1")
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
 # `exit`/`exec` where a command starts: line start, after `;`, `&&`, `||`,
 # `|`, `{`, `(`, or a `then`/`else`/`do` keyword.
 _SCRIPT_ENDERS = re.compile(
     r"(?:^|[;&|({]|\bthen|\belse|\bdo)\s*(exit|exec)\b(?:\s+([^\s;&|)]+))?"
 )
+# `trap 'exit 0' DEBUG`: the action runs before the next command (DEBUG),
+# when one fails (ERR), when a function returns (RETURN) or at the end, where
+# its `exit` replaces the status (EXIT). An action that can exit cleanly ends
+# the run before, or instead of, a gate's failure (GOO-795).
+_TRAP = re.compile(
+    r"(?:^|[;&|({]|\bthen|\belse|\bdo)\s*trap\s+"
+    r"(?:'([^']*)'|\"((?:\\.|[^\"\\])*)\"|([^\s'\";&|]+))\s+([^;&|#]+)"
+)
+_EXITING_TRAP_SIGNALS = frozenset({"DEBUG", "ERR", "RETURN", "EXIT", "0"})
 
 
 def _code(line: str) -> str:
     """``line`` without its quoted strings and trailing comment."""
     line = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", line)
     return re.sub(r"(?:^|\s)#.*$", "", line).strip()
+
+
+def _clean_exits(code: str) -> list[str]:
+    """The `exit`/`exec` commands in ``code`` that can end it cleanly: all but
+    `exit N` with a literal N > 0, which makes the run fail, never pass."""
+    return [
+        word
+        for word, status in _SCRIPT_ENDERS.findall(code)
+        if not (word == "exit" and status.isdigit() and int(status) > 0)
+    ]
+
+
+def _exiting_traps(line: str) -> list[str]:
+    """Signals of a `trap` on ``line`` whose action can exit cleanly and that
+    fire on their own (DEBUG, ERR, RETURN, EXIT). A trap for INT or TERM
+    runs only when the run is interrupted."""
+    found = []
+    for single, double, bare, signals in _TRAP.findall(line):
+        action = single or double or bare
+        names = {s.upper().removeprefix("SIG") for s in signals.split()}
+        if names & _EXITING_TRAP_SIGNALS and _clean_exits(_code(action)):
+            found += sorted(names & _EXITING_TRAP_SIGNALS)
+    return found
 
 
 def line_contexts(script: str) -> list[tuple[str | None, tuple[str, ...]]]:
@@ -291,15 +323,18 @@ def line_contexts(script: str) -> list[tuple[str | None, tuple[str, ...]]]:
     A group opens on a line ending in ``{`` or ``(`` and closes at the next
     line at the same indentation that starts with ``}`` or ``)``. A heredoc
     without its terminator, or a group without its closer, encloses the rest
-    of the script, so a malformed wrapper fails closed."""
+    of the script, so a malformed wrapper fails closed. As in bash, a ``<<``
+    heredoc ends only at a line that is exactly its terminator, and a ``<<-``
+    heredoc also at one indented with tabs (not spaces)."""
     contexts: list[tuple[str | None, tuple[str, ...]]] = []
-    heredoc: tuple[str, str] | None = None  # (terminator, opener line)
+    heredoc: tuple[str, str, bool] | None = None  # (terminator, opener, <<-)
     groups: list[tuple[int, str]] = []
     for raw in script.splitlines():
         stripped = raw.strip()
         if heredoc is not None:
             contexts.append((heredoc[1], tuple(g for _, g in groups)))
-            if stripped == heredoc[0]:
+            body = raw.lstrip("\t") if heredoc[2] else raw
+            if body == heredoc[0]:
                 heredoc = None
             continue
         indent = len(raw) - len(raw.lstrip())
@@ -310,7 +345,7 @@ def line_contexts(script: str) -> list[tuple[str | None, tuple[str, ...]]]:
             continue
         opener = _HEREDOC.search(raw)
         if opener:
-            heredoc = (opener.group(2), stripped)
+            heredoc = (opener.group(3), stripped, opener.group(1) == "-")
         if _code(raw).endswith(("{", "(")):
             groups.append((indent, stripped))
     return contexts
@@ -338,12 +373,15 @@ def _execution_problems(script: str, index: int, command: str) -> list[str]:
         doc, open_groups = contexts[i]
         if doc is not None or any(g.endswith("(") for g in open_groups):
             continue
-        for word, status in _SCRIPT_ENDERS.findall(_code(lines[i])):
-            if word == "exit" and status.isdigit() and int(status) > 0:
-                continue
+        for _ in _clean_exits(_code(lines[i])):
             problems.append(
                 f"line {i + 1} ({lines[i].strip()!r}) can end the script "
                 f"before {command!r}; only `exit N` with N > 0 may run first"
+            )
+        for signal in _exiting_traps(lines[i]):
+            problems.append(
+                f"line {i + 1} ({lines[i].strip()!r}) sets a trap on {signal} that "
+                f"can end the script cleanly before or instead of {command!r}"
             )
     return problems
 
@@ -639,6 +677,36 @@ SCRIPT_PLANTS: dict[str, tuple[str, str]] = {
         '\nstep "Backend architecture tests',
         '\ncat <<EOF\nstep "Backend architecture tests',
     ),
+    # GOO-795: a trap whose action exits cleanly ends the run before a gate
+    # (DEBUG fires before the next command) or replaces its status (EXIT)...
+    "`trap 'exit 0' DEBUG` before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\ntrap 'exit 0' DEBUG\nstep \"Backend architecture tests",
+    ),
+    "`trap exit ERR` before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\ntrap exit ERR\nstep "Backend architecture tests',
+    ),
+    '`trap "exit 0" EXIT` replaces the run\'s status': (
+        '\nstep "Backend architecture tests',
+        '\ntrap "exit 0" EXIT\nstep "Backend architecture tests',
+    ),
+    # ...and the `<<-` heredoc form, whose terminator may be tab-indented,
+    # swallows a gate as `<<` does; a `<<` terminator indented at all does not
+    # end its heredoc, so the gate after it is swallowed too.
+    "`<<-` heredoc around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n: <<-'DISABLED'\n\t{ARCHITECTURE_COMMAND}\n"
+        '\tcheck $? "backend architecture tests"\n\tDISABLED\n',
+    ),
+    "`<<` heredoc with an indented terminator before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\n: <<'DISABLED'\n  DISABLED\nstep \"Backend architecture tests",
+    ),
+    "`<<-` heredoc with a space-indented terminator before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\n: <<-'DISABLED'\n  DISABLED\nstep \"Backend architecture tests",
+    ),
 }
 # GOO-786 plants must be reported for their own reason, not for an unrelated
 # problem the plant happens to cause elsewhere.
@@ -653,6 +721,16 @@ _PLANT_REASONS = {
         "('exit 0') can end the script"
     ),
     "bare `exit` early in the script": "('exit') can end the script",
+    "`trap 'exit 0' DEBUG` before the architecture step": "sets a trap on DEBUG",
+    "`trap exit ERR` before the architecture step": "sets a trap on ERR",
+    '`trap "exit 0" EXIT` replaces the run\'s status': "sets a trap on EXIT",
+    "`<<-` heredoc around the architecture step": "inside a heredoc",
+    "`<<` heredoc with an indented terminator before the architecture step": (
+        "inside a heredoc"
+    ),
+    "`<<-` heredoc with a space-indented terminator before the architecture step": (
+        "inside a heredoc"
+    ),
     "`exec` replaces the script before the Trigger tsc": "('exec true') can end the script",
 }
 # Plants that open a block on their anchor and close it after this line.
@@ -698,3 +776,36 @@ def test_a_ci_only_reporting_change_is_not_drift() -> None:
     workflow = copy.deepcopy(_workflow())
     _plant_run("--cov-fail-under=35", "--cov-fail-under=40")(workflow)
     assert env_drift(workflow, _script()) + pytest_drift(workflow, _script()) == []
+
+
+# GOO-795: the forms next to each trap and heredoc plant that must stay clean.
+CLEAN_SCRIPT_CHANGES: dict[str, tuple[str, str]] = {
+    "trap that exits non-zero on ERR": (
+        '\nstep "Backend architecture tests',
+        "\ntrap 'exit 1' ERR\ntrap - ERR\nstep \"Backend architecture tests",
+    ),
+    "trap that runs a cleanup function on EXIT": (
+        '\nstep "Backend architecture tests',
+        '\ntrap _cleanup EXIT\nstep "Backend architecture tests',
+    ),
+    "trap that exits on INT (only when interrupted)": (
+        '\nstep "Backend architecture tests',
+        "\ntrap 'exit 0' INT\nstep \"Backend architecture tests",
+    ),
+    "`<<-` heredoc closed by a tab-indented terminator": (
+        '\nstep "Backend architecture tests',
+        '\ncat <<-EOF\n\tnotes\n\tEOF\nstep "Backend architecture tests',
+    ),
+    "`<<` heredoc closed before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\ncat <<'EOF'\n  notes\nEOF\nstep \"Backend architecture tests",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(CLEAN_SCRIPT_CHANGES))
+def test_a_harmless_trap_or_heredoc_is_not_reported(name: str) -> None:
+    old, new = CLEAN_SCRIPT_CHANGES[name]
+    script = _script()
+    assert script.count(old) == 1, f"anchor for {name!r} is stale"
+    assert script_problems(_workflow(), script.replace(old, new, 1)) == []
