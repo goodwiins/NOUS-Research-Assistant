@@ -1,8 +1,14 @@
-"""GOO-686 / GOO-690: ``ws01_websocket_status_tables`` on a real PostgreSQL.
+"""GOO-690: ``ws02_realtime_status_hardening`` on a real PostgreSQL.
+
+``ws01_websocket_status_tables`` (GOO-686) is applied on dev and stays as it
+is on develop; ws02 carries the guards, ensure-create and lockdown on top of
+it. Each test brings the database to ws01 (``upgrade head`` then
+``downgrade`` to ws01, or ``upgrade`` ws01 directly), shapes it, then runs
+ws02.
 
 The SQLite and offline-render tests live in
-``test_websocket_status_tables_migration.py``. These need PostgreSQL: RLS,
-PostgREST grants, native enum types and the ``DO``-block guards.
+``test_websocket_status_tables_ws02_migration.py``. These need PostgreSQL:
+RLS, PostgREST grants, native enum types and the ``DO``-block guards.
 
 Each test creates and drops its own database on an admin server URL taken
 from ``ORCHESTRATION_TEST_DATABASE_URL`` (the CI PostgreSQL lane sets it) or
@@ -12,11 +18,11 @@ skip into a failure. Outside that lane, without a URL, it skips.
 
 Covered:
 
-* ``alembic upgrade head`` from an EMPTY database ends with all four tables,
-  RLS on and no PostgREST grants;
+* ``alembic upgrade head`` from an EMPTY database ends at ws02 with all four
+  tables, RLS on and no PostgREST grants; ``downgrade`` to ws01 keeps them;
 * the backfill path: missing tables are created, and existing exposed ones
   are locked down; a rerun is a no-op;
-* online, ws01 creates only its own tables and enum types. Another missing
+* ws02 creates only its own tables and enum types. Another missing
   enum type the metadata knows stays missing (``metadata.create_all`` would
   recreate it);
 * the fail-loud guards refuse, before any DDL, an existing table that lacks
@@ -40,8 +46,8 @@ import pytest
 pytestmark = [pytest.mark.integration, pytest.mark.requires_postgres]
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-PARENT = "rl01_secure_late_internal_rls"
-REVISION = "ws01_websocket_status_tables"
+PARENT = "ws01_websocket_status_tables"
+REVISION = "ws02_realtime_status_hardening"
 TABLES = (
     "websocket_connections",
     "connection_events",
@@ -113,15 +119,24 @@ def _pg(url: str, sql: str) -> list:
     return rows
 
 
-def _upgrade(url: str, target: str) -> subprocess.CompletedProcess:
+def _alembic(url: str, *argv: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", target],
+        [sys.executable, "-m", "alembic", *argv],
         cwd=BACKEND_ROOT,
         env=_child_env(url),
         capture_output=True,
         text=True,
         timeout=900,
     )
+
+
+def _upgrade(url: str, target: str) -> subprocess.CompletedProcess:
+    return _alembic(url, "upgrade", target)
+
+
+def _version(url: str) -> object:
+    [[version]] = _pg(url, "SELECT version_num FROM alembic_version")
+    return version
 
 
 def _at_parent(url: str) -> None:
@@ -174,35 +189,58 @@ def test_alembic_upgrade_head_from_empty_postgres_has_locked_down_tables(
     _pg(scratch_db, _POSTGREST_ROLES_SQL)
     proc = _upgrade(scratch_db, "head")
     assert proc.returncode == 0, proc.stderr[-4000:]
+    assert _version(scratch_db) == REVISION
     _assert_locked_down(scratch_db)
+
+
+def test_downgrade_to_ws01_keeps_the_tables_and_upgrade_head_is_a_no_op(
+    scratch_db: str,
+) -> None:
+    proc = _upgrade(scratch_db, "head")
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    proc = _alembic(scratch_db, "downgrade", PARENT)
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    assert _version(scratch_db) == PARENT
+    for table in TABLES:
+        assert _regclass(scratch_db, table) == table, table
+    proc = _upgrade(scratch_db, "head")
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    assert _version(scratch_db) == REVISION
 
 
 def test_existing_exposed_tables_are_locked_down_and_missing_ones_created(
     scratch_db: str,
 ) -> None:
-    """The backfill path: a DB past rl01 where some tables are missing and an
+    """The backfill path: a DB at ws01 where some tables are missing and an
     existing one is world-readable (RLS off, PostgREST grants)."""
     _pg(scratch_db, _POSTGREST_ROLES_SQL)
-    _at_parent(scratch_db)
+    proc = _upgrade(scratch_db, "head")
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    proc = _alembic(scratch_db, "downgrade", PARENT)
+    assert proc.returncode == 0, proc.stderr[-4000:]
     _pg(
         scratch_db,
         "DROP TABLE public.connection_events, public.status_updates CASCADE;;"
         "ALTER TABLE public.websocket_connections DISABLE ROW LEVEL SECURITY;;"
         "GRANT ALL ON public.websocket_connections TO anon, authenticated",
     )
-    proc = _upgrade(scratch_db, REVISION)
+    proc = _upgrade(scratch_db, "head")
     assert proc.returncode == 0, proc.stderr[-4000:]
+    for table in TABLES:
+        assert _regclass(scratch_db, table) == table, table
     _assert_locked_down(scratch_db)
-    # Idempotent on PostgreSQL too.
-    assert _upgrade(scratch_db, REVISION).returncode == 0
+    # Idempotent on PostgreSQL too: downgrade to ws01 and run ws02 again.
+    assert _alembic(scratch_db, "downgrade", PARENT).returncode == 0
+    assert _upgrade(scratch_db, "head").returncode == 0
+    _assert_locked_down(scratch_db)
 
 
 def test_online_upgrade_creates_only_its_own_enum_types(scratch_db: str) -> None:
-    """F1: ``Table.create`` per missing table, not ``metadata.create_all``.
+    """F1: only the four tables' own types, not ``metadata.create_all``.
 
     ``stanceenum`` belongs to an unrelated model (``stance_classifications``)
     and is on ``Base.metadata``. With it dropped, ``create_all(tables=...)``
-    would recreate it while creating the ws01 tables; ws01 must not.
+    would recreate it while creating the four tables; ws02 must not.
     """
     _at_parent(scratch_db)
     _pg(

@@ -20,8 +20,8 @@ WebSocket service initializer that runs at every boot. Until GOO-686,
 GOO-686 registers the module in ``src.models``. That covers fresh databases
 through the r6h3 baseline. This revision backfills databases that already
 passed r6h3. Following r6h3, the ORM models stay the single source of truth:
-it builds the DDL from these four tables' models (``Table.create`` online,
-see below) and only creates the ones that are missing. Existing tables, from a create_all-provisioned environment
+it calls ``create_all`` for just these four tables and only creates the ones
+that are missing. Existing tables, from a create_all-provisioned environment
 or a manual fix, are left untouched, so the revision is safe to run anywhere
 and a rerun is a no-op.
 
@@ -36,29 +36,22 @@ behaviour as declared.
 
 Fail-loud guards, run BEFORE any DDL (PostgreSQL only):
 
-* A pre-existing type named ``priority`` / ``updatetype`` /
-  ``connectionstatus`` must be an enum (otherwise the error says it isn't)
-  with exactly the model's labels, in order. A checkfirst create would
-  otherwise reuse a foreign type, and inserts would fail later.
-* Each of the four tables, if it already exists, must have every column its
-  model declares. Otherwise the error names the missing columns and gives
-  the ``information_schema`` query to inspect the table. The known case is
-  the legacy Supabase ``websocket_connections``
+* A pre-existing enum type named ``priority`` / ``updatetype`` /
+  ``connectionstatus`` must have exactly the model's labels, in order.
+  ``create_all(checkfirst=True)`` would otherwise reuse a foreign type, and
+  inserts would fail later.
+* A pre-existing ``websocket_connections`` with the legacy Supabase shape
   (``supabase/migrations/20260303204052_initial_schema.sql``: no
-  ``organization_id`` / ``connection_status``). It needs a manual decision:
+  ``organization_id`` / ``connection_status``) stops the upgrade with a
+  clear message instead of being silently kept. It needs a manual decision:
   rename it, or migrate its rows.
 
-Only these four tables, their indexes and their own three enum types are ever
-created. Online, ``Table.create(checkfirst=True)`` does this per missing table;
-``metadata.create_all`` would also create every other enum type the metadata
-knows. Offline (``--sql``), for an explicit ``FROM:TO`` range, the render is
-``CREATE TYPE`` for the three enums once each, then ``CREATE TABLE`` in FK
-order, then ``CREATE INDEX``. The guards and the RLS lockdown render as the
-same ``DO`` blocks the online run executes. A from-empty render (no start
-revision) skips the CREATEs, because r6h3's offline ``create_all`` already
-rendered them, but still renders the guards and lockdown. Unlike online, the
-offline CREATEs assume the tables are absent, since offline mode cannot
-inspect the database.
+Offline (``--sql``): the guards and the RLS lockdown render as the same
+``DO`` blocks the online run executes. CREATE TABLE renders for an explicit
+``FROM:TO`` range. A from-empty render (no start revision) skips the CREATEs,
+because r6h3's offline ``create_all`` already rendered them, but still
+renders the guards and lockdown. Unlike online, the offline CREATEs assume
+the tables are absent, since offline mode cannot inspect the database.
 
 downgrade() is a deliberate no-op. These tables may predate this revision
 (create_all-provisioned environments), and dropping them would destroy live
@@ -123,12 +116,9 @@ def _enum_guard(name: str, labels: List[str]) -> str:
             IF kind IS NULL THEN
                 RETURN;
             END IF;
-            IF kind <> 'e' THEN
-                RAISE EXCEPTION 'GOO-686: public.{name} exists but is not an enum type (pg_type.typtype = %); the realtime status models need an enum with labels %. Rename or drop it by hand before upgrading.', kind, {expected};
-            END IF;
             SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) INTO found
                 FROM pg_enum e WHERE e.enumtypid = 'public.{name}'::regtype;
-            IF found IS DISTINCT FROM {expected} THEN
+            IF kind <> 'e' OR found IS DISTINCT FROM {expected} THEN
                 RAISE EXCEPTION 'GOO-686: existing enum type public.{name} has labels %, expected %; the realtime status models cannot use it. Fix or rename the type by hand before upgrading.', found, {expected};
             END IF;
         END
@@ -136,40 +126,22 @@ def _enum_guard(name: str, labels: List[str]) -> str:
         """
 
 
-def _column_guard(table: sa.Table) -> str:
-    """Fail if a pre-existing ``table`` lacks any column its model declares.
-
-    Names the missing columns and gives the diagnostic query. The legacy
-    Supabase ``websocket_connections`` (no ``organization_id`` /
-    ``connection_status``) is the known case.
+_LEGACY_SHAPE_GUARD = """
+    DO $$
+    BEGIN
+        IF to_regclass('public.websocket_connections') IS NOT NULL AND (
+            NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'websocket_connections'
+                AND column_name = 'organization_id')
+            OR NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'websocket_connections'
+                AND column_name = 'connection_status')
+        ) THEN
+            RAISE EXCEPTION 'GOO-686: public.websocket_connections has the legacy Supabase shape (no organization_id / connection_status), which the WebSocketConnection model cannot use. Rename or migrate it by hand, then rerun the upgrade.';
+        END IF;
+    END
+    $$
     """
-    expected = _sql_list([column.name for column in table.columns])
-    diagnose = (
-        "SELECT column_name, data_type FROM information_schema.columns "
-        f"WHERE table_schema = ''public'' AND table_name = ''{table.name}'' "
-        "ORDER BY ordinal_position"
-    )
-    return f"""
-        DO $$
-        DECLARE
-            missing text[];
-        BEGIN
-            IF to_regclass('public."{table.name}"') IS NULL THEN
-                RETURN;
-            END IF;
-            SELECT array_agg(c ORDER BY c) INTO missing
-                FROM unnest({expected}) AS c
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = '{table.name}'
-                    AND column_name = c
-                );
-            IF missing IS NOT NULL THEN
-                RAISE EXCEPTION 'GOO-686: existing public.{table.name} is missing column(s) % that its ORM model needs (for websocket_connections this is the legacy Supabase shape). Inspect it with: {diagnose}; then rename or migrate the table by hand and rerun the upgrade.', missing;
-            END IF;
-        END
-        $$
-        """
 
 
 def _lockdown(table: str) -> str:
@@ -191,22 +163,9 @@ def _lockdown(table: str) -> str:
         """
 
 
-def _render_creates(tables: List[sa.Table]) -> None:
-    """Offline DDL for exactly these tables: their 3 enum types once each,
-    then the tables in FK order, then their indexes."""
-    for name, labels in _enum_types(tables).items():
-        op.execute(_create_enum(name, labels))
-    for table in sa.schema.sort_tables(tables):
-        op.execute(sa.schema.CreateTable(table))
-        for index in sorted(table.indexes, key=lambda i: str(i.name)):
-            op.execute(sa.schema.CreateIndex(index))
-
-
-def _create_enum(name: str, labels: List[str]) -> str:
-    return f"CREATE TYPE {name} AS ENUM (" + ", ".join(f"'{v}'" for v in labels) + ")"
-
-
 def upgrade() -> None:
+    from src.models.base import Base
+
     tables = _model_tables()
     bind = op.get_bind()
     # op.get_context().as_sql == offline mode; unlike context.is_offline_mode()
@@ -217,12 +176,11 @@ def upgrade() -> None:
     if postgres:
         for name, labels in _enum_types(tables).items():
             op.execute(_enum_guard(name, labels))
-        for table in tables:
-            op.execute(_column_guard(table))
+        op.execute(_LEGACY_SHAPE_GUARD)
 
     if offline:
         if context.get_starting_revision_argument() not in (None, "base"):
-            _render_creates(tables)
+            Base.metadata.create_all(bind=bind, tables=tables, checkfirst=False)
         # else: r6h3_model_baseline already rendered the CREATEs.
     else:
         existing = set(sa.inspect(bind).get_table_names())
@@ -232,16 +190,13 @@ def upgrade() -> None:
                 "GOO-686: creating missing realtime status tables: %s",
                 ", ".join(table.name for table in missing),
             )
-            # Table.create (not metadata.create_all, which would also create
-            # every other enum type the metadata knows) creates just this
-            # table, its indexes and, if missing, its own enum types.
-            for table in sa.schema.sort_tables(missing):
-                table.create(bind=bind, checkfirst=True)
+            # create_all orders tables by foreign key and creates enum types.
+            Base.metadata.create_all(bind=bind, tables=missing, checkfirst=True)
 
     if postgres:
         # Created now or pre-existing: never leave one reachable by PostgREST.
-        for table_name in TABLES:
-            op.execute(_lockdown(table_name))
+        for table in TABLES:
+            op.execute(_lockdown(table))
 
 
 def downgrade() -> None:
