@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ReactNode } from 'react';
-import { render, waitFor } from '@testing-library/react';
+import { render, waitFor } from '@/test/test-utils';
 import toast from 'react-hot-toast';
 import { AuthProvider } from '@/hooks/useAuth';
 import { useAuthStore } from '@/stores/authStore';
