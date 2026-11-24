@@ -16,7 +16,9 @@ import {
   DURABLE_CONFIRMATION_CHANGED_NOTICE,
   DURABLE_CONFIRMATION_CHECK_FAILED_NOTICE,
   DURABLE_CONFIRMATION_GONE_NOTICE,
+  DURABLE_CONFIRMATION_MOVED_ON_NOTICE,
   DURABLE_CONFIRMATION_SEND_FAILED_NOTICE,
+  DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
   MAX_DURABLE_POLL_FAILURES,
   useAgentChatStore,
 } from '@/store/agentChatStore';
@@ -137,6 +139,42 @@ describe('durable confirmations take the durable path (FL2D-1)', () => {
     expect(state.isConfirming).toBe(false);
     expect(state.isStreaming).toBe(false);
   });
+
+  it.each<[string, unknown, string, boolean]>([
+    [
+      'an AgentMessage object',
+      {
+        status: 'completed',
+        result: {
+          message: { role: 'assistant', content: 'Ingested 1 paper.' },
+        },
+      },
+      'Ingested 1 paper.',
+      false,
+    ],
+    [
+      'a failed backend job',
+      { status: 'failed', result: { error: 'The backend job failed.' } },
+      'The backend job failed.',
+      true,
+    ],
+  ])(
+    'confirm poll settles a completed run whose output carries %s',
+    async (_label, output, expected, isError) => {
+      parkDurableConfirmation();
+      serviceMocks.getDurableRunStatus.mockResolvedValue(
+        runStatus('COMPLETED', output)
+      );
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(2 * 3000);
+      await p;
+
+      const state = useAgentChatStore.getState();
+      expect(state.messages[0].content).toBe(expected);
+      expect(Boolean(state.messages[0].isError)).toBe(isError);
+    }
+  );
 
   it('keeps the card when a durable confirmation has no wait token', async () => {
     parkDurableConfirmation(null);
@@ -259,39 +297,57 @@ describe('a durable card clicked before its wait token lands (GOO-748)', () => {
     expect(state.pendingConfirmations['thread-A']).toBeUndefined();
   });
 
-  it.each([
-    ['the run still has no token', () => Promise.resolve(awaiting())],
-    ['the status read fails', () => Promise.reject(runStatusError(502))],
-    ['the status read gets a 503', () => Promise.reject(runStatusError(503))],
+  it.each<[string, () => Promise<unknown>, string]>([
+    [
+      'the run still has no token',
+      () => Promise.resolve(awaiting()),
+      STILL_PREPARING,
+    ],
+    [
+      'the status read fails',
+      () => Promise.reject(runStatusError(502)),
+      DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
+    ],
+    [
+      'the status read gets a 503',
+      () => Promise.reject(runStatusError(503)),
+      DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
+    ],
     [
       'the status read hits a network error',
       () => Promise.reject(new TypeError('Failed to fetch')),
+      DURABLE_CONFIRMATION_UNREACHABLE_NOTICE,
     ],
-  ])('keeps the card with a visible message when %s', async (_label, read) => {
-    parkDurableConfirmation(null);
-    serviceMocks.getDurableRunStatus.mockImplementation(read);
+  ])(
+    'keeps the card with a visible message when %s',
+    async (_label, read, notice) => {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockImplementation(read);
 
-    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
-    await vi.advanceTimersByTimeAsync(3000);
-    await p;
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
 
-    expect(serviceMocks.getDurableRunStatus).toHaveBeenCalledWith(
-      'run_cmabc123'
-    );
-    expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
-    expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
-    const state = useAgentChatStore.getState();
-    expect(state.pendingConfirmations['thread-A']?.jobId).toBe('run_cmabc123');
-    expect(state.messages[0].content).toBe(STILL_PREPARING);
-    expect(state.isConfirming).toBe(false);
-    expect(state.isStreaming).toBe(false);
-  });
+      expect(serviceMocks.getDurableRunStatus).toHaveBeenCalledWith(
+        'run_cmabc123'
+      );
+      expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+      expect(serviceMocks.confirmAction).not.toHaveBeenCalled();
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']?.jobId).toBe(
+        'run_cmabc123'
+      );
+      expect(state.messages[0].content).toBe(notice);
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
 
   it.each<[string, Record<string, unknown>]>([
     ['with an old token', { status: 'running', waitTokenId: 'wait-old' }],
     ['without a token', { status: 'running' }],
   ])(
-    'settles with the changed notice when the run has moved on %s',
+    'settles with the moved-on notice when the run has moved on %s',
     async (_label, metadata) => {
       parkDurableConfirmation(null);
       serviceMocks.getDurableRunStatus.mockResolvedValue({
@@ -308,7 +364,7 @@ describe('a durable card clicked before its wait token lands (GOO-748)', () => {
       const state = useAgentChatStore.getState();
       expect(state.pendingConfirmations['thread-A']).toBeUndefined();
       expect(state.messages[0].content).toBe(
-        DURABLE_CONFIRMATION_CHANGED_NOTICE
+        DURABLE_CONFIRMATION_MOVED_ON_NOTICE
       );
       expect(state.messages[0].content).not.toBe(STILL_PREPARING);
       expect(state.isConfirming).toBe(false);
@@ -316,21 +372,46 @@ describe('a durable card clicked before its wait token lands (GOO-748)', () => {
     }
   );
 
-  it.each([
+  it.each<[string, unknown, string, boolean]>([
     [
+      // The real task output: result is the backend job's
+      // AgentExecuteResponse, whose message is an AgentMessage object.
       'COMPLETED',
-      runStatus('COMPLETED', { result: { message: 'Ingested 1 paper.' } }),
+      runStatus('COMPLETED', {
+        status: 'completed',
+        result: {
+          message: { role: 'assistant', content: 'Ingested 1 paper.' },
+        },
+      }),
       'Ingested 1 paper.',
+      false,
+    ],
+    [
+      // The backend job failed, but the Trigger run still COMPLETED.
+      'COMPLETED-with-a-failed-job',
+      runStatus('COMPLETED', {
+        status: 'failed',
+        result: { error: 'The backend job failed.' },
+      }),
+      'The backend job failed.',
+      true,
+    ],
+    [
+      'COMPLETED-with-a-timed-out-job',
+      runStatus('COMPLETED', { status: 'timeout' }),
+      'Action failed.',
+      true,
     ],
     [
       'FAILED',
       { ...runStatus('FAILED'), error: 'The ingest step crashed.' },
       'The ingest step crashed.',
+      true,
     ],
-    ['CANCELED', runStatus('CANCELED'), 'This request was cancelled.'],
+    ['CANCELED', runStatus('CANCELED'), 'This request was cancelled.', true],
   ])(
     'settles from a %s run and completes nothing',
-    async (_status, run, expected) => {
+    async (_status, run, expected, isError) => {
       parkDurableConfirmation(null);
       serviceMocks.getDurableRunStatus.mockResolvedValue(run);
 
@@ -345,7 +426,49 @@ describe('a durable card clicked before its wait token lands (GOO-748)', () => {
       const state = useAgentChatStore.getState();
       expect(state.pendingConfirmations['thread-A']).toBeUndefined();
       expect(state.messages[0].content).toBe(expected);
+      expect(state.messages[0].content).not.toContain('[object Object]');
+      expect(Boolean(state.messages[0].isError)).toBe(isError);
       expect(state.messages[0].isStreaming).toBe(false);
+      expect(state.isConfirming).toBe(false);
+      expect(state.isStreaming).toBe(false);
+    }
+  );
+
+  it('settles with the changed notice when a tokenless run parked a different step', async () => {
+    parkDurableConfirmation(null);
+    serviceMocks.getDurableRunStatus.mockResolvedValue(
+      awaiting(undefined, 'b'.repeat(64))
+    );
+
+    const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+
+    expect(serviceMocks.completeDurableConfirmation).not.toHaveBeenCalled();
+    const state = useAgentChatStore.getState();
+    expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+    expect(state.messages[0].content).toBe(DURABLE_CONFIRMATION_CHANGED_NOTICE);
+  });
+
+  it.each([
+    [403, DURABLE_CONFIRMATION_MOVED_ON_NOTICE],
+    [404, DURABLE_CONFIRMATION_GONE_NOTICE],
+  ])(
+    'settles instead of offering a retry when sending the late token gets a %i',
+    async (status, notice) => {
+      parkDurableConfirmation(null);
+      serviceMocks.getDurableRunStatus.mockResolvedValue(awaiting('wait-late'));
+      serviceMocks.completeDurableConfirmation.mockRejectedValueOnce(
+        Object.assign(new Error('Failed to confirm: SECRET-BODY'), { status })
+      );
+
+      const p = useAgentChatStore.getState().confirmAction('thread-A', true);
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      const state = useAgentChatStore.getState();
+      expect(state.pendingConfirmations['thread-A']).toBeUndefined();
+      expect(state.messages[0].content).toBe(notice);
       expect(state.isConfirming).toBe(false);
       expect(state.isStreaming).toBe(false);
     }
@@ -736,6 +859,36 @@ describe('durable polls survive a dropped request (FL2D-2)', () => {
     expect(state.isStreaming).toBe(false);
     expect(last.isError).toBeFalsy();
   });
+
+  it.each<[string, unknown, string, boolean]>([
+    [
+      'an AgentMessage object',
+      {
+        status: 'completed',
+        result: { message: { role: 'assistant', content: 'Here you go.' } },
+      },
+      'Here you go.',
+      false,
+    ],
+    ['a timed-out backend job', { status: 'timeout' }, 'Action failed.', true],
+  ])(
+    'send poll settles a completed run whose output carries %s',
+    async (_label, output, expected, isError) => {
+      serviceMocks.getDurableRunStatus.mockResolvedValue(
+        runStatus('COMPLETED', output)
+      );
+
+      useAgentChatStore.getState().setInputValue('hello');
+      const p = useAgentChatStore.getState().sendMessage();
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+
+      const state = useAgentChatStore.getState();
+      const last = state.messages[state.messages.length - 1];
+      expect(last.content).toBe(expected);
+      expect(Boolean(last.isError)).toBe(isError);
+    }
+  );
 
   it('send poll counts only consecutive failures', async () => {
     const blip = new Error('Failed to fetch');

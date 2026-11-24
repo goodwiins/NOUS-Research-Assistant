@@ -1193,7 +1193,9 @@ class AgentChatService {
     signal.throwIfAborted();
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Failed to confirm: ${text}`);
+      throw Object.assign(new Error(`Failed to confirm: ${text}`), {
+        status: res.status,
+      });
     }
   }
 
