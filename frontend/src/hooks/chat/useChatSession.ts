@@ -16,6 +16,7 @@ import { upsertConversationFromThread } from '@/components/chat/shared/threadCon
 import { getErrorStatus } from '@/lib/error-status';
 import { workspaceService } from '@/services/workspaceService';
 import { useChatSessionGuard } from './useChatSessionGuard';
+import { loadUnsentTurns, saveUnsentTurns } from './unsentChatStorage';
 import { useChatStore, onChatSessionReset } from '@/store/chat-store';
 import { useAuthStore } from '@/stores/authStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -97,6 +98,12 @@ export interface UseChatSessionReturn {
     message: import('@/types/workspace').ChatMessage
   ) => void;
   isAuthenticated: boolean;
+  /** Signed out in the store, but the profile is still resolving or only
+   * /auth/me is unavailable for a verified user: no login redirect. */
+  isAuthPending: boolean;
+  /** Pending because /auth/me failed every retry, with no retry in flight:
+   * show the outage, not a loading state. */
+  isProfileUnavailable: boolean;
 
   // Derived
   activeThreadId: string | null;
@@ -170,9 +177,25 @@ export function useChatSession(): UseChatSessionReturn {
   const unavailableInitialUrlThreadRef = useRef<string | null>(null);
 
   // ---- Auth ----
-  const { isAuthenticated, user } = useAuthStore(
-    useShallow((s) => ({ isAuthenticated: s.isAuthenticated, user: s.user }))
-  );
+  const { isAuthenticated, user, isAuthLoading, profileUnavailable } =
+    useAuthStore(
+      useShallow((s) => ({
+        isAuthenticated: s.isAuthenticated,
+        user: s.user,
+        isAuthLoading: s.isLoading,
+        profileUnavailable: s.profileUnavailable,
+      }))
+    );
+  // GOO-752: the profile is still resolving (first load, or /auth/me retries
+  // after a transient failure), or getUser() verified the user and only
+  // /auth/me is unavailable. Neither is a signed-out state, so the page must
+  // not redirect to login while it lasts.
+  const isAuthPending =
+    !isAuthenticated && (isAuthLoading || profileUnavailable);
+  // GOO-759: the retries ran out and nothing is in flight. The transcript
+  // says so instead of spinning; a Retry puts it back to loading.
+  const isProfileUnavailable =
+    !isAuthenticated && profileUnavailable && !isAuthLoading;
   const userId = user?.id ?? null;
 
   // ---- Store bindings ----
@@ -341,9 +364,11 @@ export function useChatSession(): UseChatSessionReturn {
     }
   }, [isAuthenticated]);
 
-  // Redirect to login if not authenticated
+  // Redirect to login only on a real signed-out state: no verified user, or
+  // a token /auth/me rejected (401/403). Both settle isLoading false with
+  // profileUnavailable false.
   useEffect(() => {
-    if (!isAuthenticated && !isInitializing) {
+    if (!isAuthenticated && !isAuthPending && !isInitializing) {
       const timer = setTimeout(() => {
         router.push(
           getLoginPathWithRedirect(
@@ -353,7 +378,7 @@ export function useChatSession(): UseChatSessionReturn {
       }, 1500); // Short delay to show the "Redirecting..." state
       return () => clearTimeout(timer);
     }
-  }, [isAuthenticated, isInitializing, router, threadFromUrl]);
+  }, [isAuthenticated, isAuthPending, isInitializing, router, threadFromUrl]);
 
   // Thread-scoped load-failure signal. The toast fires only when the failed
   // thread is the one on screen, and — unlike the old loading-flag transition
@@ -972,6 +997,14 @@ export function useChatSession(): UseChatSessionReturn {
       parked.delete(oldest);
     }
   };
+  // Park the outgoing thread's overlay when it holds something the server
+  // will not give back on return: an in-flight turn, or a send the server
+  // rejected (GOO-772). A rejected send streams nothing, and its text may
+  // exist only in that bubble.
+  const shouldParkOverlay = (outgoingThreadId: string): boolean =>
+    messagesRef.current.length > 0 &&
+    (useChatStore.getState().streamingThreadId === outgoingThreadId ||
+      messagesRef.current.some((message) => message.sendFailed !== undefined));
   // An account switch (A -> B without sign-out) keeps isAuthenticated true and
   // this page mounted. Drop every piece of the previous account's local state:
   // workspace, sidebar list and pagination, transcript overlay, parked
@@ -982,15 +1015,30 @@ export function useChatSession(): UseChatSessionReturn {
     sessionUserIdRef.current = userId;
     isHydratedRef.current = false;
     parkedMessagesRef.current.clear();
-    localMessagesThreadIdRef.current = null;
     firstPageThreadsRef.current = [];
     threadsPageRef.current = 1;
     unavailableInitialUrlThreadRef.current = null;
     setWorkspace(null);
     setConversations([]);
-    setMessages([]);
     setHasMoreThreads(false);
+    // The account became known after the thread did (a reload restores the
+    // selection before the profile): give back this account's unsent turns
+    // for it (GOO-788). For any other account this finds none.
+    const threadId = userId ? useChatStore.getState().currentThreadId : null;
+    localMessagesThreadIdRef.current = threadId;
+    setMessages(userId && threadId ? loadUnsentTurns(userId, threadId) : []);
   }, [userId]);
+
+  // Mirror the displayed thread's rejected sends to sessionStorage so a
+  // reload does not lose them (GOO-788). Declared after the account effect
+  // and before the switch effect: in a commit that changes either, this reads
+  // the thread and owner the `messages` were rendered for.
+  useEffect(() => {
+    const threadId = localMessagesThreadIdRef.current;
+    const ownerUserId = sessionUserIdRef.current;
+    if (!threadId || !ownerUserId) return;
+    saveUnsentTurns(ownerUserId, threadId, messages);
+  }, [messages]);
 
   useEffect(() => {
     const outgoingThreadId = localMessagesThreadIdRef.current;
@@ -998,11 +1046,7 @@ export function useChatSession(): UseChatSessionReturn {
     if (!activeThreadId) {
       // "New chat" mid-turn: park the outgoing thread's overlay too, so
       // returning to it restores the in-flight turn like any other switch.
-      if (
-        outgoingThreadId &&
-        messagesRef.current.length > 0 &&
-        useChatStore.getState().streamingThreadId === outgoingThreadId
-      ) {
+      if (outgoingThreadId && shouldParkOverlay(outgoingThreadId)) {
         parkOverlay(outgoingThreadId, messagesRef.current);
       }
       localMessagesThreadIdRef.current = null;
@@ -1021,11 +1065,7 @@ export function useChatSession(): UseChatSessionReturn {
       return;
     }
 
-    if (
-      outgoingThreadId &&
-      messagesRef.current.length > 0 &&
-      useChatStore.getState().streamingThreadId === outgoingThreadId
-    ) {
+    if (outgoingThreadId && shouldParkOverlay(outgoingThreadId)) {
       // Must go through parkOverlay, not a bare `.set` — this is the ordinary
       // switch-away path and therefore the one that actually parks a thread the
       // user may then delete mid-stream (round-3 L4). A raw set here left the
@@ -1056,7 +1096,10 @@ export function useChatSession(): UseChatSessionReturn {
       setMessages(parked);
       return;
     }
-    setMessages([]);
+    // Nothing parked in memory, as after a reload: restore the sends the
+    // server rejected from this tab's storage (GOO-788).
+    const ownerUserId = sessionUserIdRef.current;
+    setMessages(ownerUserId ? loadUnsentTurns(ownerUserId, activeThreadId) : []);
   }, [activeThreadId]);
 
   return {
@@ -1080,6 +1123,8 @@ export function useChatSession(): UseChatSessionReturn {
     storeMessages: activeThreadMessages,
     addMessageToStore,
     isAuthenticated,
+    isAuthPending,
+    isProfileUnavailable,
 
     // Derived
     activeThreadId,

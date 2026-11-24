@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from src.core.database import get_db
 from src.core.dependencies import get_current_user
 from src.models.research_project_role import ResearchProjectRole
+from src.services.research import draft_release_service as release_service
 from src.services.research import extraction_forms_service as svc
 from src.services.research import extraction_rules as rules
 from src.services.research_engine.project_access import ResearchAction
@@ -79,10 +80,14 @@ def harness(
         if required is not None and required not in roles:
             raise HTTPException(403, f"{required.value} role required")
         return SimpleNamespace(
-            collection=SimpleNamespace(id=pid), effective_roles=frozenset(roles)
+            collection=SimpleNamespace(id=pid),
+            effective_roles=frozenset(roles),
+            release_edges=None,
         )
 
     monkeypatch.setattr(_routes(), "resolve_project", fake_resolve)
+    # GOO-721: staling writers resolve through draft_release_service.
+    monkeypatch.setattr(release_service, "resolve_for_staling", fake_resolve)
     monkeypatch.setattr(svc, "matrix_project_id", AsyncMock(return_value=project_id))
     test_app.dependency_overrides[get_current_user] = lambda: user
     test_app.dependency_overrides[get_db] = lambda: db

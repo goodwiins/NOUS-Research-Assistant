@@ -11,6 +11,11 @@ import {
 const mockRouterPush = vi.fn();
 const mockRouterReplace = vi.fn();
 
+const toastErrorMock = vi.hoisted(() => vi.fn());
+vi.mock('react-hot-toast', () => ({
+  default: { error: (...args: unknown[]) => toastErrorMock(...args) },
+}));
+
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
 }));
@@ -78,6 +83,7 @@ function setup(overrides: Record<string, unknown> = {}): {
     setInput,
     handleSubmit,
     retryLast,
+    isBusy: false,
     conversations: [makeConversation()],
     activeThreadId: 'thread-1',
     setCurrentThread,
@@ -301,4 +307,54 @@ it('does not re-list memories after old account deletion settles', async () => {
   });
   expect(result.current.commandOutputs).toEqual([]);
   expect(listMemoriesMock).not.toHaveBeenCalled();
+});
+
+describe('synthesis commands', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useChatStore.getState().reset();
+  });
+
+  it('sends the template through a deferred handleSubmit', async () => {
+    const { result, setInput, handleSubmit } = setup();
+    act(() => {
+      result.current.handleSlashCommand('summarize');
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The draft is not replaced first; handleSubmit puts the template back
+    // itself if it rejects the send (GOO-751).
+    expect(setInput).not.toHaveBeenCalled();
+    expect(handleSubmit).toHaveBeenCalledWith(
+      expect.stringContaining('Summarize the key findings')
+    );
+  });
+
+  it('keeps the draft, sends nothing and says why while busy', async () => {
+    const { result, setInput, handleSubmit } = setup({ isBusy: true });
+    act(() => {
+      result.current.handleSlashCommand('gaps');
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(setInput).not.toHaveBeenCalled();
+    expect(handleSubmit).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      'Wait for the current reply to finish before running a command.'
+    );
+  });
+
+  it('drops the deferred send when the account resets inside the window', async () => {
+    const { result, handleSubmit } = setup();
+    act(() => {
+      result.current.handleSlashCommand('timeline');
+      useChatStore.getState().reset();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(handleSubmit).not.toHaveBeenCalled();
+  });
 });

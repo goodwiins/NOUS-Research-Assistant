@@ -161,6 +161,10 @@ export interface ChatPageMessage {
    * response, stream exception). Renders an error block with a Retry button
    * instead of an ambiguous blank bubble. Local-only; never persisted. */
   error?: { message: string; category?: string };
+  /** A user turn the server never accepted (HTTP rejection or no response,
+   * GOO-772). Local-only, never sent again as history; the bubble offers
+   * Retry and Edit so the text is never lost. */
+  sendFailed?: { message: string };
   /** Persisted per-response feedback (chat_messages.feedback_rating /
    * feedback_text). Present on canonical rows the user has rated. */
   feedback?: { rating: number | null; comment: string | null };
@@ -328,11 +332,14 @@ function mergeLocalProvenance(
 }
 
 /** A local-only row the user still has to act on: a failure bubble with its
- * Retry control, or a pending approval card. */
+ * Retry control, a user turn the server never accepted, or a pending
+ * approval card. */
 function isRetainedLocalOnly(message: ChatPageMessage): boolean {
   return (
     message.source === 'local-only' &&
-    (message.error !== undefined || message.pendingApproval !== undefined)
+    (message.error !== undefined ||
+      message.sendFailed !== undefined ||
+      message.pendingApproval !== undefined)
   );
 }
 
@@ -340,14 +347,17 @@ function isRetainedLocalOnly(message: ChatPageMessage): boolean {
  * Clears the transcript overlay when the user selects another branch. The
  * previous branch's optimistic rows and failure bubbles belong to a path that
  * is no longer displayed. A pending approval stays: its run is still waiting
- * on the user, and only the confirmation flow may remove it.
+ * on the user, and only the confirmation flow may remove it. So does a user
+ * turn the server never accepted: its text exists nowhere else (GOO-772).
  */
 export function dropBranchOverlays(
   localMessages: ChatPageMessage[]
 ): ChatPageMessage[] {
   const kept = localMessages.filter(
     (message) =>
-      message.source === 'canonical' || message.pendingApproval !== undefined
+      message.source === 'canonical' ||
+      message.pendingApproval !== undefined ||
+      message.sendFailed !== undefined
   );
   return kept.length === localMessages.length ? localMessages : kept;
 }

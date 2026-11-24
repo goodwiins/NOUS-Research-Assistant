@@ -10506,6 +10506,11 @@
             ],
             "title": "Processing Error"
           },
+          "processing_partial": {
+            "default": false,
+            "title": "Processing Partial",
+            "type": "boolean"
+          },
           "processing_retry_count": {
             "default": 0,
             "title": "Processing Retry Count",
@@ -10721,6 +10726,11 @@
           "organization_id": {
             "title": "Organization Id",
             "type": "string"
+          },
+          "processing_partial": {
+            "default": false,
+            "title": "Processing Partial",
+            "type": "boolean"
           },
           "processing_status": {
             "$ref": "#/components/schemas/ApiDocumentStatus"
@@ -32148,6 +32158,38 @@
           "total_time_ms"
         ],
         "title": "WeightExperimentResult",
+        "type": "object"
+      },
+      "WorkerHealthResponse": {
+        "description": "Overall health of the Celery worker infrastructure",
+        "properties": {
+          "healthy": {
+            "title": "Healthy",
+            "type": "boolean"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "workers_online": {
+            "title": "Workers Online",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "healthy",
+          "workers_online",
+          "issues",
+          "timestamp"
+        ],
+        "title": "WorkerHealthResponse",
         "type": "object"
       },
       "WorkerStatsResponse": {
@@ -64030,7 +64072,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerHealthResponse"
+                }
               }
             },
             "description": "Successful Response"

@@ -5,6 +5,12 @@
  * and provides utilities for rendering with interactive citation links.
  */
 
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import { MATH_DELIMITERS } from '@/lib/markdown-utils';
+
 export interface Citation {
   documentId?: string; // Optional: may be undefined for external references
   externalReferenceId?: string; // For non-database references (e.g., arXiv IDs)
@@ -236,7 +242,102 @@ export function extractCitationIndices(
 }
 
 /**
+ * The parsers ChatMarkdown renders with: remark-gfm always, plus remark-math
+ * on the path it takes when `MATH_DELIMITERS` matches. Parsing only (no
+ * rehype), so neither carries KaTeX.
+ */
+const plainMarkdownParser = unified().use(remarkParse).use(remarkGfm).freeze();
+const mathMarkdownParser = unified()
+  .use(remarkParse)
+  .use(remarkGfm)
+  .use(remarkMath)
+  .freeze();
+
+type MarkdownNode = {
+  type: string;
+  value?: string;
+  children?: MarkdownNode[];
+};
+
+// Enough for every committed message of a long thread across its consumers
+// (transcript bubbles and the context rail) without holding unbounded text.
+const RENDERED_INDEX_CACHE_LIMIT = 128;
+const renderedIndexCache = new Map<string, Map<number, readonly number[]>>();
+
+/**
+ * Citation indices CitationRenderer draws as badges for this content.
+ *
+ * The renderer parses the message with ChatMarkdown's plugins and runs
+ * `parseMessageWithCitations` over each `text` node outside links, so markers
+ * inside `code`, `inlineCode`, `math` and `inlineMath` (value-only nodes),
+ * link text, URLs and HTML never become badges. Walking the same tree here
+ * keeps source selection in step with the transcript; scanning the raw string
+ * cannot, because only a Markdown parser knows where code and math begin and
+ * end.
+ *
+ * Committed content only: a full Markdown parse costs about 2 ms per KB, so
+ * calling this per streamed token would re-parse the whole message each time.
+ * Results are cached per content and `citationCount`, because every store
+ * update rebuilds the message and citation arrays that callers pass in.
+ */
+function extractRenderedCitationIndices(
+  content: string,
+  citationCount: number
+): readonly number[] {
+  const byCount =
+    renderedIndexCache.get(content) ?? new Map<number, readonly number[]>();
+  let indices = byCount.get(citationCount);
+  if (!indices) {
+    indices = parseRenderedCitationIndices(content, citationCount);
+    byCount.set(citationCount, indices);
+  }
+  // Re-insert so Map order tracks recency, then drop the oldest entry.
+  renderedIndexCache.delete(content);
+  renderedIndexCache.set(content, byCount);
+  if (renderedIndexCache.size > RENDERED_INDEX_CACHE_LIMIT) {
+    const oldest = renderedIndexCache.keys().next().value;
+    if (oldest !== undefined) renderedIndexCache.delete(oldest);
+  }
+  return indices;
+}
+
+function parseRenderedCitationIndices(
+  content: string,
+  citationCount: number
+): number[] {
+  const parser = MATH_DELIMITERS.test(content)
+    ? mathMarkdownParser
+    : plainMarkdownParser;
+  const indices = new Set<number>();
+
+  // Mirrors the traversal in CitationRenderer's remark plugin.
+  const visit = (node: MarkdownNode, insideLink: boolean): void => {
+    for (const child of node.children ?? []) {
+      if (child.type === 'text' && !insideLink) {
+        for (const segment of parseMessageWithCitations(child.value ?? '', {
+          citationCount,
+        })) {
+          if (segment.citationIndex !== undefined) {
+            indices.add(segment.citationIndex);
+          }
+        }
+        continue;
+      }
+      visit(
+        child,
+        insideLink || child.type === 'link' || child.type === 'linkReference'
+      );
+    }
+  };
+  visit(parser.parse(content) as MarkdownNode, false);
+
+  return Array.from(indices).sort((a, b) => a - b);
+}
+
+/**
  * Select the array items referenced by inline citation markers in the content.
+ * Only markers the transcript renders as badges count, with the same
+ * `citationCount` the renderer uses (see `extractRenderedCitationIndices`).
  *
  * @param content - Assistant message content containing inline citations
  * @param items - Source array aligned to citation numbering (1-based in content)
@@ -246,7 +347,11 @@ export function getReferencedItemsByCitationIndex<T>(
   content: string,
   items: T[]
 ): T[] {
-  const indices = extractCitationIndices(content);
+  // Nothing can resolve against an empty list, so skip the parse. Callers
+  // such as ChatBubble pass a fresh `[]` on every render.
+  if (items.length === 0) return [];
+
+  const indices = extractRenderedCitationIndices(content, items.length);
 
   if (indices.length === 0) {
     return [];

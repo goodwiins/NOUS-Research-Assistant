@@ -389,11 +389,22 @@ test('dialog creates and revokes the selected version with keyboard focus', asyn
   await expect(trigger).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(link).toBeVisible();
+  // Revoking is destructive, so the trigger only opens a confirmation; nothing
+  // is deleted until "Revoke link" is chosen.
   await page.getByRole('button', { name: 'Revoke share link' }).focus();
   await page.keyboard.press('Enter');
+  const confirm = page.getByRole('alertdialog', {
+    name: 'Revoke this share link?',
+  });
+  await expect(confirm).toBeVisible();
+  expect(state.deletes).toEqual([]);
+  await confirm.getByRole('button', { name: 'Revoke link' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(confirm).toHaveCount(0);
   await expect(link).toHaveCount(0);
   await expect(page.getByRole('status')).toHaveText('Share link revoked.');
   expect(state.deletes).toEqual([`/api/v1/artifacts/shares/${shareId}`]);
+  await expect(page.getByText('Share this version', { exact: true })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(trigger).toBeFocused();
   expect(state.unexpected).toEqual([]);

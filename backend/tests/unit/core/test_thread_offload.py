@@ -8,13 +8,24 @@ skip the upload's orphan delete altogether.
 
 import asyncio
 import threading
-from typing import Any, List
+from typing import Any, Callable, List
 
 import pytest
 
 from src.core.thread_offload import to_thread_finish_on_cancel
 
 pytestmark = pytest.mark.unit
+
+
+async def _eventually(pred: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``pred`` from the loop, for work an abandoned thread finishes."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not pred():
+        if loop.time() > deadline:
+            return False
+        await asyncio.sleep(0.01)
+    return True
 
 
 def _blocking(
@@ -128,11 +139,13 @@ async def test_a_hung_thread_is_abandoned_after_the_max_wait(
     try:
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=2)
+        assert "abandoning" in caplog.text
+        # Its result is unknown when we give up, so no cleanup has run yet.
+        assert cleaned == []
     finally:
         release.set()
-    assert "abandoning" in caplog.text
-    # Its result is unknown when we give up, so no cleanup runs for it.
-    assert cleaned == []
+    # GOO-698: the thread runs the cleanup itself once it finishes.
+    assert await _eventually(lambda: cleaned == ["stored-key"])
 
 
 async def test_max_wait_defaults_from_env(

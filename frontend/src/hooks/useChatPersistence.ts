@@ -12,6 +12,7 @@ import {
   useChatStore,
   onChatSessionReset,
   captureChatSession,
+  MAX_REINIT_RETRIES,
 } from '@/store/chat-store';
 import { useAuthStore } from '@/stores/authStore';
 import { workspaceService } from '@/services/workspaceService';
@@ -22,7 +23,6 @@ import {
   ThreadStatus,
 } from '@/types/workspace';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { MAX_REINIT_RETRIES } from '@/store/chat/initialState';
 
 const debugLog =
   process.env.NODE_ENV === 'development'

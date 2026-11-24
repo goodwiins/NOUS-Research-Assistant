@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Document, DocumentFilters, APIErrorClass } from '@/types';
 import { api } from '@/services/api-client';
+import { documentListQueryString } from '@/services/documentListParams';
 import { useAuth } from '@/hooks/useAuth';
 import { isTabHidden } from '@/lib/tabVisibility';
 
@@ -18,6 +19,7 @@ interface BackendDocument {
   file_size?: number;
   processing_status?: string;
   processing_error?: string;
+  processing_partial?: boolean;
   created_at?: string;
   upload_timestamp?: string;
   processing_completed_at?: string;
@@ -110,6 +112,7 @@ const transformDocument = (backendDoc: BackendDocument): Document => {
     file_size: backendDoc.file_size_bytes || backendDoc.file_size || 0,
     processing_status: normalizeProcessingStatus(backendDoc.processing_status),
     processing_error: backendDoc.processing_error,
+    processing_partial: backendDoc.processing_partial === true,
     upload_timestamp:
       backendDoc.created_at ||
       backendDoc.upload_timestamp ||
@@ -133,6 +136,8 @@ interface UseDocumentsState {
   documents: Document[];
   loading: boolean;
   error: string | null;
+  /** True once a fetch has succeeded, so `pagination.total` is real. */
+  hasLoaded: boolean;
   pagination: {
     page: number;
     pageSize: number;
@@ -154,6 +159,11 @@ interface UseDocumentsReturn {
   documents: Document[];
   loading: boolean;
   error: string | null;
+  /**
+   * False until the first fetch succeeds. Before that `pagination.total` is
+   * the initial 0, not a count, so callers showing a total wait for this.
+   */
+  hasLoaded: boolean;
   pagination: UseDocumentsState['pagination'];
   filters: DocumentFilters;
   selectedDocuments: Set<string>;
@@ -217,6 +227,7 @@ export const useDocuments = (
     documents: [],
     loading: false,
     error: null,
+    hasLoaded: false,
     pagination: {
       page: 1,
       pageSize: initialPageSize,
@@ -288,30 +299,13 @@ export const useDocuments = (
         fetchTokenRef.current !== requestToken || !mountedRef.current;
 
       try {
-        const params: Record<string, string | number> = {
-          page: actualPage,
-          page_size: actualPageSize,
-        };
-
-        // Add filters to params with proper null checks
-        // Backend expects document_type and processing_status
-        if (actualFilters?.file_types && actualFilters.file_types.length > 0) {
-          params.document_type = actualFilters.file_types.join(',');
-        }
-        if (actualFilters?.status && actualFilters.status.length > 0) {
-          params.processing_status = actualFilters.status.join(',');
-        }
-        if (actualFilters?.search_term) {
-          params.search = actualFilters.search_term;
-        }
-        if (actualFilters?.date_range) {
-          params.date_from = actualFilters.date_range.start;
-          params.date_to = actualFilters.date_range.end;
-        }
-
-        const queryString = new URLSearchParams(
-          Object.entries(params).map(([k, v]) => [k, String(v)])
-        ).toString();
+        // The backend's own names: size (not page_size), one document_type
+        // and one processing_status (GOO-666 FL2C-3).
+        const queryString = documentListQueryString(
+          actualPage,
+          actualPageSize,
+          actualFilters
+        );
         const response = (await api.get(
           `/documents?${queryString}`
         )) as DocumentsApiResponse;
@@ -371,6 +365,7 @@ export const useDocuments = (
           },
           loading: false,
           error: null,
+          hasLoaded: true,
         }));
       } catch (error) {
         console.error('Error fetching documents:', error);
@@ -389,7 +384,7 @@ export const useDocuments = (
             return;
           }
           if (error.error.status_code === 401) {
-            handleAuthError();
+            handleAuthError(error);
             if (isStale()) return;
             setState((prev) => ({
               ...prev,
@@ -414,25 +409,6 @@ export const useDocuments = (
         // Handle other error types (network errors, etc.)
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
-
-        // Check for various authentication error patterns in error messages
-        const isAuthError =
-          errorMessage.includes('Could not validate credentials') ||
-          errorMessage.includes('Authentication failed') ||
-          errorMessage.includes('Unauthorized') ||
-          errorMessage.includes('Invalid token') ||
-          errorMessage.includes('Session expired');
-
-        if (isAuthError) {
-          handleAuthError();
-          if (isStale()) return;
-          setState((prev) => ({
-            ...prev,
-            loading: false,
-            error: 'Your session has expired. Please log in again.',
-          }));
-          return;
-        }
 
         if (isStale()) return;
         setState((prev) => ({
@@ -529,7 +505,7 @@ export const useDocuments = (
           return { message: FORBIDDEN_MESSAGES.delete, isAuth: false };
         }
         if (error.error.status_code === 401) {
-          handleAuthError();
+          handleAuthError(error);
           return {
             message: 'Your session has expired. Please log in again.',
             isAuth: true,
@@ -544,20 +520,6 @@ export const useDocuments = (
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
 
-      const isAuthError =
-        errorMessage.includes('Could not validate credentials') ||
-        errorMessage.includes('Authentication failed') ||
-        errorMessage.includes('Unauthorized') ||
-        errorMessage.includes('Invalid token') ||
-        errorMessage.includes('Session expired');
-
-      if (isAuthError) {
-        handleAuthError();
-        return {
-          message: 'Your session has expired. Please log in again.',
-          isAuth: true,
-        };
-      }
       return { message: errorMessage, isAuth: false };
     },
     [handleAuthError]
@@ -643,10 +605,14 @@ export const useDocuments = (
 
       await fetchDocuments();
 
+      // Deselect only what was deleted. Failed and skipped ids stay
+      // selected, whether or not they are on the current page, so the user
+      // can retry them in one step (GOO-727).
+      const failedIds = new Set(failures.map(({ id }) => id));
       setState((prev) => {
         const newSelected = new Set(prev.selectedDocuments);
         for (const id of documentIds) {
-          newSelected.delete(id);
+          if (!failedIds.has(id)) newSelected.delete(id);
         }
         return { ...prev, selectedDocuments: newSelected };
       });
@@ -695,7 +661,7 @@ export const useDocuments = (
             throw new Error(FORBIDDEN_MESSAGES.reprocess);
           }
           if (error.error.status_code === 401) {
-            handleAuthError();
+            handleAuthError(error);
             setState((prev) => ({
               ...prev,
               loading: false,
@@ -718,24 +684,6 @@ export const useDocuments = (
         // Handle other error types (network errors, etc.)
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
-
-        // Check for various authentication error patterns in error messages
-        const isAuthError =
-          errorMessage.includes('Could not validate credentials') ||
-          errorMessage.includes('Authentication failed') ||
-          errorMessage.includes('Unauthorized') ||
-          errorMessage.includes('Invalid token') ||
-          errorMessage.includes('Session expired');
-
-        if (isAuthError) {
-          handleAuthError();
-          setState((prev) => ({
-            ...prev,
-            loading: false,
-            error: 'Your session has expired. Please log in again.',
-          }));
-          return;
-        }
 
         setState((prev) => ({
           ...prev,
@@ -794,6 +742,7 @@ export const useDocuments = (
     documents: state.documents,
     loading: state.loading,
     error: state.error,
+    hasLoaded: state.hasLoaded,
     pagination: state.pagination,
     filters: state.filters,
     selectedDocuments: state.selectedDocuments,

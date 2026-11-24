@@ -1,5 +1,6 @@
 'use client';
 
+import { toCsv } from '@/utils/csv';
 import React, { useMemo, useCallback } from 'react';
 import { X, Copy, Download, Table2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -44,9 +45,9 @@ function parseMarkdownToRows(md: string): string[][] {
     );
 }
 
-function rowsToCsv(rows: string[][]): string {
-  return rows.map((row) => row.join(',')).join('\n');
-}
+// Cells come from document text: neutralise formulas and quote properly
+// (GOO-666 FR-15).
+const rowsToCsv = (rows: string[][]): string => toCsv(rows);
 
 function rowsToMarkdown(rows: string[][]): string {
   if (rows.length === 0) return '';

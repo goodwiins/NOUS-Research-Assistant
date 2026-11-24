@@ -15672,6 +15672,11 @@ export interface components {
             /** Processing Error */
             processing_error?: string | null;
             /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
+            /**
              * Processing Retry Count
              * @default 0
              */
@@ -15744,6 +15749,11 @@ export interface components {
             mime_type: string;
             /** Organization Id */
             organization_id: string;
+            /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
             processing_status: components["schemas"]["ApiDocumentStatus"];
             /** Tags */
             tags?: string[] | null;
@@ -24914,6 +24924,20 @@ export interface components {
             weights: {
                 [key: string]: number;
             };
+        };
+        /**
+         * WorkerHealthResponse
+         * @description Overall health of the Celery worker infrastructure
+         */
+        WorkerHealthResponse: {
+            /** Healthy */
+            healthy: boolean;
+            /** Issues */
+            issues: string[];
+            /** Timestamp */
+            timestamp: string;
+            /** Workers Online */
+            workers_online: number;
         };
         /**
          * WorkerStatsResponse
@@ -43283,7 +43307,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkerHealthResponse"];
                 };
             };
         };

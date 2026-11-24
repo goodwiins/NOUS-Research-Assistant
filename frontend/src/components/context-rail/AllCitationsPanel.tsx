@@ -1,7 +1,7 @@
 'use client';
 
 import { BookOpen, FileText } from 'lucide-react';
-import type { CitationItem } from '@/hooks';
+import type { CitationItem } from '@/hooks/useCitationsForThread';
 import { CollapsibleCard } from './CollapsibleCard';
 
 const sourceKind = (external: boolean): string =>

@@ -43,22 +43,20 @@ test("withClientMessageId keeps a caller-supplied key", () => {
   assert.equal(out[0].client_message_id, "caller");
 });
 
-test("tallyIngestRuns counts only completed children as ingested", () => {
+test("tallyIngestRuns counts only an explicit accepted as accepted", () => {
   const tally = tallyIngestRuns([
-    { ok: true, output: { status: "completed" } },
-    { ok: true, output: { status: "failed" } },
-    { ok: true, output: { status: "timeout" } },
-    { ok: true, output: { status: "skipped" } },
     { ok: true, output: { status: "accepted" } },
+    { ok: true, output: { status: "completed" } },
+    { ok: true, output: { status: "skipped" } },
     { ok: true, output: undefined },
     { ok: false, error: new Error("boom") },
   ]);
-  assert.deepEqual(tally, { ingested: 1, accepted: 1, skipped: 1, failed: 4 });
+  assert.deepEqual(tally, { accepted: 1, failed: 4 });
 });
 
 test("tallyIngestRuns accumulates across batches", () => {
   const tally = emptyTally();
-  tallyIngestRuns([{ ok: true, output: { status: "completed" } }], tally);
+  tallyIngestRuns([{ ok: true, output: { status: "accepted" } }], tally);
   tallyIngestRuns([{ ok: false }], tally);
-  assert.deepEqual(tally, { ingested: 1, accepted: 0, skipped: 0, failed: 1 });
+  assert.deepEqual(tally, { accepted: 1, failed: 1 });
 });

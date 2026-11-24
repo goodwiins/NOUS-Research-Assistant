@@ -19,6 +19,8 @@ from src.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
+_RETRY_FAILED = "Retry processing failed"
+
 
 def get_db_session():
     """Get database session for background tasks"""
@@ -151,25 +153,35 @@ def retry_failed_processing(self, job_id: str):
             processing_service.process_document(document, job)
         )
 
+        # The job row is the record clients poll: report what was committed,
+        # not what the returned dict claims (GOO-776).
+        db.refresh(job)
+        succeeded = (
+            processing_results.get("success") is True
+            and job.status == JobStatus.COMPLETED
+        )
+
         return {
-            "status": "completed" if processing_results["success"] else "failed",
+            "status": "completed" if succeeded else "failed",
             "job_id": job_id,
             "document_id": str(document.id),
             "retry_attempt": job.retry_count,
             "processing_results": processing_results,
         }
 
-    except Exception as e:
-        logger.error(f"Retry processing failed for job {job_id}: {str(e)}")
+    except Exception:
+        # Fixed text: job.error_message and this result are returned to clients;
+        # the exception detail (paths, hosts) goes to the log only.
+        logger.exception("Retry processing failed for job %s", job_id)
 
         if "job" in locals():
-            job.fail_job(str(e))
+            job.fail_job(_RETRY_FAILED)
             db.commit()
 
         return {
             "status": "error",
             "job_id": job_id,
-            "error": str(e),
+            "error": _RETRY_FAILED,
             "retry_attempt": job.retry_count if "job" in locals() else 0,
         }
 

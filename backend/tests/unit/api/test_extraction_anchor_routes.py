@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from src.models.extraction_matrix import ExtractionObservation
 from src.models.research_project_role import ResearchProjectRole
+from src.services.research import draft_release_service as release_service
 from src.services.research import extraction_forms_service as svc
 from src.services.research import source_anchors as anchors
 from src.services.research_engine.project_access import ResearchAction
@@ -133,6 +134,7 @@ def test_archived_project_reads_observations_but_refuses_accept(
         )
 
     monkeypatch.setattr(_routes(), "resolve_project", archived)
+    monkeypatch.setattr(release_service, "resolve_for_staling", archived)
     row = _row(cell, "We enrolled 40 adults.")
     harness.db.execute.side_effect = [_result(rows=[row]), _result(rows=[])]
     response = harness.client.get(

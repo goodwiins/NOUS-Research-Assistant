@@ -9,8 +9,10 @@ import hashlib
 import json
 import logging
 import random
+import socket
+import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 import redis.asyncio as redis
@@ -36,6 +38,36 @@ _COMMAND_ERRORS = (ResponseError, DataError)
 _UNAVAILABLE_ERRORS = (RedisError, OSError, asyncio.TimeoutError)
 
 
+def _hang_up(client: redis.Redis) -> None:
+    """End the connections of a client whose event loop is not running.
+
+    They cannot be closed the asyncio way: ``aclose()`` needs the loop that
+    opened them, and raises "Event loop is closed" or "attached to a
+    different loop" from any other. Left alone, each connection stays open
+    until the garbage collector breaks its transport/protocol cycle, so
+    short-lived loops piled up open Redis connections (GOO-698). Shutting
+    the socket down ends the TCP connection now, so Redis frees it; the file
+    descriptor is released when the transport is collected.
+
+    Reads redis-py's pool internals defensively: if they change, this does
+    nothing and the connections go with the garbage collector, as before.
+    """
+    pool = getattr(client, "connection_pool", None)
+    connections = list(getattr(pool, "_available_connections", ())) + list(
+        getattr(pool, "_in_use_connections", ())
+    )
+    for connection in connections:
+        writer = getattr(connection, "_writer", None)
+        transport = getattr(writer, "transport", None)
+        sock = transport.get_extra_info("socket") if transport is not None else None
+        if sock is None:
+            continue
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # already closed or reset by the peer
+
+
 class EvidenceCacheService:
     """Redis caching service for evidence meter data.
 
@@ -51,18 +83,23 @@ class EvidenceCacheService:
         # An injected client (tests) wins. Otherwise one client, bound to the
         # event loop that first used it: an asyncio Redis client's
         # connections belong to that loop. A different loop that is running
-        # at the same time gets a cache miss instead of its own client, and
-        # once the bound loop has closed the next loop takes over. Keeping a
-        # client per loop leaked one open connection per short-lived loop,
-        # because each client's connections keep their loop alive (GOO-693).
+        # at the same time gets a cache miss instead of its own client. Once
+        # the bound loop is no longer running (closed, or stopped and left
+        # open), the next loop takes over and the old client is hung up.
+        # Keeping a client per loop leaked one open connection per
+        # short-lived loop, because each client's connections keep their
+        # loop alive (GOO-693).
+        #
+        # The loop and its client are one tuple, swapped under a lock, so a
+        # loop can never be paired with another loop's client (GOO-698).
         self.redis_client: Optional[redis.Redis] = None
-        self._bound_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._bound_client: Optional[redis.Redis] = None
+        self._binding: Optional[Tuple[asyncio.AbstractEventLoop, redis.Redis]] = None
+        self._binding_lock = threading.Lock()
         self._unavailable_until = 0.0
 
     def _client(self) -> Optional[redis.Redis]:
         """The client for the running loop, created lazily (no I/O), or None
-        while backing off or when another live loop owns the client."""
+        while backing off or when another running loop owns the client."""
         if time.monotonic() < self._unavailable_until:
             return None
         if self.redis_client is not None:
@@ -71,26 +108,29 @@ class EvidenceCacheService:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return None  # only usable from async code
-        if self._bound_client is not None:
-            if self._bound_loop is loop:
-                return self._bound_client
-            if self._bound_loop is not None and not self._bound_loop.is_closed():
-                return None  # owned by a loop that is still running: skip cache
-        try:
-            client = redis.Redis.from_url(
-                settings.REDIS_URL or "redis://localhost:6379/0",
-                decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5,
-                health_check_interval=30,
-            )
-        except Exception as e:
-            logger.error(f"Failed to create Redis client: {e}")
-            self._mark_unavailable()
-            return None
-        # Drop the client of a closed loop: its connections can no longer be
-        # used, and releasing the reference lets them be collected.
-        self._bound_loop, self._bound_client = loop, client
+        with self._binding_lock:
+            stale = self._binding
+            if stale is not None:
+                bound_loop, bound_client = stale
+                if bound_loop is loop:
+                    return bound_client
+                if bound_loop.is_running():
+                    return None  # owned by a loop that is still running: skip
+            try:
+                client = redis.Redis.from_url(
+                    settings.REDIS_URL or "redis://localhost:6379/0",
+                    decode_responses=True,
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
+                    health_check_interval=30,
+                )
+            except Exception as e:
+                logger.error(f"Failed to create Redis client: {e}")
+                self._mark_unavailable()
+                return None
+            self._binding = (loop, client)
+        if stale is not None:
+            _hang_up(stale[1])
         return client
 
     def _mark_unavailable(self) -> None:

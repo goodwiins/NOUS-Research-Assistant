@@ -79,6 +79,7 @@ describe('entity icon-only button names', () => {
       <RelationshipForm
         sourceEntityId="s1"
         initialData={initial}
+        types={{ status: 'loaded', types: ['KNOWS'] }}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
       />

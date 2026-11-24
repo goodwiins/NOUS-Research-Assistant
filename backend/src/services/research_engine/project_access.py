@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import FrozenSet, Optional, cast
+from typing import Any, FrozenSet, Optional, cast
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -56,6 +56,10 @@ class ProjectContext:
     organization_id: Optional[UUID]
     effective_roles: FrozenSet[ResearchProjectRole]
     workspace_role: Optional[WorkspaceRole]
+    # GOO-721: the release graph's edges, read before the Collection lock and
+    # still current when it was taken (``draft_release_service.resolve_for_
+    # staling``). None means a staling writer rebuilds them under the lock.
+    release_edges: Optional[tuple[Any, ...]] = None
 
 
 def _workspace_role(workspace: Workspace, user_id: UUID) -> Optional[WorkspaceRole]:

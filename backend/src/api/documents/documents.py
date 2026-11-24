@@ -175,6 +175,27 @@ class DocumentResponse(BaseModel):
     updated_at: str
     uploaded_by_user_id: str
     organization_id: str
+    # Indexed, but some optional processing steps failed (GOO-765). Derived
+    # by ``document_processing_partial`` below; false when unknown.
+    processing_partial: bool = False
+
+
+def document_processing_partial(document: Document) -> bool:
+    """Whether ``document`` was processed with warnings (GOO-765).
+
+    The source is the ``processing_partial`` metadata flag that the processing
+    pipeline writes on every run (GOO-658; shown on the detail page since
+    GOO-744). Only a literal ``True`` counts, and only for an indexed
+    document: a flag left over on a queued, processing or failed document
+    never reads as partial, so the field cannot disagree with the status.
+    """
+    metadata = getattr(document, "document_metadata", None)
+    if not isinstance(metadata, dict) or metadata.get("processing_partial") is not True:
+        return False
+    return (
+        ApiDocumentStatus.from_db(document.processing_status)
+        is ApiDocumentStatus.INDEXED
+    )
 
 
 class DocumentDetailResponse(DocumentResponse):
@@ -469,6 +490,7 @@ async def list_documents(
                     file_size_mb=doc.file_size_mb,
                     mime_type=doc.mime_type,
                     processing_status=doc.get_mapped_status(),
+                    processing_partial=document_processing_partial(doc),
                     tags=doc.tags,
                     is_public=doc.is_public,
                     content_preview=doc.get_content_preview(200),
@@ -545,6 +567,7 @@ async def get_document(
         file_size_mb=document.file_size_mb,
         mime_type=document.mime_type,
         processing_status=document.to_dict()["processing_status"],
+        processing_partial=document_processing_partial(document),
         tags=document.tags,
         is_public=document.is_public,
         content_preview=document.get_content_preview(500),
@@ -884,6 +907,7 @@ async def check_duplicate(
             file_size_mb=round((existing.file_size_bytes or 0) / (1024 * 1024), 2),
             mime_type=existing.mime_type or "",
             processing_status=ApiDocumentStatus.from_db(existing.processing_status),
+            processing_partial=document_processing_partial(existing),
             tags=existing.tags or [],
             is_public=existing.is_public or False,
             created_at=str(existing.created_at) if existing.created_at else "",
@@ -1046,6 +1070,7 @@ async def search_documents(
                     file_size_mb=doc.file_size_mb,
                     mime_type=doc.mime_type,
                     processing_status=doc.get_mapped_status(),
+                    processing_partial=document_processing_partial(doc),
                     tags=doc.tags,
                     is_public=doc.is_public,
                     content_preview=doc.get_content_preview(200),
