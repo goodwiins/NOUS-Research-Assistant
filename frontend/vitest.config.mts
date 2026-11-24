@@ -45,6 +45,16 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'lcov', 'json-summary'],
       reportsDirectory: './coverage',
+      // Count every function and branch from the source AST (GOO-757).
+      // The default v8-to-istanbul remapping gives a file that no test
+      // loads one synthetic function and one branch, and marks both covered
+      // when the file's first line is not runtime code (a comment, say). So
+      // 62 untested files each counted as 1/1 functions and 1/1 branches,
+      // and a first test for such a file lowered the totals. It also drops
+      // the branches inside functions that never ran. With this flag an
+      // untested file counts at its real 0%. Recheck this option when
+      // upgrading Vitest past 3.x.
+      experimentalAstAwareRemapping: true,
       include: [
         'src/components/**/*.{ts,tsx}',
         'src/hooks/**/*.{ts,tsx}',

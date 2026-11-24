@@ -149,7 +149,11 @@ necessary, extend the contract here first.
   `node scripts/ci/check_frontend_coverage.mjs
   frontend/coverage/coverage-summary.json` — fails if any global metric
   (lines/branches/functions/statements) drops below the floor committed in
-  `frontend/quality-baseline.json`.
+  `frontend/quality-baseline.json`. Coverage uses AST-aware remapping
+  (`experimentalAstAwareRemapping` in `frontend/vitest.config.mts`), so a
+  file in the coverage `include` that no test loads counts at 0% with all
+  its functions and branches, and a first test for it can only raise the
+  totals.
 - Full `pnpm --dir frontend lint` and the full-tree type-check stay
   advisory until their debt reaches zero — see [testing.md](testing.md) for
   how to move a floor.
