@@ -2,9 +2,6 @@
   "tsconfigProductionExclusions": [
     "app/components/AppNavbar.tsx",
     "src/components/analytics/AnalyticsProvider.tsx",
-    "src/components/layout/AppLayout.tsx",
-    "src/components/layout/Header.tsx",
-    "src/components/layout/Sidebar.tsx",
     "src/components/ui/enhanced-new-chat-dialog.tsx",
     "src/components/ui/shadcn-io/**/*",
     "src/hooks/useAnalyticsTracking.ts",
@@ -15,8 +12,8 @@
     "src/utils/analytics/**/*"
   ],
   "eslint": {
-    "errors": 80,
-    "warnings": 1774,
+    "errors": 75,
+    "warnings": 1695,
     "byFile": {
       "app/(auth)/layout.tsx": {
         "errors": 0,
@@ -257,10 +254,6 @@
       "app/statsig-provider.tsx": {
         "errors": 1,
         "warnings": 2
-      },
-      "src/components/__tests__/testUtils.tsx": {
-        "errors": 0,
-        "warnings": 38
       },
       "src/components/agent-chat/AgentCitationBadge.tsx": {
         "errors": 0,
@@ -535,50 +528,6 @@
         "warnings": 0
       },
       "src/components/chat/WelcomeState.tsx": {
-        "errors": 0,
-        "warnings": 1
-      },
-      "src/components/citations/__tests__/BibliographyExport.test.tsx": {
-        "errors": 0,
-        "warnings": 7
-      },
-      "src/components/citations/__tests__/CitationGraph.test.tsx": {
-        "errors": 1,
-        "warnings": 1
-      },
-      "src/components/citations/__tests__/CitationPreview.test.tsx": {
-        "errors": 1,
-        "warnings": 2
-      },
-      "src/components/citations/BibliographyExport.tsx": {
-        "errors": 0,
-        "warnings": 4
-      },
-      "src/components/citations/CitationErrorBoundary.tsx": {
-        "errors": 0,
-        "warnings": 3
-      },
-      "src/components/citations/CitationGraph.tsx": {
-        "errors": 1,
-        "warnings": 3
-      },
-      "src/components/citations/CitationGraphControls.tsx": {
-        "errors": 0,
-        "warnings": 4
-      },
-      "src/components/citations/CitationGraphSkeleton.tsx": {
-        "errors": 2,
-        "warnings": 0
-      },
-      "src/components/citations/CitationList.tsx": {
-        "errors": 0,
-        "warnings": 4
-      },
-      "src/components/citations/CitationNodeDetails.tsx": {
-        "errors": 0,
-        "warnings": 2
-      },
-      "src/components/citations/CitationPreview.tsx": {
         "errors": 0,
         "warnings": 1
       },
@@ -910,17 +859,9 @@
         "errors": 1,
         "warnings": 3
       },
-      "src/components/layout/Header.tsx": {
-        "errors": 0,
-        "warnings": 3
-      },
       "src/components/layout/PageHeader.tsx": {
         "errors": 0,
         "warnings": 1
-      },
-      "src/components/layout/Sidebar.tsx": {
-        "errors": 0,
-        "warnings": 7
       },
       "src/components/layout/sidebar/SidebarToggle.tsx": {
         "errors": 1,
@@ -1737,9 +1678,9 @@
     }
   },
   "coverage": {
-    "lines": 51.66,
-    "statements": 51.66,
-    "functions": 64.75,
-    "branches": 80.04
+    "lines": 64.0,
+    "statements": 64.0,
+    "functions": 67.8,
+    "branches": 81.0
   }
 }

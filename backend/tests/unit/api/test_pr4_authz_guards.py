@@ -153,23 +153,8 @@ def test_all_connector_routes_require_auth():
         assert get_current_user in calls, f"{route.path} not auth-guarded"
 
 
-def test_metrics_source_gates_mutations_with_require_admin():
-    """src.api.analytics.metrics imports a pre-existing-broken
-    `src.auth.dependencies`, so the router can't be introspected here — assert
-    on the source instead: the 4 mutations depend on require_admin, not
-    get_current_user."""
-    import pathlib
-    import re
-
-    backend = pathlib.Path(__file__).parents[3]
-    src = (backend / "src/api/analytics/metrics.py").read_text()
-    # 4 mutation endpoints carry require_admin.
-    assert src.count("Depends(require_admin)") >= 4
-    # isort may merge this into a combined import line; assert the binding,
-    # not the exact formatting.
-    assert re.search(
-        r"from src\.core\.dependencies import [^\n]*\brequire_admin\b", src
-    )
+# (The source-text check on src/api/analytics/metrics.py was removed with that
+# never-mounted, never-importable router in GOO-690.)
 
 
 def test_require_admin_rejects_non_admin():

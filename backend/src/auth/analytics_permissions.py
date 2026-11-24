@@ -323,10 +323,6 @@ class AnalyticsPermissionsChecker:
             "/api/analytics/export/detailed": [
                 AnalyticsPermission.EXPORT_DETAILED_REPORTS
             ],
-            "/api/analytics/reports/generate": [
-                AnalyticsPermission.GENERATE_CUSTOM_REPORTS
-            ],
-            "/api/analytics/reports/schedule": [AnalyticsPermission.SCHEDULE_REPORTS],
             # Admin endpoints
             "/api/analytics/admin/settings": [
                 AnalyticsPermission.MANAGE_ANALYTICS_SETTINGS

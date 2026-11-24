@@ -45,6 +45,7 @@ async def resolve_and_filter_chunks(
     session: AsyncSession,
     project_id: Optional[str] = None,
     allowed_document_ids: Optional[Collection[UUID]] = None,
+    canonical_ids_only: bool = False,
 ) -> tuple[dict[str, tuple[str, str]], list[Chunk]]:
     """Resolve DO KB chunks to Documents and optionally filter by project.
 
@@ -59,6 +60,10 @@ async def resolve_and_filter_chunks(
     project_id:
         When set, post-filters chunks so only documents belonging to this
         project (via ``CollectionDocument``) survive.
+
+    canonical_ids_only:
+        Bedrock keys are document UUIDs. Drop chunks that do not resolve
+        directly to a live row in the organization.
 
     Returns
     -------
@@ -94,21 +99,26 @@ async def resolve_and_filter_chunks(
         # ``.txt`` mirror.
         doc_id_by_key: dict[str, UUID] = {}
         for k in storage_keys:
-            stem = k.rsplit("/", 1)[-1]
-            if stem.endswith(".txt"):
+            stem = k if canonical_ids_only else k.rsplit("/", 1)[-1]
+            if not canonical_ids_only and stem.endswith(".txt"):
                 stem = stem[:-4]
             try:
                 doc_id_by_key[k] = UUID(stem)
             except ValueError:
                 pass
 
-        filters = [Document.storage_path == k for k in storage_keys]
-        filters += [
-            Document.storage_path.like(f"%/{_escape_like(k)}", escape="\\")
-            for k in storage_keys
-        ]
+        filters = []
+        if not canonical_ids_only:
+            filters.extend(Document.storage_path == k for k in storage_keys)
+            filters.extend(
+                Document.storage_path.like(f"%/{_escape_like(k)}", escape="\\")
+                for k in storage_keys
+            )
         if doc_id_by_key:
             filters.append(Document.id.in_(set(doc_id_by_key.values())))
+
+        if not filters:
+            return {}, []
 
         rows = await session.execute(
             select(Document.id, Document.storage_path, Document.title)
@@ -120,7 +130,7 @@ async def resolve_and_filter_chunks(
         doc_ids_by_storage_alias: dict[str, set[UUID]] = {}
         for doc_id, storage_path, title in rows:
             title_by_doc_id[doc_id] = title
-            if storage_path:
+            if storage_path and not canonical_ids_only:
                 leaf = storage_path.rsplit("/", 1)[-1]
                 for alias in {storage_path, leaf}:
                     doc_ids_by_storage_alias.setdefault(alias, set()).add(doc_id)
@@ -149,7 +159,11 @@ async def resolve_and_filter_chunks(
     # ------------------------------------------------------------------
     # Step 2: project scoping via CollectionDocument
     # ------------------------------------------------------------------
-    chunks_to_emit: list[Chunk] = list(chunks)
+    chunks_to_emit = [
+        chunk
+        for chunk in chunks
+        if not canonical_ids_only or chunk.document_id in title_by_key
+    ]
 
     if project_id and not title_by_key and chunks:
         # No chunks resolved to known docs under project scope — callers
@@ -183,7 +197,7 @@ async def resolve_and_filter_chunks(
                 in_project = {str(r[0]) for r in membership_rows}
                 chunks_to_emit = [
                     c
-                    for c in chunks
+                    for c in chunks_to_emit
                     if (title_by_key.get(c.document_id or "", (None, None))[0] or "")
                     in in_project
                 ]

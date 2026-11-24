@@ -9,6 +9,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, RotateCcw } from 'lucide-react';
 import { usePipelineStore } from '@/store/pipelineStore';
+import { PIPELINE_ERRORS, pipelineErrorText } from '@/store/pipelineErrors';
 import { useProjectStore } from '@/store/projectStore';
 import { PipelineStepper } from './PipelineStepper';
 import { CollectStep } from './steps/CollectStep';
@@ -61,6 +62,29 @@ export const ResearchPipeline: React.FC<ResearchPipelineProps> = ({
     fetchPipeline(projectId);
   }, [projectId, fetchPipeline]);
 
+  // The first load failed (GOO-666 FL2E-3): there is no pipeline to show and
+  // nothing in flight, so a spinner would spin forever. Offer a retry.
+  if (!loading && !pipeline && error) {
+    return (
+      <div
+        role="alert"
+        className="flex flex-col items-center justify-center gap-3 py-16 text-center"
+      >
+        <p className="text-sm text-destructive">
+          Couldn&apos;t load the research pipeline.
+        </p>
+        <button
+          type="button"
+          onClick={() => void fetchPipeline(projectId)}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted"
+        >
+          <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (loading || !pipeline) {
     return (
       <div className="flex items-center justify-center py-16">
@@ -98,15 +122,28 @@ export const ResearchPipeline: React.FC<ResearchPipelineProps> = ({
   return (
     <div className="space-y-2">
       {/* Error banner */}
+      {/* GOO-778: a fixed safe message only; the store logs the detail. */}
       {error && (
         <div role="alert" className="flex items-center justify-between p-3 bg-destructive/10 border border-destructive/30 rounded-lg mb-4">
-          <p className="text-destructive text-sm">{error}</p>
-          <button
-            onClick={clearError}
-            className="text-xs text-destructive underline"
-          >
-            Dismiss
-          </button>
+          <p className="text-destructive text-sm">{pipelineErrorText(error)}</p>
+          <div className="flex items-center gap-3">
+            {error === PIPELINE_ERRORS.load && (
+              <button
+                type="button"
+                onClick={() => void fetchPipeline(projectId)}
+                className="text-xs text-destructive underline"
+              >
+                Retry
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={clearError}
+              className="text-xs text-destructive underline"
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 

@@ -142,4 +142,39 @@ describe('branch transcript projection', () => {
     ).toEqual(['Selected', '']);
     expect(dropBranchOverlays([])).toEqual([]);
   });
+
+  describe('a send the server never accepted (GOO-772)', () => {
+    const unsent = makeChatPageMessage({
+      role: 'user',
+      content: 'Unsent question',
+      source: 'local-only',
+      runtimeId: 'unsent',
+      sendFailed: { message: 'Not sent.' },
+    });
+
+    it('survives a fresh branch refresh', () => {
+      expect(
+        selectDisplayedMessages({
+          localMessages: [unsent],
+          storeMessages: [canonical],
+          messageFreshness: 'fresh',
+          branching: true,
+        }).map((row) => row.runtimeId)
+      ).toEqual(['runtime-selected', 'unsent']);
+    });
+
+    it('survives a fresh page without branching', () => {
+      expect(
+        selectDisplayedMessages({
+          localMessages: [unsent],
+          storeMessages: [canonical],
+          messageFreshness: 'fresh',
+        }).map((row) => row.runtimeId)
+      ).toEqual(['runtime-selected', 'unsent']);
+    });
+
+    it('survives a branch switch, so its text is never lost', () => {
+      expect(dropBranchOverlays([streamError, unsent])).toEqual([unsent]);
+    });
+  });
 });

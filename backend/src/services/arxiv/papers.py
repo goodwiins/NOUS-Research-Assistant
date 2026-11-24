@@ -42,6 +42,20 @@ class PaperSourceError(Exception):
     """Upstream data cannot safely satisfy the requested operation."""
 
 
+# arXiv marks a withdrawn paper in its comment/abstract ("This paper has been
+# withdrawn", "Withdrawn."). Shared by the abstract-page reader and the change
+# tracker, which must see this before calling a paper deleted.
+_WITHDRAWAL_RE = re.compile(
+    r"\b(?:(?:this|the) )?(?:paper|submission|article) (?:has been|was|is) withdrawn\b|^Withdrawn[.!]?(?:\s|$)",
+    re.I,
+)
+
+
+def is_withdrawal_notice(text: str) -> bool:
+    """True when ``text`` carries arXiv's explicit withdrawal notice."""
+    return bool(_WITHDRAWAL_RE.search(text or ""))
+
+
 def normalize_paper_id(value: str) -> str:
     value = value.strip()
     if value.lower().startswith("arxiv:"):
@@ -78,13 +92,7 @@ def parse_abstract_page(html: str, paper_id: str) -> dict[str, Any]:
     abstract_text = re.sub(r"^Abstract:\s*", "", abstract_text)
     comments = soup.select_one("td.comments")
     status_text = abstract_text + " " + (comments.get_text(" ") if comments else "")
-    withdrawal_marker = bool(
-        re.search(
-            r"\b(?:(?:this|the) )?(?:paper|submission|article) (?:has been|was|is) withdrawn\b|^Withdrawn[.!]?(?:\s|$)",
-            status_text,
-            re.I,
-        )
-    )
+    withdrawal_marker = is_withdrawal_notice(status_text)
     withdrawn = (
         True
         if withdrawal_marker

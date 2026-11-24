@@ -266,10 +266,21 @@ export const useAgentActivityStore = create<AgentActivityState>((set) => ({
     set((s) => {
       const run = s.runs[threadId];
       if (!run || run.runId === runId) return s;
+      // A different run id means another run now owns the thread (e.g. a
+      // second tab started one). The cursor counted the old run's frames,
+      // and Codex frames carry no stream id for setStreamSeq to tell the
+      // runs apart, so keeping it would make a resume pinned to the new run
+      // skip that run's frames up to the old seq. The first id a run learns
+      // (runId still unset) keeps its cursor: those seqs are this run's.
+      const switched = run.runId !== undefined;
       return {
         runs: {
           ...s.runs,
-          [threadId]: { ...run, runId },
+          [threadId]: {
+            ...run,
+            runId,
+            ...(switched ? { streamSeq: undefined, streamId: undefined } : {}),
+          },
         },
       };
     }),

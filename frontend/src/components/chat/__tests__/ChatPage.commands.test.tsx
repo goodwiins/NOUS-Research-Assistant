@@ -190,6 +190,7 @@ describe('ChatPage commands, stop/retry/regenerate, and HITL gating', () => {
     input: '',
     setInput: mockSetInput,
     isLoading: false,
+    isBusy: false,
     handleSubmit: mockHandleSubmit,
     handleStop: mockHandleStop,
     pendingConfirmation: null,
@@ -284,6 +285,7 @@ describe('ChatPage commands, stop/retry/regenerate, and HITL gating', () => {
     mockUseChatStreaming.mockReturnValue({
       ...DEFAULT_STREAMING,
       storeIsStreaming: true,
+      isBusy: true,
     });
     render(<ChatPage />);
 
@@ -331,19 +333,23 @@ describe('ChatPage commands, stop/retry/regenerate, and HITL gating', () => {
     );
   });
 
-  it('locks the composer only when the pending confirmation belongs to the active thread', () => {
+  // Which states count as busy (including a confirmation scoped to another
+  // thread, which does not) is decided once in useChatStreaming; see
+  // useChatStreaming.draftRejection.test.ts. The surface only passes it on.
+  it("locks the composer exactly when the streaming hook's isBusy is set", () => {
     mockUseChatStreaming.mockReturnValue({
       ...DEFAULT_STREAMING,
       pendingConfirmation: pendingConfirmationFor('thread-2'),
+      isBusy: false,
     });
-
-    // Belongs to a different thread than the one displayed — not locked.
-    mockConfirmationBelongsToThread.mockReturnValue(false);
     const { rerender } = render(<ChatPage />);
     expect(screen.getByTestId('input-is-loading')).toHaveTextContent('false');
 
-    // Same confirmation, now scoped to the active thread — locked.
-    mockConfirmationBelongsToThread.mockReturnValue(true);
+    mockUseChatStreaming.mockReturnValue({
+      ...DEFAULT_STREAMING,
+      pendingConfirmation: pendingConfirmationFor('thread-1'),
+      isBusy: true,
+    });
     rerender(<ChatPage />);
     expect(screen.getByTestId('input-is-loading')).toHaveTextContent('true');
   });

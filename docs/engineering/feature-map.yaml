@@ -192,10 +192,7 @@ ignore:
     - "frontend/app/visual-test/chat-mobile-controls/page.tsx"
     - "frontend/app/visual-test/response-renderer/page.tsx"
   routers:
-    - "backend/src/api/analytics/dashboards.py"
-    - "backend/src/api/analytics/metrics.py"
     - "backend/src/api/analytics/realtime.py"
-    - "backend/src/api/analytics/reports.py"
     - "backend/src/api/arxiv/arxiv_bulk.py"
     - "backend/src/api/arxiv/arxiv_change_tracking.py"
     - "backend/src/api/arxiv/arxiv_extraction.py"

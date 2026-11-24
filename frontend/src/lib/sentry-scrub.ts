@@ -58,6 +58,9 @@ const MAX_ERROR_MESSAGE_LENGTH = 300;
 export const MAX_SCAN_LENGTH = 4096;
 const MAX_DEPTH = 4;
 const MAX_ARRAY_ITEMS = 20;
+/** Keys scanned per object; the rest are counted, not sent. */
+export const MAX_KEYS = 50;
+export const TRUNCATED_KEYS = '[truncated keys]';
 
 export const FILTERED = '[Filtered]';
 export const OBJECT_PLACEHOLDER = '[Object]';
@@ -94,12 +97,24 @@ const SENSITIVE_KEYS = new Set([
 
 // Suffixes that mark credentials or personal data regardless of prefix
 // (accessToken, supabaseToken, userEmail, clientSecret, ...).
+// Identifiers of sessions are bearer-like, unlike thread or span ids.
 const SENSITIVE_SUFFIX =
-  /(token|secret|password|cookie|authorization|email|apikey|jwt|credentials)$/;
+  /(token|secret|password|cookie|authorization|email|apikey|jwt|credentials|sessionids?)$/;
+// Key ids in any case and separator style (keyId, KEY_ID, apiKey.id,
+// X-API-KEY-ID, AWS_ACCESS_KEY_ID, passkeyId): fail closed, as before this
+// change. No exceptions on purpose: an exception list for ordinary words
+// that end in "key" (monkeyId) could not tell them from camel-case splits
+// (monKeyId, commonKeyId, adHocKeyId), and over-scrubbing a rare harmless
+// value costs far less than letting a key id through.
+const KEY_ID_KEY = /key[_.\-\s]?ids?$/i;
 
 export function isSensitiveKey(key: string): boolean {
   const normalized = normalizeKey(key);
-  return SENSITIVE_KEYS.has(normalized) || SENSITIVE_SUFFIX.test(normalized);
+  return (
+    SENSITIVE_KEYS.has(normalized) ||
+    SENSITIVE_SUFFIX.test(normalized) ||
+    KEY_ID_KEY.test(key)
+  );
 }
 
 // Technical fields whose string values are kept (still pattern-scrubbed).
@@ -115,7 +130,16 @@ const SAFE_KEYS = new Set([
   'source', 'handled', 'synthetic', 'readystate', 'serveraddress',
   'serverport', 'networkprotocolname', 'networkprotocolversion', 'urlpath',
   'framework', 'runtime', 'browser', 'os', 'device', 'sampled', 'mechanism',
+  // CSP reports (app/api/csp-report, GOO-729): already reduced to a
+  // directive name, a disposition, origins and a listed route.
+  // Reserved names: they are kept as is only because that route reduces
+  // them first. Don't reuse them for free text anywhere else.
+  'cspdirective', 'cspdisposition', 'cspblocked', 'documentorigin',
+  'documentroute',
 ]);
+
+// Route templates (/chat/[id]); the transaction name carries them too.
+const ROUTE_KEYS = new Set(['httproute', 'nextroute']);
 
 // Keys whose values are URLs: kept without their query string or fragment.
 const URL_KEYS = new Set([
@@ -123,8 +147,9 @@ const URL_KEYS = new Set([
   'httptarget', 'target',
 ]);
 
-// thread_id, span_id, threadId, ids, ...
-const ID_KEY = /(?:^|[_.\-\s])ids?$|[a-z0-9]Ids?$|^id$/i;
+// thread_id, span_id, threadId, threadID, ids, ... Case-sensitive camel
+// case, so a word that merely ends in "id" (paid, valid) is not an id key.
+const ID_KEY = /(?:^|[_.\-\s])(?:id|ids|ID|IDs)$|[a-z0-9](?:Id|Ids|ID|IDs)$|^(?:id|ID)$/;
 
 type KeyClass = 'sdk' | 'url' | 'deny' | 'safe' | 'unknown';
 
@@ -133,7 +158,9 @@ function classifyKey(key: string): KeyClass {
   const normalized = normalizeKey(key);
   if (URL_KEYS.has(normalized)) return 'url';
   if (isSensitiveKey(key)) return 'deny';
-  if (SAFE_KEYS.has(normalized) || ID_KEY.test(key)) return 'safe';
+  if (SAFE_KEYS.has(normalized) || ROUTE_KEYS.has(normalized) || ID_KEY.test(key)) {
+    return 'safe';
+  }
   return 'unknown';
 }
 
@@ -141,7 +168,32 @@ function classifyKey(key: string): KeyClass {
 // Strings
 // ---------------------------------------------------------------------------
 
-const REDACTIONS: Array<[RegExp, string]> = [
+type Replacement = string | ((match: string, ...groups: string[]) => string);
+
+// Fail closed (GOO-735): a credential-shaped position is filtered unless what
+// follows is exactly one word from these short prose lists. Nothing the
+// scrubber caught before this change may pass.
+const AUTH_PROSE = new Set(['required', 'missing', 'failed', 'invalid', 'expired', 'header']);
+// After "Token" / "Basic". The rule only fires on 8+ characters (as
+// before), so every word here is at least that long.
+const SCHEME_PROSE = new Set([
+  'undefined', 'validation', 'authentication', 'authorization', 'required',
+  'verification', 'expiration', 'exchange', 'rejected',
+]);
+const COOKIE_PROSE = /^(?:not set|missing|none|empty|required|disabled|blocked|invalid|expired)[ \t.!]*$/i;
+
+// Trailing "." / "!" stripped with a loop: the regex /[.!]+$/ retries from
+// every dot and is quadratic on a long run of them.
+function stripTrailingPunctuation(text: string): string {
+  let end = text.length;
+  while (end > 0 && (text[end - 1] === '.' || text[end - 1] === '!')) end -= 1;
+  return text.slice(0, end);
+}
+
+const isProseWord = (words: ReadonlySet<string>, value: string): boolean =>
+  words.has(stripTrailingPunctuation(value.trim()).toLowerCase());
+
+const REDACTIONS: Array<[RegExp, Replacement]> = [
   // SSE frames: the payload after `data:` is user/tool content. Matches a
   // line that starts with `data:`, or `data:` followed by JSON anywhere;
   // plain prose such as "Invalid data: x" is left alone.
@@ -149,11 +201,30 @@ const REDACTIONS: Array<[RegExp, string]> = [
   [/\bdata:[ \t]{0,4}[{[][^\n]{0,4096}/g, 'data: [Filtered]'],
   // Inline JSON objects/arrays: everything from `{"` / `["` to end of line.
   [/[{[][ \t]{0,4}"[^\n]{0,4096}/g, OBJECT_PLACEHOLDER],
-  // Authorization / Cookie header values, with or without a scheme.
-  [/\b(?:proxy-)?authorization\b[ \t]{0,4}[:=][ \t]{0,4}[^\n,;]{1,1024}/gi, 'Authorization: [Filtered]'],
-  [/\b(?:set-)?cookie\b[ \t]{0,4}[:=][ \t]{0,4}[^\n]{1,4096}/gi, 'Cookie: [Filtered]'],
+  // Authorization header: everything after it, whatever the scheme, except
+  // a single prose word ("authorization: required").
+  [
+    /\b(?:proxy-)?authorization\b[ \t]{0,4}[:=][ \t]{0,4}([^\n,;]{1,1024})/gi,
+    (match, value: string) =>
+      isProseWord(AUTH_PROSE, value) ? match : 'Authorization: [Filtered]',
+  ],
+  // Cookie headers: everything after them, except known prose
+  // ("cookie: not set").
+  [
+    /\b(?:set-)?cookie\b[ \t]{0,4}[:=][ \t]{0,4}([^\n]{1,4096})/gi,
+    (match, value: string) => (COOKIE_PROSE.test(value) ? match : 'Cookie: [Filtered]'),
+  ],
   [/\bsb-[A-Za-z0-9-]{1,128}=[^;\s"']{1,4096}/g, 'sb-[cookie]=[Filtered]'],
-  [/\b(Bearer|Basic|Token)\s{1,4}[A-Za-z0-9._~+/=-]{8,4096}/gi, '$1 [Filtered]'],
+  // Scheme + credential. After "Bearer" always; after the English words
+  // "Basic" and "Token" unless the value is a single prose word
+  // ("Unexpected token undefined", "basic authentication failed").
+  [
+    /\b(Bearer|Basic|Token)\s{1,4}([A-Za-z0-9._~+/=-]{8,4096})/gi,
+    (match, scheme: string, value: string) =>
+      scheme.toLowerCase() !== 'bearer' && isProseWord(SCHEME_PROSE, value)
+        ? match
+        : `${scheme} [Filtered]`,
+  ],
   // JSON Web Tokens: full (dots raw or URL-encoded), then any fragment left
   // by truncation or an encoding the first pattern does not know.
   [/eyJ[A-Za-z0-9_-]{2,4096}(?:\.|%2[Ee])[A-Za-z0-9_-]{2,4096}(?:\.|%2[Ee])[A-Za-z0-9_-]{0,4096}/g, '[jwt]'],
@@ -163,8 +234,16 @@ const REDACTIONS: Array<[RegExp, string]> = [
   [/\bsb_(?:secret|publishable)_[A-Za-z0-9_-]{8,256}/g, '[key]'],
   [/\bsbp_[A-Za-z0-9]{16,256}/g, '[key]'],
   [/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[key]'],
+  // Credentials in a URL: scheme://user:pass@host.
+  [/\b([a-z][a-z0-9+.-]{1,16}:\/\/)[^\s/@:"'<>]{1,256}:[^\s/@"'<>]{1,256}@/gi, '$1[Filtered]@'],
   // Sensitive name=value pairs anywhere (bare or in a query string).
   [/\b(access_token|refresh_token|id_token|token|api_?key|apikey|secret|password|passwd|signature|jwt|session_?id)=[^&\s"'<>#]{1,2048}/gi, '$1=[Filtered]'],
+  // Credential headers and log fields written `name: value`; the name alone
+  // marks the value as a credential.
+  [
+    /\b(x-api-key|api[_-]?key|client[_-]?secret|password|passwd|secret)[ \t]{0,4}:[ \t]{0,4}["']?[^\s"',;&]{1,2048}/gi,
+    '$1: [Filtered]',
+  ],
   // Email addresses (bounded local part and domain: linear, not quadratic).
   [/[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}/g, '[email]'],
   // Query strings and fragments: absolute URLs, then relative paths.
@@ -181,7 +260,12 @@ export function scrubString(value: string, maxLength = MAX_STRING_LENGTH): strin
     out = out.slice(0, MAX_SCAN_LENGTH).replace(/\S{0,256}$/, '');
   }
   for (const [pattern, replacement] of REDACTIONS) {
-    out = out.replace(pattern, replacement);
+    // Two branches because String.replace has separate overloads for a
+    // string and a function replacement.
+    out =
+      typeof replacement === 'string'
+        ? out.replace(pattern, replacement)
+        : out.replace(pattern, replacement);
   }
   if (out.length > maxLength || originalLength > MAX_SCAN_LENGTH) {
     const kept = out.slice(0, maxLength);
@@ -263,13 +347,15 @@ function scrubNested(value: unknown, depth: number, kind: KeyClass): unknown {
 /** Structured data: allowlisted keys keep their (scrubbed) values. */
 export function scrubData(data: AnyRecord, depth = 0): AnyRecord {
   const out: AnyRecord = {};
-  for (const key of Object.keys(data)) {
+  const keys = Object.keys(data);
+  for (const key of keys.slice(0, MAX_KEYS)) {
     try {
       out[key] = scrubKeyed(key, data[key], depth);
     } catch {
       out[key] = FILTERED; // throwing getter / Proxy trap
     }
   }
+  if (keys.length > MAX_KEYS) out[TRUNCATED_KEYS] = keys.length - MAX_KEYS;
   return out;
 }
 
@@ -460,6 +546,18 @@ const ENVIRONMENT_CONTEXTS = new Set([
   'browser', 'os', 'device', 'runtime', 'app', 'culture', 'cloud_resource',
   'react',
 ]);
+// Keys kept from those contexts (normalized); other strings, such as the
+// owner-chosen device name or a raw user agent, are dropped.
+const ENVIRONMENT_CONTEXT_KEYS = new Set([
+  'name', 'version', 'family', 'model', 'modelid', 'arch', 'archs', 'build',
+  'kernelversion', 'type', 'brand', 'manufacturer', 'locale', 'timezone',
+  'calendar', 'appname', 'appversion', 'appbuild', 'appidentifier',
+  'buildtype', 'cloudprovider', 'cloudregion', 'cloudplatform',
+]);
+// The device name is the owner's label ("Alice's iPhone").
+const ENVIRONMENT_CONTEXT_DENY: Readonly<Record<string, ReadonlySet<string>>> = {
+  device: new Set(['name']),
+};
 const TRACE_CONTEXT_KEYS = [
   'trace_id', 'span_id', 'parent_span_id', 'op', 'status', 'origin', 'sampled',
 ] as const;
@@ -478,10 +576,19 @@ function scrubContexts(contexts: AnyRecord): AnyRecord {
       out[name] = trace;
     } else if (ENVIRONMENT_CONTEXTS.has(name)) {
       const env: AnyRecord = {};
-      for (const key of Object.keys(context)) {
+      const denied = ENVIRONMENT_CONTEXT_DENY[name];
+      for (const key of Object.keys(context).slice(0, MAX_KEYS)) {
         const value = context[key];
-        if (typeof value === 'string') env[key] = scrubString(value);
-        else if (typeof value === 'number' || typeof value === 'boolean') env[key] = value;
+        const normalized = normalizeKey(key);
+        if (typeof value === 'number' || typeof value === 'boolean') {
+          env[key] = value;
+        } else if (
+          typeof value === 'string' &&
+          ENVIRONMENT_CONTEXT_KEYS.has(normalized) &&
+          !denied?.has(normalized)
+        ) {
+          env[key] = scrubString(value);
+        }
       }
       out[name] = env;
     } else {
@@ -757,15 +864,28 @@ export function safeBeforeSendSpan(span: SpanJSON): SpanJSON {
     return scrubSpan(span);
   } catch {
     // The hook may not drop a span, so send it without description or data.
-    return {
-      span_id: span.span_id,
-      trace_id: span.trace_id,
-      start_timestamp: span.start_timestamp,
-      timestamp: span.timestamp,
-      op: span.op,
-      status: span.status,
+    // Each field is read on its own: the getter that broke scrubbing may
+    // throw again here.
+    const read = <K extends keyof SpanJSON>(key: K): SpanJSON[K] | undefined => {
+      try {
+        return span[key];
+      } catch {
+        return undefined;
+      }
+    };
+    const fallback: SpanJSON = {
+      span_id: read('span_id') ?? '',
+      trace_id: read('trace_id') ?? '',
+      start_timestamp: read('start_timestamp') ?? 0,
       data: {},
     };
+    const timestamp = read('timestamp');
+    const op = read('op');
+    const status = read('status');
+    if (typeof timestamp === 'number') fallback.timestamp = timestamp;
+    if (typeof op === 'string') fallback.op = op;
+    if (typeof status === 'string') fallback.status = status;
+    return fallback;
   }
 }
 

@@ -108,7 +108,11 @@ describe('ResearchPipeline rendering', () => {
     });
     render(<ResearchPipeline projectId="proj-a" />);
 
+    // GOO-778: raw error text never reaches the banner.
     expect(screen.getByRole('alert')).toHaveTextContent(
+      'Something went wrong with the research pipeline.'
+    );
+    expect(screen.getByRole('alert')).not.toHaveTextContent(
       'Pipeline fetch failed'
     );
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));

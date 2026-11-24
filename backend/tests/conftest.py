@@ -121,10 +121,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "documents: Document processing tests")
 
     # External dependency markers (for testcontainers)
-    config.addinivalue_line(
-        "markers",
-        "requires_postgres: Tests requiring real PostgreSQL (via testcontainers)",
-    )
+    # requires_postgres is registered in pytest.ini (GOO-769).
     config.addinivalue_line(
         "markers", "requires_redis: Tests requiring real Redis (via testcontainers)"
     )
@@ -164,12 +161,12 @@ def pytest_collection_modifyitems(config, items):
         # Add markers based on test file names
         test_path = str(item.fspath)
 
-        # Search security suites exercise full endpoint behavior and externalized
-        # security controls; treat them as integration tests so unit jobs stay stable.
-        if "/tests/security/search_security/" in test_path or test_path.endswith(
-            "/tests/security/test_search_security.py"
-        ):
-            item.add_marker(pytest.mark.integration)
+        # The search-security suites are NOT marked integration (GOO-780): that
+        # mark kept them out of Unit Tests, and no other job collected them, so
+        # 97 tenant-isolation/authz tests ran nowhere. They need no service
+        # (TestClient + a mocked session); their "instability" was the global
+        # API rate limiter's budget leaking across tests, which
+        # tests/security/search_security/conftest.py now resets per test.
 
         # Skip template, standalone, performance, and scaffolding tests if they somehow got collected
         if "/templates/" in test_path:
@@ -209,6 +206,8 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.unit)
         elif "/tests/resilience/" in test_path:
             item.add_marker(pytest.mark.resilience)
+
+    _mark_postgres_tests(items)
 
 
 # ============================================================================
@@ -626,6 +625,22 @@ def _patch_multi_tenancy_middleware(monkeypatch):
     monkeypatch.setattr(_mt, "AsyncSessionLocal", MagicMock(return_value=session_cm))
 
 
+@pytest.fixture
+def field_encryption():
+    """Field encryption with a fixed test key, for this test only (GOO-785).
+
+    Encrypted columns (``User.first_name``/``last_name``) need the module
+    globals in ``src.core.encryption``. A test that writes them must set them
+    up itself: relying on an earlier test's ``initialize_encryption()`` makes
+    it pass or fail by test order. The globals are restored afterwards, so
+    this test leaks nothing either.
+    """
+    from tests.utils.field_encryption import scoped_field_encryption
+
+    with scoped_field_encryption() as field:
+        yield field
+
+
 def _test_auth_headers() -> dict:
     """Default Authorization header carrying the fixed test token."""
     return {"Authorization": f"Bearer {_TEST_BEARER_TOKEN}"}
@@ -739,10 +754,20 @@ except ImportError:
 # PostgreSQL tests skip without their database URL, and pytest exits 0 when
 # every selected test skips, so a CI lane that lost its database used to pass
 # with nothing run. Where a CI step provides PostgreSQL it sets
-# REQUIRE_POSTGRES_TESTS=1; there a skipped PostgreSQL test (marked
-# requires_postgres, or in a *_postgres.py file) is reported as a failure.
-# The Unit Tests job has no database, does not set it, and keeps skipping.
+# REQUIRE_POSTGRES_TESTS=1; there a skipped PostgreSQL test is reported as a
+# failure. The Unit Tests job has no database, does not set it, and keeps
+# skipping.
+#
+# A PostgreSQL test is one marked requires_postgres. Besides explicit marks,
+# _mark_postgres_tests (called from pytest_collection_modifyitems) adds the
+# mark to every test in a *_postgres.py file and to every test that uses a
+# fixture defined in a PostgreSQL fixture module: tests/db/conftest.py (the
+# local-database db_session/user_factory/thread_factory set, GOO-731) or any
+# *_postgres.py module, also when the fixture is imported elsewhere (GOO-703).
+# The CI PostgreSQL lane selects its files by this mark, so a new test that
+# uses one of these fixtures joins the lane without a hand-kept list.
 REQUIRE_POSTGRES_TESTS = "REQUIRE_POSTGRES_TESTS"
+_POSTGRES_FIXTURE_CONFTEST = Path(__file__).parent / "db" / "conftest.py"
 
 
 def _postgres_skips_fail() -> bool:
@@ -750,10 +775,55 @@ def _postgres_skips_fail() -> bool:
     return ci and os.getenv(REQUIRE_POSTGRES_TESTS) == "1"
 
 
+def _is_postgres_fixture_module(path: Optional[str]) -> bool:
+    if not path:
+        return False
+    source = Path(path)
+    return source.name.endswith("_postgres.py") or source == _POSTGRES_FIXTURE_CONFTEST
+
+
+def _uses_postgres_fixture(item: pytest.Item) -> bool:
+    import inspect
+
+    info = getattr(item, "_fixtureinfo", None)
+    if info is None:
+        return False
+    for definitions in info.name2fixturedefs.values():
+        # The last definition is the one in effect for this test.
+        func = getattr(definitions[-1], "func", None) if definitions else None
+        try:
+            source = inspect.getsourcefile(inspect.unwrap(func)) if func else None
+        except TypeError:
+            source = None
+        if _is_postgres_fixture_module(source):
+            return True
+    return False
+
+
+def _mark_postgres_tests(items: List[pytest.Item]) -> None:
+    for item in items:
+        if item.get_closest_marker("requires_postgres") is not None:
+            continue
+        if item.path.name.endswith("_postgres.py") or _uses_postgres_fixture(item):
+            item.add_marker(pytest.mark.requires_postgres)
+
+
 def _is_postgres_test(item: pytest.Item) -> bool:
     return item.get_closest_marker(
         "requires_postgres"
     ) is not None or item.path.name.endswith("_postgres.py")
+
+
+def _skipped_by_marker(item: pytest.Item) -> bool:
+    """True when a skip/skipif marker skipped the test, not a runtime skip."""
+    try:
+        from _pytest.skipping import evaluate_skip_marks
+    except ImportError:  # pragma: no cover - pytest moved its internals
+        return False
+    try:
+        return evaluate_skip_marks(item) is not None
+    except Exception:  # noqa: BLE001 - a broken condition already errored
+        return False
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -772,8 +842,17 @@ def pytest_runtest_makereport(item, call):
             else str(report.longrepr)
         )
         report.outcome = "failed"
-        report.longrepr = (
-            f"PostgreSQL test skipped in a CI step that requires PostgreSQL "
-            f"({REQUIRE_POSTGRES_TESTS}=1); the database is missing or "
-            f"unreachable. Skip reason: {reason}"
-        )
+        if call.when == "setup" and _skipped_by_marker(item):
+            report.longrepr = (
+                f"PostgreSQL test skipped by a skip/skipif marker in a CI step "
+                f"that requires PostgreSQL ({REQUIRE_POSTGRES_TESTS}=1). The "
+                f"database is not the cause: the lane must run every "
+                f"PostgreSQL test, so drop the marker or move the test out of "
+                f"the lane's files. Marker reason: {reason}"
+            )
+        else:
+            report.longrepr = (
+                f"PostgreSQL test skipped at runtime in a CI step that requires "
+                f"PostgreSQL ({REQUIRE_POSTGRES_TESTS}=1); the database is "
+                f"most likely missing or unreachable. Skip reason: {reason}"
+            )

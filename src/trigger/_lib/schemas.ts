@@ -14,7 +14,7 @@ export const ToolExecutionSchema = z.object({
   id: z.string(),
   tool_name: z.string(),
   tool_display_name: z.string(),
-  args: z.record(z.unknown()),
+  args: z.record(z.string(), z.unknown()),
   status: z.string(),
   result: z.unknown().nullable().optional(),
   error: z.string().nullable().optional(),
@@ -23,10 +23,10 @@ export const ToolExecutionSchema = z.object({
 
 export const JobStatusResponseSchema = z.object({
   status: z.enum(["running", "completed", "awaiting_confirmation", "failed"]),
-  result: z.record(z.unknown()).nullable().optional(),
-  tool_executions: z.array(z.record(z.unknown())).nullable().optional(),
+  result: z.record(z.string(), z.unknown()).nullable().optional(),
+  tool_executions: z.array(z.record(z.string(), z.unknown())).nullable().optional(),
   error: z.string().nullable().optional(),
-  confirmation: z.record(z.unknown()).nullable().optional(),
+  confirmation: z.record(z.string(), z.unknown()).nullable().optional(),
   thread_id: z.string().nullable().optional(),
 });
 
@@ -45,7 +45,7 @@ export const AgentExecutePayloadSchema = z.object({
   pageContext: z.object({
     type: z.string(),
     project_id: z.string().optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
   }),
   model: z.string().optional(),
   useRag: z.boolean().optional(),
@@ -122,7 +122,10 @@ export const WorkerStatsResponseSchema = z.object({
 });
 export type WorkerStatsResponse = z.infer<typeof WorkerStatsResponseSchema>;
 
-/** GET /api/v1/workers/health (backend/src/api/infrastructure/workers.py). */
+/**
+ * GET /api/v1/workers/health (`WorkerHealthResponse` in backend/openapi.json).
+ * Contract: tests/trigger/worker-response-contract.test.mjs.
+ */
 export const WorkerHealthResponseSchema = z.object({
   healthy: z.boolean(),
   workers_online: z.number(),

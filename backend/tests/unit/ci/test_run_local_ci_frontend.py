@@ -23,8 +23,16 @@ def test_frontend_gate_matches_the_workflow_ratchet_contract() -> None:
     assert 'scripts/ci/check_tsconfig_exclusions.py --base "$BASE"' in script
     assert 'check $? "frontend quality ratchet"' in script
     assert 'check $? "tsconfig exclusion ratchet"' in script
-    assert 'ESLINT_REPORT="$(mktemp ' in script
-    assert 'rm -f -- "$ESLINT_REPORT"' in script
+    # GOO-771: BSD mktemp randomises only trailing Xs, so the report gets a
+    # `mktemp -d` directory whose template ends in Xs, removed by a trap.
+    # tests/unit/scripts/test_nous_loop_contract.py runs it with a stale file.
+    assert (
+        'ESLINT_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/run_local_ci-eslint.XXXXXX")"'
+        in script
+    )
+    assert "XXXXXX.json" not in script
+    assert "trap _remove_eslint_report_dir EXIT" in script
+    assert 'rm -rf -- "$ESLINT_REPORT_DIR"' in script
     assert "full lint" in script.lower()
     assert "advisory" in script.lower()
     assert "FULL_LINT_RC=$?" in script

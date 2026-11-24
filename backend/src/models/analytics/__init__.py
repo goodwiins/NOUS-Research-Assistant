@@ -1,28 +1,17 @@
 """
-Analytics models for Knowledge Graph Analytics Dashboard
+Analytics models.
+
+The analytics dashboard / metric / KPI / report models (the ``analytics_*``
+tables) backed only unmounted routers and were retired in GOO-690. The graph
+analytics and realtime models below are still not registered in
+``src.models`` (see ``KNOWN_UNREGISTERED`` in
+``tests/unit/architecture/test_orm_tables_reach_alembic.py``).
 """
 
 # AnalyticsEvent is re-exported from the canonical model module
-# (src/models/analytics_event.py), not analytics_models, to avoid a duplicate
-# ORM mapping of the `analytics_events` table.
+# (src/models/analytics_event.py) to avoid a duplicate ORM mapping of the
+# `analytics_events` table.
 from ..analytics_event import AnalyticsEvent
-from .analytics_models import (
-    AnalyticsFilter,
-    AnalyticsKPI,
-    AnalyticsMetric,
-    AnalyticsReport,
-    MetricAggregation,
-    TimeSeriesData,
-)
-from .dashboard_models import (
-    Dashboard,
-    DashboardLayout,
-    DashboardPermission,
-    DashboardTheme,
-    DashboardWidget,
-    DashboardWidgetType,
-    WidgetConfiguration,
-)
 from .graph_analytics import (
     CommunityMetrics,
     EdgeMetrics,
@@ -39,22 +28,7 @@ from .realtime_models import (
 )
 
 __all__ = [
-    # Dashboard models
-    "Dashboard",
-    "DashboardWidget",
-    "DashboardLayout",
-    "WidgetConfiguration",
-    "DashboardWidgetType",
-    "DashboardTheme",
-    "DashboardPermission",
-    # Analytics models
     "AnalyticsEvent",
-    "AnalyticsMetric",
-    "AnalyticsKPI",
-    "AnalyticsReport",
-    "MetricAggregation",
-    "TimeSeriesData",
-    "AnalyticsFilter",
     # Graph analytics models
     "GraphAnalyticsResult",
     "GraphMetrics",

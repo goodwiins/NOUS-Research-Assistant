@@ -88,6 +88,19 @@ export interface DocumentListParams {
 }
 
 /**
+ * `/files/stats` reports raw stored statuses (`pending`, `processing`,
+ * `retrying`, `completed`, `failed`), not the public `ApiDocumentStatus`
+ * vocabulary. These are the ones still being worked on.
+ */
+const IN_FLIGHT_STATUSES = new Set(['pending', 'processing', 'retrying']);
+
+export function countInFlightDocuments(stats: ProcessingStats[]): number {
+  return stats
+    .filter((s) => IN_FLIGHT_STATUSES.has(s.status))
+    .reduce((sum, s) => sum + s.count, 0);
+}
+
+/**
  * Document Analytics API Service
  */
 class DocumentAnalyticsApiService {
@@ -98,7 +111,25 @@ class DocumentAnalyticsApiService {
    * Get file statistics including type distribution and processing status
    */
   async getFileStats(): Promise<FileStatsResponse> {
-    return api.get<FileStatsResponse>(`${this.basePath}/stats`);
+    const response = await api.get<FileStatsResponse>(`${this.basePath}/stats`);
+    // `FileStatsResponse` requires both lists. A 200 without them (or with a
+    // non-numeric count) is shape drift: reject so callers show the source as
+    // unavailable, instead of summing an empty list into "0" (GOO-649).
+    const filesByType = requireArray<FileTypeStats>(
+      response?.files_by_type,
+      'files_by_type'
+    );
+    const processingStats = requireArray<ProcessingStats>(
+      response?.processing_stats,
+      'processing_stats'
+    );
+    filesByType.forEach((item) =>
+      requireNumber(item?.count, 'files_by_type.count')
+    );
+    processingStats.forEach((item) =>
+      requireNumber(item?.count, 'processing_stats.count')
+    );
+    return response;
   }
 
   /**
@@ -225,40 +256,66 @@ class DocumentAnalyticsApiService {
   }
 }
 
+// The analytics routes below return untyped dicts (no response_model), so the
+// shapes are copied from the backend producers named on each type. Values are
+// read through these guards: a missing or non-numeric field throws, so a shape
+// drift surfaces as "unavailable" instead of a fabricated zero (GOO-649).
+function requireNumber(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`Unexpected analytics response: ${field}`);
+  }
+  return value;
+}
+
+/**
+ * A number, or `null` when the backend says "not measured" (GOO-745, the
+ * GOO-649/GOO-732 rule): never a made-up 0. Anything else is malformed.
+ */
+function nullableNumber(value: unknown, field: string): number | null {
+  return value === null ? null : requireNumber(value, field);
+}
+
+function requireArray<T>(value: unknown, field: string): T[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Unexpected analytics response: ${field}`);
+  }
+  return value as T[];
+}
+
+function requireObject(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`Unexpected analytics response: ${field}`);
+  }
+  return value as Record<string, unknown>;
+}
+
 // Search Analytics Types
-export interface TopQuery {
-  query: string;
-  count: number;
-  avg_response_time?: number;
-  avg_results?: number;
-  click_rate?: number;
-}
 
-export interface SearchTypeDistribution {
-  type: string;
-  count: number;
-  percentage?: number;
-}
-
-export interface SearchAnalyticsResponse {
-  period?: { start: string; end: string };
-  total_searches: number;
-  avg_response_time_ms?: number;
-  unique_users?: number;
-  top_queries: TopQuery[];
-  search_types: SearchTypeDistribution[];
-}
-
+/**
+ * GET /analytics/performance/search-performance. Built from
+ * SearchPerformanceMetrics in services/quality/performance_dashboard_service.py.
+ */
 export interface SearchPerformanceResponse {
   total_searches: number;
-  avg_response_time: number;
-  p95_response_time?: number;
+  /** `null` when no search in the window was timed (GOO-732). */
+  avg_response_time: number | null;
+  p95_response_time: number;
   success_rate: number;
-  no_results_rate?: number;
-  top_queries: TopQuery[];
-  search_types: SearchTypeDistribution[];
-  errors?: number;
+  no_results_rate: number;
+  top_queries: Array<{
+    query: string;
+    count: number;
+    avg_response_time: number | null;
+  }>;
+  search_types: Array<{ type: string; count: number }>;
+  errors: unknown[];
 }
+
+/**
+ * GET /search/analytics. The `SearchAnalytics` schema in backend/openapi.json,
+ * produced in api/search/search.py.
+ */
+export type SearchAnalyticsResponse = components['schemas']['SearchAnalytics'];
 
 /**
  * Search Analytics API Service
@@ -302,211 +359,243 @@ class SearchAnalyticsApiService {
   }
 
   /**
-   * Get combined search analytics - tries multiple endpoints with fallbacks
+   * Combined search analytics for the last 7 days: the performance endpoint
+   * first, then the search analytics endpoint. Rejects when both fail, or when
+   * a response lacks the fields it should carry, so callers show the source as
+   * unavailable instead of a fabricated "0 searches" (FL2C-2). Per-query values
+   * the backend does not send are `null`, never invented.
    */
-  async getCombinedSearchAnalytics(): Promise<{
-    topQueries: Array<{
-      id: string;
-      query: string;
-      type: string;
-      results: number;
-      clickRate: number;
-      lastSearched: string;
-    }>;
-    searchTypes: Array<{ name: string; value: number }>;
-    totalSearches: number;
-    avgResponseTime: number;
-  }> {
-    try {
-      // Try performance endpoint first (more detailed)
-      const performance = await this.getSearchPerformance().catch(() => null);
-
-      if (performance) {
-        return {
-          topQueries: (performance.top_queries || []).map((q, idx) => ({
-            id: `search_${idx + 1}`,
-            query: q.query,
-            type: 'hybrid', // Default type
-            results: q.avg_results || Math.floor(Math.random() * 20) + 1,
-            clickRate: q.click_rate || Math.random(),
-            lastSearched: new Date().toISOString(),
-          })),
-          searchTypes: (performance.search_types || []).map((s) => ({
-            name: s.type.charAt(0).toUpperCase() + s.type.slice(1),
-            value: s.count,
-          })),
-          totalSearches: performance.total_searches || 0,
-          avgResponseTime: performance.avg_response_time || 0,
-        };
-      }
-
-      // Fallback to search analytics endpoint
-      const analytics = await this.getSearchAnalytics().catch(() => null);
-
-      if (analytics) {
-        return {
-          topQueries: (analytics.top_queries || []).map((q, idx) => ({
-            id: `search_${idx + 1}`,
-            query: q.query,
-            type: 'hybrid',
-            results: q.avg_results || Math.floor(Math.random() * 20) + 1,
-            clickRate: q.click_rate || Math.random(),
-            lastSearched: new Date().toISOString(),
-          })),
-          searchTypes: (analytics.search_types || []).map((s) => ({
-            name: s.type.charAt(0).toUpperCase() + s.type.slice(1),
-            value: s.count,
-          })),
-          totalSearches: analytics.total_searches || 0,
-          avgResponseTime: analytics.avg_response_time_ms || 0,
-        };
-      }
-
-      // Return empty if all endpoints fail
+  async getCombinedSearchAnalytics(): Promise<CombinedSearchAnalytics> {
+    const toType = (rawType: unknown, count: unknown) => {
+      const type = typeof rawType === 'string' && rawType ? rawType : 'unknown';
       return {
-        topQueries: [],
-        searchTypes: [],
-        totalSearches: 0,
-        avgResponseTime: 0,
+        name: type.charAt(0).toUpperCase() + type.slice(1),
+        value: requireNumber(count, 'search type count'),
+      };
+    };
+
+    let performanceError: unknown;
+    try {
+      const performance = await this.getSearchPerformance(
+        SEARCH_ANALYTICS_WINDOW
+      );
+      return {
+        topQueries: requireArray<SearchPerformanceResponse['top_queries'][number]>(
+          performance.top_queries,
+          'top_queries'
+        ).map((q, idx) => ({
+          id: `search_${idx + 1}`,
+          query: q.query,
+          count: requireNumber(q.count, 'top_queries.count'),
+          avgResponseTimeMs:
+            typeof q.avg_response_time === 'number' ? q.avg_response_time : null,
+        })),
+        searchTypes: requireArray<SearchPerformanceResponse['search_types'][number]>(
+          performance.search_types,
+          'search_types'
+        ).map((t) => toType(t.type, t.count)),
+        totalSearches: requireNumber(performance.total_searches, 'total_searches'),
+        avgResponseTimeMs: nullableNumber(
+          performance.avg_response_time,
+          'avg_response_time'
+        ),
       };
     } catch (error) {
-      console.error('Failed to fetch search analytics:', error);
+      performanceError = error;
+    }
+
+    try {
+      const analytics = await this.getSearchAnalytics(
+        SEARCH_ANALYTICS_WINDOW_DAYS
+      );
       return {
-        topQueries: [],
-        searchTypes: [],
-        totalSearches: 0,
-        avgResponseTime: 0,
+        topQueries: requireArray<Record<string, unknown>>(
+          analytics.most_common_queries,
+          'most_common_queries'
+        ).map((q, idx) => ({
+          id: `search_${idx + 1}`,
+          query: String(q.query ?? ''),
+          count: requireNumber(q.count, 'most_common_queries.count'),
+          avgResponseTimeMs: null,
+        })),
+        searchTypes: Object.entries(
+          requireObject(
+            analytics.search_types_distribution,
+            'search_types_distribution'
+          )
+        ).map(([type, count]) => toType(type, count)),
+        totalSearches: requireNumber(analytics.total_searches, 'total_searches'),
+        avgResponseTimeMs: requireNumber(
+          analytics.average_search_time_ms,
+          'average_search_time_ms'
+        ),
       };
+    } catch (error) {
+      console.error('Failed to fetch search analytics:', performanceError, error);
+      throw error;
     }
   }
 }
 
-// User Behavior Analytics Types
-export interface UserBehaviorStats {
-  total_users: number;
-  active_users_today: number;
-  active_users_week: number;
-  active_users_month: number;
-  total_sessions: number;
-  avg_session_duration: number;
-  bounce_rate: number;
-  search_volume_today: number;
-  search_volume_week: number;
-  new_users: number;
-  returning_users: number;
+/** Both search sources are read over the same window so their numbers agree. */
+export const SEARCH_ANALYTICS_WINDOW = '7d';
+const SEARCH_ANALYTICS_WINDOW_DAYS = 7;
+
+export interface CombinedSearchQueryRow {
+  id: string;
+  query: string;
+  count: number;
+  /** Only the performance source reports a per-query time. */
+  avgResponseTimeMs: number | null;
 }
 
-export interface TrendDataPoint {
-  date: string;
+export interface CombinedSearchAnalytics {
+  topQueries: CombinedSearchQueryRow[];
+  searchTypes: Array<{ name: string; value: number }>;
+  totalSearches: number;
+  /** `null` when no search was timed: show it as unavailable, not 0. */
+  avgResponseTimeMs: number | null;
+}
+
+/**
+ * GET /analytics/behavior/organization/trends (admin only; 403 otherwise).
+ * Built by UserBehaviorService.get_behavior_trends in
+ * services/quality/user_behavior_service.py.
+ */
+export interface OrganizationTrendsResponse {
+  session_trends: Array<{
+    period: string;
+    session_count: number;
+    avg_searches_per_session: number;
+    avg_duration_seconds: number;
+  }>;
+  search_trends: Array<{
+    period: string;
+    search_count: number;
+    avg_response_time: number;
+    avg_results: number;
+    total_clicks: number;
+  }>;
+  engagement_trends: Array<{
+    period: string;
+    active_users: number;
+    power_users: number;
+    avg_satisfaction: number;
+  }>;
+}
+
+/** One point of a daily series, in the shape AnalyticsChart reads. */
+export interface DailyPoint {
   name: string;
-  pageViews: number;
-  uniqueVisitors: number;
-  documentsUploaded: number;
-  searchesPerformed: number;
-  chatsInitiated: number;
+  date: string;
+  value: number;
 }
 
-export interface RealtimeMetric {
-  label: string;
-  value: number | string;
-  change: string;
-  type: 'users' | 'search' | 'files' | 'activity';
+const HAS_ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+/**
+ * Parse a backend period. The producers emit `datetime.isoformat()`
+ * (`2026-11-21T00:00:00+00:00`) or `str(datetime)` (`2026-11-21 00:00:00+00:00`)
+ * of a `DATE_TRUNC` over a `timestamptz` column. A value without an offset is
+ * UTC, never the viewer's local time, so the day label does not shift with the
+ * browser's time zone.
+ */
+export function parseBackendTimestamp(raw: unknown): Date {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw new Error('Unexpected analytics response: period');
+  }
+  const iso = raw.trim().replace(' ', 'T');
+  const date = new Date(HAS_ZONE.test(iso) ? iso : `${iso}Z`);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('Unexpected analytics response: period');
+  }
+  return date;
 }
 
-export interface ActivityEvent {
-  action: string;
-  user: string;
-  time: string;
-}
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Whole UTC calendar days in the search-volume chart, today included. */
+const SEARCH_VOLUME_DAYS = 7;
 
-export interface SystemHealthMetrics {
-  cpu_usage: number;
-  memory_usage: number;
-  disk_usage: number;
-  active_connections: number;
-  request_rate: number;
-  error_rate: number;
-  response_time: number;
-}
+/** Midnight UTC of the calendar day `date` falls on, in epoch ms. */
+const utcDayStart = (date: Date): number =>
+  Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+
+const toDailyPoint = (period: unknown, value: unknown): DailyPoint => {
+  const date = parseBackendTimestamp(period);
+  return {
+    // The UTC calendar day: DATE_TRUNC('day') runs in the database's UTC zone.
+    name: date.toISOString().slice(0, 10),
+    date: date.toISOString(),
+    value: requireNumber(value, 'trend value'),
+  };
+};
 
 /**
  * User Behavior Analytics API Service
  */
+// Every getter below rejects on failure instead of returning zeros, so an
+// outage is never shown as genuine zero activity (FL2C-2). Callers record the
+// failed source and say so.
 class UserBehaviorApiService {
   private readonly basePath = '/analytics/behavior';
 
   /**
-   * Get organization-level user behavior trends
+   * Daily active users for the organization. Admin only: the backend answers
+   * 403 for other roles, so callers check the role before calling.
    */
-  async getOrganizationTrends(days: number = 30): Promise<{
-    stats: UserBehaviorStats;
-    trendData: TrendDataPoint[];
-  }> {
-    try {
-      const response = await api.get<any>(
-        `${this.basePath}/organization/trends?days=${days}`
-      );
-
-      return {
-        stats: {
-          total_users: response.total_users || 0,
-          active_users_today: response.active_users_today || 0,
-          active_users_week: response.active_users_week || 0,
-          active_users_month: response.active_users_month || 0,
-          total_sessions: response.total_sessions || 0,
-          avg_session_duration: response.avg_session_duration || 0,
-          bounce_rate: response.bounce_rate || 0,
-          search_volume_today: response.search_volume_today || 0,
-          search_volume_week: response.search_volume_week || 0,
-          new_users: response.new_users || 0,
-          returning_users: response.returning_users || 0,
-        },
-        trendData: response.trend_data || [],
-      };
-    } catch (error) {
-      console.error('Failed to fetch user behavior trends:', error);
-      // Return empty stats on error
-      return {
-        stats: {
-          total_users: 0,
-          active_users_today: 0,
-          active_users_week: 0,
-          active_users_month: 0,
-          total_sessions: 0,
-          avg_session_duration: 0,
-          bounce_rate: 0,
-          search_volume_today: 0,
-          search_volume_week: 0,
-          new_users: 0,
-          returning_users: 0,
-        },
-        trendData: [],
-      };
-    }
+  async getOrganizationActiveUserTrend(
+    daysBack: number = 30
+  ): Promise<DailyPoint[]> {
+    const response = await api.get<OrganizationTrendsResponse>(
+      `${this.basePath}/organization/trends?days_back=${daysBack}&group_by=day`
+    );
+    return requireArray<OrganizationTrendsResponse['engagement_trends'][number]>(
+      response?.engagement_trends,
+      'engagement_trends'
+    ).map((row) => toDailyPoint(row.period, row.active_users));
   }
+}
 
+/**
+ * GET /analytics/performance/overview. Built by
+ * PerformanceDashboardService.get_dashboard_overview (each section is a
+ * dataclass passed through `asdict`), then scoped per caller by
+ * `_scope_overview_for` in api/quality/performance_dashboard.py (GOO-633):
+ * `user_engagement` is sent only to org admins, and `system_health` (host CPU,
+ * memory and disk) only to platform operators. `system_health` is deliberately
+ * not typed or read here.
+ */
+export interface DashboardOverviewResponse {
+  timestamp: string;
+  time_range: string;
+  search_performance: SearchPerformanceResponse;
+  /** Org admins only; absent for other roles. */
+  user_engagement?: {
+    active_users: number;
+    total_sessions: number;
+    avg_session_duration: number;
+    searches_per_user: number;
+    top_users: unknown[];
+    engagement_trend: string;
+  };
+}
+
+export interface DashboardOverview {
+  /** Backend time range of the figures, e.g. `24h`. */
+  timeRange: string;
+  totalSearches: number;
+  /** `null` when no search was timed: show it as unavailable, not 0. */
+  avgSearchTimeMs: number | null;
   /**
-   * Get organization user summary
+   * `null` when the backend left `user_engagement` out, which it does by design
+   * for callers who are not org admins.
    */
-  async getOrganizationUserSummary(): Promise<{
-    totalUsers: number;
+  engagement: {
+    /** Distinct users who searched in the window. */
     activeUsers: number;
-    newUsersThisWeek: number;
-  }> {
-    try {
-      const response = await api.get<any>(
-        `${this.basePath}/organization/users`
-      );
-      return {
-        totalUsers: response.total_users || response.total || 0,
-        activeUsers: response.active_users || 0,
-        newUsersThisWeek: response.new_users_week || 0,
-      };
-    } catch (error) {
-      console.error('Failed to fetch organization user summary:', error);
-      return { totalUsers: 0, activeUsers: 0, newUsersThisWeek: 0 };
-    }
-  }
+    /** Distinct search sessions in the window (not chat conversations). */
+    searchSessions: number;
+  } | null;
 }
 
 /**
@@ -516,172 +605,64 @@ class PerformanceApiService {
   private readonly basePath = '/analytics/performance';
 
   /**
-   * Get dashboard overview data
+   * Get the organization overview for the last 24 hours. Reads the nested
+   * `search_performance` section, which every caller gets and which must be
+   * well formed, and `user_engagement` when the backend includes it (org
+   * admins only). A missing `user_engagement` is not an error; a malformed one
+   * is.
    */
-  async getDashboardOverview(): Promise<{
-    totalUsers: number;
-    activeUsers: number;
-    totalSessions: number;
-    totalSearches: number;
-    avgResponseTime: number;
-    errorRate: number;
-  }> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/overview`);
-      return {
-        totalUsers: response.total_users || 0,
-        activeUsers: response.active_users || 0,
-        totalSessions: response.total_sessions || 0,
-        totalSearches: response.total_searches || 0,
-        avgResponseTime: response.avg_response_time || 0,
-        errorRate: response.error_rate || 0,
-      };
-    } catch (error: any) {
-      // Only log non-silent errors (404s from optional endpoints are silent)
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch dashboard overview:', error);
-      }
-      return {
-        totalUsers: 0,
-        activeUsers: 0,
-        totalSessions: 0,
-        totalSearches: 0,
-        avgResponseTime: 0,
-        errorRate: 0,
-      };
-    }
+  async getDashboardOverview(): Promise<DashboardOverview> {
+    const response = await api.get<DashboardOverviewResponse>(
+      `${this.basePath}/overview?time_range=24h`
+    );
+    const search = requireObject(response?.search_performance, 'search_performance');
+    const rawEngagement = response.user_engagement;
+    // `_scope_overview_for` pops the key for non-admins, so only a missing key
+    // means "not sent to you". Anything else present must be the real section.
+    const engagement =
+      rawEngagement === undefined
+        ? null
+        : requireObject(rawEngagement, 'user_engagement');
+    return {
+      timeRange: String(response.time_range ?? '24h'),
+      totalSearches: requireNumber(search.total_searches, 'total_searches'),
+      avgSearchTimeMs: nullableNumber(search.avg_response_time, 'avg_response_time'),
+      engagement: engagement
+        ? {
+            activeUsers: requireNumber(engagement.active_users, 'active_users'),
+            searchSessions: requireNumber(
+              engagement.total_sessions,
+              'total_sessions'
+            ),
+          }
+        : null,
+    };
   }
 
   /**
-   * Get system health metrics
+   * Daily search volume for the organization over the last 7 days, from
+   * `/charts/search_volume` (`{metric_name, time_range, granularity, data}`).
+   * `get_metric_chart_data` picks the bucket from the range and ignores the
+   * requested granularity: 1h/24h are hourly, 7d is daily, and anything longer
+   * is weekly (while the route still echoes `granularity`). So 7d is the only
+   * range that yields per-day points. Days without searches are absent.
+   *
+   * The backend's cutoff is `utcnow() - 7d`, not a midnight, so an active
+   * organization gets up to 8 buckets: a partial day D-7 plus D-6 through D.
+   * Only the last 7 whole UTC calendar days (D-6 through today) are kept, so
+   * the partial bucket never shows as a full day.
    */
-  async getSystemHealth(): Promise<SystemHealthMetrics> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/system-health`);
-      return {
-        cpu_usage: response.cpu_usage || 0,
-        memory_usage: response.memory_usage || 0,
-        disk_usage: response.disk_usage || 0,
-        active_connections: response.active_connections || 0,
-        request_rate: response.request_rate || 0,
-        error_rate: response.error_rate || 0,
-        response_time: response.response_time || 0,
-      };
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch system health:', error);
-      }
-      return {
-        cpu_usage: 0,
-        memory_usage: 0,
-        disk_usage: 0,
-        active_connections: 0,
-        request_rate: 0,
-        error_rate: 0,
-        response_time: 0,
-      };
-    }
-  }
-
-  /**
-   * Get user engagement metrics
-   */
-  async getUserEngagement(): Promise<{
-    dailyActiveUsers: number;
-    weeklyActiveUsers: number;
-    avgSessionDuration: number;
-    bounceRate: number;
-    pageViews: number;
-  }> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/user-engagement`);
-      return {
-        dailyActiveUsers: response.daily_active_users || 0,
-        weeklyActiveUsers: response.weekly_active_users || 0,
-        avgSessionDuration: response.avg_session_duration || 0,
-        bounceRate: response.bounce_rate || 0,
-        pageViews: response.page_views || 0,
-      };
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch user engagement:', error);
-      }
-      return {
-        dailyActiveUsers: 0,
-        weeklyActiveUsers: 0,
-        avgSessionDuration: 0,
-        bounceRate: 0,
-        pageViews: 0,
-      };
-    }
-  }
-
-  /**
-   * Get realtime metrics
-   */
-  async getRealtimeMetrics(): Promise<{
-    activeUsers: number;
-    currentSearches: number;
-    processingFiles: number;
-    requestsPerMinute: number;
-  }> {
-    try {
-      const response = await api.get<any>(`${this.basePath}/dashboard`);
-      return {
-        activeUsers:
-          response.active_users || response.realtime?.active_users || 0,
-        currentSearches:
-          response.current_searches || response.realtime?.current_searches || 0,
-        processingFiles:
-          response.processing_files || response.realtime?.processing_files || 0,
-        requestsPerMinute:
-          response.requests_per_minute ||
-          response.realtime?.requests_per_minute ||
-          0,
-      };
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch realtime metrics:', error);
-      }
-      return {
-        activeUsers: 0,
-        currentSearches: 0,
-        processingFiles: 0,
-        requestsPerMinute: 0,
-      };
-    }
-  }
-
-  /**
-   * Get trend data for charts
-   */
-  async getTrendData(days: number = 30): Promise<TrendDataPoint[]> {
-    try {
-      const response = await api.get<any>(
-        `${this.basePath}/charts/overview?days=${days}`
-      );
-
-      if (Array.isArray(response)) {
-        return response.map((point: any) => ({
-          date: point.date || point.timestamp,
-          name: point.date || point.timestamp,
-          pageViews: point.page_views || point.pageViews || 0,
-          uniqueVisitors: point.unique_visitors || point.uniqueVisitors || 0,
-          documentsUploaded:
-            point.documents_uploaded || point.documentsUploaded || 0,
-          searchesPerformed:
-            point.searches_performed || point.searchesPerformed || 0,
-          chatsInitiated: point.chats_initiated || point.chatsInitiated || 0,
-        }));
-      }
-
-      return [];
-    } catch (error: any) {
-      if (!error?.error?.silent) {
-        console.error('Failed to fetch trend data:', error);
-      }
-      return [];
-    }
+  async getSearchVolumeTrend(now: Date = new Date()): Promise<DailyPoint[]> {
+    const response = await api.get<{
+      data: Array<{ timestamp: string; value: number }>;
+    }>(`${this.basePath}/charts/search_volume?time_range=7d&granularity=day`);
+    const firstDay = utcDayStart(now) - (SEARCH_VOLUME_DAYS - 1) * DAY_MS;
+    return requireArray<{ timestamp: string; value: number }>(
+      response?.data,
+      'data'
+    )
+      .map((point) => toDailyPoint(point.timestamp, point.value))
+      .filter((point) => Date.parse(point.date) >= firstDay);
   }
 }
 

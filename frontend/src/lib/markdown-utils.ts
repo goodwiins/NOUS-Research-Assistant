@@ -6,6 +6,16 @@
  */
 
 /**
+ * Cheap check for anything KaTeX would render: `$$…$$`, `$…$`, `\(…\)` or
+ * `\[…\]`. ChatMarkdown renders through the remark-math path only when this
+ * matches, so citation source selection uses it to parse the same way. It only
+ * decides whether to fetch the math chunk, so a false positive costs one
+ * request and a false negative renders the source as written — neither
+ * changes what remark-math itself does with the text.
+ */
+export const MATH_DELIMITERS = /\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\(|\\\[/;
+
+/**
  * Make a partial markdown string from a live token stream safe to render.
  *
  * While an assistant message streams token-by-token, markdown syntax arrives

@@ -12,8 +12,11 @@ set must be computed against an explicit, trustworthy base:
 
 The diff runs from ``merge-base(base, HEAD)`` against the working tree,
 so committed, staged, and unstaged changes are all included (pre-commit
-hooks reuse this helper). Deletions are excluded; renames report the
-new path. Generated files are never reported.
+hooks reuse this helper). Untracked files that are not gitignored are
+included too, as added files, so a new file nobody has ``git add``-ed
+yet is ratcheted locally the way CI will ratchet it once committed.
+Deletions are excluded; renames report the new path. Generated files
+are never reported.
 
 Usage:
     changed_source_files.py [--base REF] [--kind {python,frontend,all}]
@@ -102,6 +105,19 @@ def _changed_paths(base: str) -> list[tuple[str, str]]:
                 break
             entries.append((status[0], fields[i + 1]))
             i += 2
+    # `git diff` never reports untracked files, so a brand-new file that was
+    # not `git add`-ed yet escaped every local ratchet and only failed in CI
+    # once committed (GOO-738). Untracked files are new, so they count as
+    # added; --exclude-standard keeps .gitignore'd output (coverage, builds)
+    # out. In a fresh CI checkout this list is empty. ls-files prints paths
+    # relative to its cwd, so run it at the top level to match `git diff`.
+    seen = {path for _, path in entries}
+    top = _git("rev-parse", "--show-toplevel").strip()
+    untracked = _git("-C", top, "ls-files", "-z", "--others", "--exclude-standard")
+    for path in untracked.split("\0"):
+        if path and path not in seen:
+            entries.append(("A", path))
+            seen.add(path)
     return entries
 
 

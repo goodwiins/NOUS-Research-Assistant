@@ -11,7 +11,9 @@ import {
   type ResearchProjectRole,
   type SynthesisList,
 } from '@/services/researchEngineService';
+import { getMatrix, listMatrices } from '@/services/scispaceService';
 import { APIErrorClass } from '@/types/api';
+import type { ExtractionCell } from '@/types/scispace';
 import type {
   ApiClaimLink,
   ApiClaimListResponse,
@@ -364,5 +366,60 @@ describe('DraftClaimsPanel', () => {
     expect(screen.queryByRole('button', { name: 'Link evidence' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Create claim' })).toBeNull();
     expect(screen.queryByRole('group', { name: 'Assess' })).toBeNull();
+  });
+
+  it('labels accepted values as text, never [object Object] (GOO-779)', async () => {
+    vi.mocked(projectService.listClaims).mockResolvedValue(
+      response([linkedClaim()])
+    );
+    vi.mocked(listMatrices).mockResolvedValue({
+      matrices: [{ id: 'm-1' }],
+      total: 1,
+    } as unknown as Awaited<ReturnType<typeof listMatrices>>);
+    const accepted = (
+      field: string,
+      extra: Partial<ExtractionCell>
+    ): ExtractionCell => ({
+      document_id: 'doc-1',
+      column_name: field,
+      value: null,
+      citation_snippet: null,
+      confidence: null,
+      field_id: field,
+      source: 'accepted',
+      ...extra,
+    });
+    // A value the server omitted entirely arrives as undefined.
+    const omitted = accepted('Omitted', {});
+    delete (omitted as Partial<ExtractionCell>).value;
+    vi.mocked(getMatrix).mockResolvedValue({
+      id: 'm-1',
+      project_id: 'project-1',
+      name: 'Grid',
+      columns: [],
+      cells: [
+        accepted('Arms', { value: { n: 2, labels: ['a', 'b'] } }),
+        accepted('Formula', { value: '=HYPERLINK("x")' }),
+        accepted('Missing', { missingness: 'not_reported' }),
+        omitted,
+      ],
+      created_at: null,
+      updated_at: null,
+    });
+    renderPanel({ content: 'Body.', canEdit: true });
+    const select = await screen.findByLabelText('Accepted value to link');
+    await waitFor(() =>
+      expect(select.querySelectorAll('option')).toHaveLength(5)
+    );
+    const labels = Array.from(select.querySelectorAll('option')).map(
+      (option) => option.textContent
+    );
+    expect(labels.slice(1)).toEqual([
+      'Grid · Arms: {"n":2,"labels":["a","b"]}',
+      'Grid · Formula: =HYPERLINK("x")',
+      'Grid · Missing: not_reported',
+      'Grid · Omitted: —',
+    ]);
+    expect(labels.join('\n')).not.toContain('[object Object]');
   });
 });
