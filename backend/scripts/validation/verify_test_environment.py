@@ -228,7 +228,6 @@ class TestEnvironmentVerifier:
             ("test_config.py", "Test configuration file"),
             ("conftest.py", "Pytest configuration file"),
             ("requirements.txt", "Dependencies file"),
-            ("requirements-test.txt", "Test dependencies file"),
         ]
 
         for item, description in required_items:
@@ -310,9 +309,7 @@ class TestEnvironmentVerifier:
 
         # Next steps
         print(f"\n{Colors.BLUE}NEXT STEPS:{Colors.END}")
-        print(
-            f"  1. Install missing dependencies: pip install -r requirements-test.txt"
-        )
+        print(f"  1. Install missing dependencies: pip install -r requirements.dev.txt")
         print(f"  2. Start required services: docker-compose up -d")
         print(f"  3. Run tests: pytest")
         print(f"  4. Run specific test suites:")

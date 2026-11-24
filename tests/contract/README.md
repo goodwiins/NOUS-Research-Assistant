@@ -78,7 +78,7 @@ tests/contract/
 pip install pytest pytest-asyncio pytest-html httpx faker
 
 # Install test dependencies
-pip install -r requirements-test.txt
+pip install -r backend/requirements.dev.txt
 ```
 
 ### Running Tests
@@ -253,7 +253,7 @@ jobs:
         python-version: 3.9
     - name: Install dependencies
       run: |
-        pip install -r requirements-test.txt
+        pip install -r backend/requirements.dev.txt
     - name: Run contract tests
       run: |
         python tests/contract/run_contract_tests.py --type fast --save-results

@@ -141,3 +141,23 @@ pytest -q backend/tests/unit/architecture backend/tests/unit/api
 pytest -q backend/tests/unit/services/threads backend/tests/api/threads
 python scripts/ci/generate_openapi.py --check
 ```
+
+## Python dependencies
+
+- `backend/requirements.txt` is the production set.
+  `backend/requirements-cpu.in` includes it and adds the CPU torch wheel, so
+  it is the source of `backend/requirements-cpu-lock.txt`. After editing it, regenerate
+  the lock from the repo root without `--upgrade`, so existing pins are kept:
+
+  ```sh
+  uv pip compile --python-version 3.11 --python-platform x86_64-manylinux_2_28 --no-annotate backend/requirements-cpu.in -o backend/requirements-cpu-lock.txt
+  ```
+
+- `backend/requirements-ci.txt` holds the test tools CI installs next to the
+  lock (pytest and its plugins, testcontainers).
+- `backend/requirements.dev.txt` is the local dev set: `requirements.txt`,
+  `requirements-ci.txt` and the lint/dev tools.
+- Test and profiling tools never go in `requirements.txt`. Add a package there
+  only when runtime code imports it, or when it is a documented CLI, driver or
+  security-floor pin (for example `flower`, `gunicorn`, `aiosqlite`).
+  `backend/tests/unit/ci/test_requirements_layout.py` guards this layout.
