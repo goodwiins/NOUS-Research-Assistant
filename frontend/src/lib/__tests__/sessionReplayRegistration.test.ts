@@ -34,7 +34,12 @@ const ROOT = path.resolve(__dirname, '../../..');
  */
 const SOURCE_DIRS = ['app', 'src', 'config'];
 const SOURCE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
-const SKIPPED_DIRS = new Set(['node_modules', '.next', '__tests__', '__mocks__']);
+const SKIPPED_DIRS = new Set([
+  'node_modules',
+  '.next',
+  '__tests__',
+  '__mocks__',
+]);
 const TEST_FILE = /\.(test|spec)\.[jt]sx?$/;
 
 /**
@@ -121,7 +126,9 @@ const isApproved = (hit: { file: string; match: string }): boolean =>
 
 describe('session replay registration (GOO-774)', () => {
   it('starts no session recorder other than the approved Sentry replay', () => {
-    const unapproved = recorderRegistrations().filter((hit) => !isApproved(hit));
+    const unapproved = recorderRegistrations().filter(
+      (hit) => !isApproved(hit)
+    );
 
     expect(unapproved).toEqual([]);
   });
@@ -271,7 +278,8 @@ describe('session replay registration (GOO-774)', () => {
           'instrumentation.ts': 'export async function register() {}\n',
           'instrumentation-client.ts':
             'Sentry.init({ integrations: [Sentry.replayIntegration(REPLAY_PRIVACY_OPTIONS)] });\n',
-          'config/resolveSentryEnvironment.js': 'module.exports = () => "dev";\n',
+          'config/resolveSentryEnvironment.js':
+            'module.exports = () => "dev";\n',
           'next.config.test.ts': 'new StatsigAutoCapturePlugin();\n',
         })
       ).toEqual([]);

@@ -32,7 +32,9 @@ This test enforces that rule instead of leaving it in a docstring:
 Only code that can run counts toward the lock (GOO-795): the scan skips the
 bodies of nested functions, lambdas and classes (judged on their own, if at
 all) and branches a constant condition never takes (``if False:``, the
-``else`` of ``if True:``, ``while 0:``).
+``else`` of ``if True:``, ``while 0:``). A nested def, or a lambda assigned
+to a name, that the function then calls by that name does run as part of it,
+so its body counts (GOO-799).
 
 Not covered: ORM attribute assignment on a loaded row (``row.x = ...``) is
 not visible to an AST scan. Graph rows are append-only by design (new
@@ -394,11 +396,15 @@ def _constant_truth(test: ast.expr) -> bool | None:
     return None
 
 
-def _reachable(fn: Function) -> Iterator[ast.AST]:
+Scope = Function | ast.Lambda
+
+
+def _reachable(fn: Scope) -> Iterator[ast.AST]:
     """Like ``ast.walk(fn)``, without the code that never runs as part of
     ``fn``: nested function, lambda and class bodies, and the branch of an
     ``if``/``while``/ternary whose condition is a constant that skips it."""
-    todo: list[ast.AST] = list(fn.body)
+    body: list[ast.AST] = list(fn.body) if isinstance(fn.body, list) else [fn.body]
+    todo = body
     while todo:
         node = todo.pop()
         yield node
@@ -420,13 +426,46 @@ def _reachable(fn: Function) -> Iterator[ast.AST]:
         todo += ast.iter_child_nodes(node)
 
 
+def _local_callables(fn: Scope) -> dict[str, Scope]:
+    """Nested defs, and lambdas assigned to a plain name, that ``fn`` itself
+    binds (in code that runs), by the name it can call them with."""
+    found: dict[str, Scope] = {}
+    for node in _reachable(fn):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found[node.name] = node
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Lambda)
+        ):
+            found[node.targets[0].id] = node.value
+    return found
+
+
+def _runs(fn: Scope, seen: frozenset[int] = frozenset()) -> Iterator[ast.AST]:
+    """``_reachable(fn)``, plus the body of each nested def or lambda that
+    ``fn`` binds and then calls by name (GOO-799): that body runs as part of
+    ``fn``, so a lock taken there is taken by ``fn``."""
+    local = _local_callables(fn)
+    for node in _reachable(fn):
+        yield node
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and (inner := local.get(node.func.id)) is not None
+            and id(inner) not in seen
+        ):
+            yield from _runs(inner, seen | {id(inner)})
+
+
 def _takes_lock(fn: Function) -> bool:
     """Calls ``lock_active_project`` or ``resolve_for_staling``, or calls
     ``resolve_project`` with a literal mutating ``ResearchAction``: directly,
     through a local alias (``resolve = resolve_for_staling if ... else
     resolve_project``) or through an action-forwarding wrapper."""
     resolvers = {RESOLVE} | _action_forwarders()
-    for node in _reachable(fn):
+    for node in _runs(fn):
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
@@ -439,7 +478,7 @@ def _takes_lock(fn: Function) -> bool:
             }
             if named & (LOCKS | {RESOLVE}):
                 resolvers.add(node.targets[0].id)
-    for node in _reachable(fn):
+    for node in _runs(fn):
         if isinstance(node, ast.Call):
             name = _call_name(node)
             if name in LOCKS or (name in resolvers and _mutating(node)):
@@ -461,10 +500,15 @@ def _lock_graph() -> tuple[dict[Key, set[Key]], frozenset[Key]]:
     for path in SRC.rglob("*.py"):
         local = _functions(_parse(path))
         for name, fn in local.items():
+            # A call to a nested def or lambda ``fn`` binds is followed into
+            # its body by ``_runs``; resolving it by name through ``local``
+            # could land on another function of the same name in the module.
+            nested = _local_callables(fn)
             edges[(path, name)] = {
                 key
-                for call in _reachable(fn)
+                for call in _runs(fn)
                 if isinstance(call, ast.Call)
+                and not (isinstance(call.func, ast.Name) and call.func.id in nested)
                 and (key := _resolve(call, path, local))
                 and key[1] not in primitives
             }
@@ -630,6 +674,13 @@ async def w(db, pid, uid):
         resolve = resolve_for_staling
     await resolve(db, pid, uid, ResearchAction.EDIT)
 """,
+    "in a nested def called only under `if False:`": """
+async def w(db, pid):
+    async def _go():
+        await lock_active_project(db, pid)
+    if False:
+        await _go()
+""",
 }
 
 # The forms next to each plant that do take the lock.
@@ -681,6 +732,31 @@ async def w(db, pid):
     def _later():
         return None
 """,
+    # GOO-799: the default of a keyword-only parameter is evaluated when the
+    # def runs, like a positional default (``args.kw_defaults``).
+    "in a nested def's keyword-only default": """
+async def w(db, pid):
+    def _later(*, lock=lock_active_project(db, pid)):
+        return lock
+""",
+    # GOO-799: a nested def or lambda the function calls runs as part of it.
+    "in a nested def that is then called": """
+async def w(db, pid):
+    async def _go():
+        await lock_active_project(db, pid)
+    await _go()
+""",
+    "in a lambda that is then called": """
+async def w(db, pid):
+    go = lambda: lock_active_project(db, pid)
+    await go()
+""",
+    "mutating resolve_project in a nested def that is then called": """
+async def w(db, pid, uid):
+    async def _go():
+        await resolve_project(db, pid, uid, ResearchAction.EDIT)
+    await _go()
+""",
 }
 
 
@@ -722,3 +798,48 @@ def test_the_lock_graph_ignores_a_call_in_a_nested_def(
             cached.cache_clear()
     assert (module, "live") in reaches
     assert (module, "parked") not in reaches
+
+
+def _clear_scan_caches() -> None:
+    _lock_graph.cache_clear()
+    _action_forwarders.cache_clear()
+    _imports.cache_clear()
+
+
+def test_the_lock_graph_follows_a_called_nested_def_by_its_own_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GOO-799: a nested def the parent calls is judged as part of the
+    parent, even when another function in the module has a nested def of the
+    same name. ``_functions`` keys by name and keeps the last one, so resolving
+    the call by name could land on the other ``_go``: it would miss the lock
+    (first module) or credit one that is not taken (second module)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "__init__.py").write_text("")
+    locks = (
+        "async def locks(db, pid):\n"
+        "    async def _go():\n"
+        "        await _locks(db, pid)\n"
+        "    await _go()\n"
+    )
+    no_lock = (
+        "async def no_lock(db, pid):\n"
+        "    async def _go():\n"
+        "        return None\n"
+        "    await _go()\n"
+    )
+    helper = "async def _locks(db, pid):\n    await lock_active_project(db, pid)\n"
+    lock_first = src / "lock_first.py"
+    lock_first.write_text(helper + locks + no_lock)
+    lock_last = src / "lock_last.py"
+    lock_last.write_text(helper + no_lock + locks)
+    monkeypatch.setattr(sys.modules[__name__], "SRC", src)
+    _clear_scan_caches()
+    try:
+        _, reaches = _lock_graph()
+    finally:
+        _clear_scan_caches()
+    for module in (lock_first, lock_last):
+        assert (module, "locks") in reaches, module.name
+        assert (module, "no_lock") not in reaches, module.name
