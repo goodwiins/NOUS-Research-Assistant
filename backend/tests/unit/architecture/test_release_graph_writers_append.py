@@ -443,20 +443,34 @@ def _local_callables(fn: Scope) -> dict[str, Scope]:
     return found
 
 
-def _runs(fn: Scope, seen: frozenset[int] = frozenset()) -> Iterator[ast.AST]:
-    """``_reachable(fn)``, plus the body of each nested def or lambda that
-    ``fn`` binds and then calls by name (GOO-799): that body runs as part of
-    ``fn``, so a lock taken there is taken by ``fn``."""
+def _scoped_runs(
+    fn: Scope,
+    seen: frozenset[int] = frozenset(),
+    enclosing: frozenset[str] = frozenset(),
+) -> Iterator[tuple[ast.AST, frozenset[str]]]:
+    """``_runs(fn)``, each node paired with the names of the nested defs and
+    lambdas bound by the scope it appears in or by an enclosing followed
+    scope: a call by one of those names lands on that local callable, never
+    on a module function of the same name."""
     local = _local_callables(fn)
+    bound = enclosing | set(local)
     for node in _reachable(fn):
-        yield node
+        yield node, bound
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and (inner := local.get(node.func.id)) is not None
             and id(inner) not in seen
         ):
-            yield from _runs(inner, seen | {id(inner)})
+            yield from _scoped_runs(inner, seen | {id(inner)}, bound)
+
+
+def _runs(fn: Scope) -> Iterator[ast.AST]:
+    """``_reachable(fn)``, plus the body of each nested def or lambda that
+    ``fn`` binds and then calls by name (GOO-799): that body runs as part of
+    ``fn``, so a lock taken there is taken by ``fn``."""
+    for node, _ in _scoped_runs(fn):
+        yield node
 
 
 def _takes_lock(fn: Function) -> bool:
@@ -500,15 +514,15 @@ def _lock_graph() -> tuple[dict[Key, set[Key]], frozenset[Key]]:
     for path in SRC.rglob("*.py"):
         local = _functions(_parse(path))
         for name, fn in local.items():
-            # A call to a nested def or lambda ``fn`` binds is followed into
-            # its body by ``_runs``; resolving it by name through ``local``
-            # could land on another function of the same name in the module.
-            nested = _local_callables(fn)
+            # A call to a nested def or lambda bound in the scope it appears
+            # in (or an enclosing followed one) is followed into its body by
+            # ``_runs``; resolving it by name through ``local`` could land on
+            # another function of the same name in the module.
             edges[(path, name)] = {
                 key
-                for call in _runs(fn)
+                for call, bound in _scoped_runs(fn)
                 if isinstance(call, ast.Call)
-                and not (isinstance(call.func, ast.Name) and call.func.id in nested)
+                and not (isinstance(call.func, ast.Name) and call.func.id in bound)
                 and (key := _resolve(call, path, local))
                 and key[1] not in primitives
             }
@@ -843,3 +857,131 @@ def test_the_lock_graph_follows_a_called_nested_def_by_its_own_scope(
     for module in (lock_first, lock_last):
         assert (module, "locks") in reaches, module.name
         assert (module, "no_lock") not in reaches, module.name
+
+
+def _reaches_in(src: Path, modules: dict[str, str]) -> dict[str, frozenset[str]]:
+    """Plant ``modules`` under ``src`` and return, per module, the names of
+    its functions that reach a Collection lock through their own calls."""
+    src.mkdir()
+    (src / "__init__.py").write_text("")
+    for name, source in modules.items():
+        (src / f"{name}.py").write_text(source)
+    _clear_scan_caches()
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(sys.modules[__name__], "SRC", src)
+            _, reaches = _lock_graph()
+    finally:
+        _clear_scan_caches()
+    return {
+        name: frozenset(fn for path, fn in reaches if path == src / f"{name}.py")
+        for name in modules
+    }
+
+
+_LOCKING_HELPER = "async def helper(db, pid):\n    await lock_active_project(db, pid)\n"
+_PLAIN_HELPER = "async def helper(db, pid):\n    return None\n"
+
+
+_PLAIN_SECOND_LEVEL_WRITER = (
+    "async def w(db, pid):\n"
+    "    async def _go():\n"
+    "        async def helper():\n"
+    "            return None\n"
+    "        await helper()\n"
+    "    await _go()\n"
+)
+
+
+def test_the_lock_graph_resolves_a_second_level_nested_call_in_its_own_scope(
+    tmp_path: Path,
+) -> None:
+    """A call inside a followed nested body to that body's own nested def
+    lands on that def. ``_functions`` keys every def in the module by name
+    (the last one walked wins), so resolving it by name could land on another
+    function's deeper ``helper`` that takes the lock, and credit ``w`` with a
+    lock it never takes."""
+    other = (
+        "async def other(db, pid):\n"
+        "    async def _a():\n"
+        "        async def _b():\n"
+        "            async def helper():\n"
+        "                await lock_active_project(db, pid)\n"
+        "            await helper()\n"
+        "        await _b()\n"
+        "    await _a()\n"
+    )
+    writer = _PLAIN_SECOND_LEVEL_WRITER
+    found = _reaches_in(
+        tmp_path / "src",
+        {"other_first": other + writer, "other_last": writer + other},
+    )
+    for module, names in found.items():
+        assert "other" in names, module
+        assert "w" not in names, module
+
+
+def test_the_lock_graph_ignores_a_module_level_namesake_of_a_nested_call(
+    tmp_path: Path,
+) -> None:
+    """A module-level ``helper`` that takes the lock does not lock for a
+    writer whose second-level nested ``helper`` does not."""
+    writer = _PLAIN_SECOND_LEVEL_WRITER
+    found = _reaches_in(
+        tmp_path / "src",
+        {
+            "helper_first": _LOCKING_HELPER + writer,
+            "helper_last": writer + _LOCKING_HELPER,
+        },
+    )
+    for module, names in found.items():
+        assert "w" not in names, module
+
+
+def test_the_lock_graph_credits_a_second_level_nested_def_that_locks(
+    tmp_path: Path,
+) -> None:
+    """The mirror: the second-level ``helper`` takes the lock and the
+    module-level one does not, so the writer does reach the lock."""
+    writer = (
+        "async def w(db, pid):\n"
+        "    async def _go():\n"
+        "        async def helper():\n"
+        "            await lock_active_project(db, pid)\n"
+        "        await helper()\n"
+        "    await _go()\n"
+    )
+    found = _reaches_in(
+        tmp_path / "src",
+        {"helper_first": _PLAIN_HELPER + writer, "helper_last": writer + _PLAIN_HELPER},
+    )
+    for module, names in found.items():
+        assert "w" in names, module
+
+
+def test_the_lock_graph_resolves_a_first_level_nested_shadow_in_its_own_scope(
+    tmp_path: Path,
+) -> None:
+    """A nested def that shadows a module-level function at the first level
+    is the one called, in either direction."""
+    shadow_plain = (
+        "async def w(db, pid):\n"
+        "    async def helper():\n"
+        "        return None\n"
+        "    await helper()\n"
+    )
+    shadow_locks = (
+        "async def w(db, pid):\n"
+        "    async def helper():\n"
+        "        await lock_active_project(db, pid)\n"
+        "    await helper()\n"
+    )
+    found = _reaches_in(
+        tmp_path / "src",
+        {
+            "plain_shadow": _LOCKING_HELPER + shadow_plain,
+            "locking_shadow": _PLAIN_HELPER + shadow_locks,
+        },
+    )
+    assert "w" not in found["plain_shadow"]
+    assert "w" in found["locking_shadow"]
