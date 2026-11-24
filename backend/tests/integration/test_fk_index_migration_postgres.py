@@ -13,6 +13,9 @@ asyncio timeout instead of failing fast; moving the repair DROP out of the
 friendly-error try fails test_a_blocked_repair_drop_gets_the_same_clear_error;
 dropping the re-raise of the build's error fails
 test_a_terminated_build_keeps_its_own_error (PendingRollbackError instead).
+That test terminates only the migration's own backend, by pid; widening the
+kill to every ``CREATE INDEX CONCURRENTLY`` on the server fails it, because a
+bystander build on another connection must survive.
 """
 
 from __future__ import annotations
@@ -88,13 +91,25 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         await admin.dispose()
 
 
-async def _run(engine: AsyncEngine, step: str, **overrides: Any) -> None:
+async def _run(
+    engine: AsyncEngine,
+    step: str,
+    build_pid: "asyncio.Future[int] | None" = None,
+    **overrides: Any,
+) -> None:
+    """Run ``step`` of the revision; ``build_pid`` gets its backend pid."""
     migration = _migration()
     for name, value in overrides.items():
         assert hasattr(migration, name), name
         setattr(migration, name, value)
 
+    loop = asyncio.get_running_loop()
+
     def migrate(connection: Any) -> None:
+        if build_pid is not None:
+            # From the driver, not a query: no transaction is opened here.
+            pid = connection.connection.driver_connection.get_server_pid()
+            loop.call_soon_threadsafe(build_pid.set_result, pid)
         context = MigrationContext.configure(connection)
         with Operations.context(context), context.begin_transaction():
             getattr(migration, step)()
@@ -223,10 +238,27 @@ async def test_a_blocked_repair_drop_gets_the_same_clear_error(
     assert await _indexes(engine) == _expected()
 
 
+async def _cic_pids(engine: AsyncEngine) -> List[int]:
+    async with engine.connect() as admin:
+        rows = await admin.execute(
+            text(
+                "SELECT pid FROM pg_stat_activity "
+                "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' "
+                "AND pid <> pg_backend_pid()"
+            )
+        )
+        return list(rows.scalars())
+
+
 async def test_a_terminated_build_keeps_its_own_error(engine: AsyncEngine) -> None:
     # pg_terminate_backend kills the migration's connection mid-build; the
     # RESET that follows then fails too, and must not hide the real error.
+    # Only the migration's own backend is killed: a concurrent build on
+    # another connection (the bystander) must survive and finish.
+    build_pid: "asyncio.Future[int]" = asyncio.get_running_loop().create_future()
+
     async def _terminate_the_build() -> None:
+        pid = await asyncio.wait_for(build_pid, timeout=10)
         for _ in range(100):
             await asyncio.sleep(0.05)
             async with engine.connect() as admin:
@@ -234,29 +266,63 @@ async def test_a_terminated_build_keeps_its_own_error(engine: AsyncEngine) -> No
                     text(
                         "SELECT count(pg_terminate_backend(pid)) "
                         "FROM pg_stat_activity "
-                        "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' "
-                        "AND pid <> pg_backend_pid()"
-                    )
+                        "WHERE pid = :pid "
+                        "AND query LIKE 'CREATE INDEX CONCURRENTLY%'"
+                    ),
+                    {"pid": pid},
                 )
             if killed:
                 return
+        raise AssertionError("the migration's build never started")
 
-    async with engine.connect() as blocker:
-        await blocker.execute(
-            text("INSERT INTO agent_runs (id) VALUES (gen_random_uuid())")
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE fk01_bystander (id UUID)"))
+    async with engine.connect() as bystander_blocker, engine.connect() as bystander:
+        # The bystander's build waits behind its own open writer, so it is
+        # still running when the migration's build is killed.
+        await bystander_blocker.execute(
+            text("INSERT INTO fk01_bystander (id) VALUES (gen_random_uuid())")
         )
-        killer = asyncio.create_task(_terminate_the_build())
-        with pytest.raises(Exception) as raised:
-            await asyncio.wait_for(
-                _run(engine, "upgrade", _LOCK_TIMEOUT="20s"), timeout=30
+        auto = await bystander.execution_options(isolation_level="AUTOCOMMIT")
+        bystander_pid = await auto.scalar(text("SELECT pg_backend_pid()"))
+        bystander_build = asyncio.create_task(
+            auto.execute(
+                text(
+                    "CREATE INDEX CONCURRENTLY ix_fk01_bystander_id "
+                    "ON fk01_bystander (id)"
+                )
             )
-        await killer
-        await blocker.rollback()
+        )
+        for _ in range(100):
+            if bystander_pid in await _cic_pids(engine):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the bystander build never started")
+
+        async with engine.connect() as blocker:
+            await blocker.execute(
+                text("INSERT INTO agent_runs (id) VALUES (gen_random_uuid())")
+            )
+            killer = asyncio.create_task(_terminate_the_build())
+            with pytest.raises(Exception) as raised:
+                await asyncio.wait_for(
+                    _run(engine, "upgrade", build_pid=build_pid, _LOCK_TIMEOUT="20s"),
+                    timeout=30,
+                )
+            await killer
+            await blocker.rollback()
+
+        # The bystander was not terminated: still building, then it finishes.
+        assert bystander_pid in await _cic_pids(engine)
+        await bystander_blocker.rollback()
+        await asyncio.wait_for(bystander_build, timeout=30)
 
     # The build's own error, not alembic's PendingRollbackError on exit.
     assert type(raised.value).__name__ == "DBAPIError"
     assert "CREATE INDEX CONCURRENTLY" in str(raised.value)
     assert "connection was closed" in str(raised.value)
+    assert (await _indexes(engine)).get("ix_fk01_bystander_id") is True
 
 
 async def test_downgrade_drops_every_index(engine: AsyncEngine) -> None:
