@@ -870,7 +870,7 @@ jobs:
         # tests/e2e/qa (pnpm qa:nous) and its nous-verify selection/evidence
         # code have no other CI coverage; the suites need no browser.
         run: node --test ../tests/unit/scripts/nous-qa.test.mjs ../tests/unit/scripts/nous-verify.test.mjs
-      - name: Run credential-free chat and artifact browser checks
+      - name: Run credential-free chat, artifact and accessibility browser checks
         if: github.event_name == 'pull_request'
         run: |
           sudo python3 ../scripts/ci/quarantine_apt_sources.py
@@ -880,6 +880,8 @@ jobs:
           pnpm exec playwright test --config=playwright.chat-mobile-controls.config.ts --project=chromium-375
           pnpm exec playwright test --config=playwright.artifact-isolation.config.ts
           pnpm exec playwright test --config=playwright.artifact-sharing.config.ts
+          pnpm exec playwright test --config=playwright.response-layout.config.ts --ignore-snapshots
+          pnpm exec playwright test --config=playwright.a11y-smoke.config.ts
       - name: Upload frontend browser failures
         if: failure() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

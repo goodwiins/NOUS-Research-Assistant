@@ -4,7 +4,13 @@ export default defineConfig({
   testDir: './e2e/artifacts',
   // html-isolation: sandboxed artifact HTML. csp-images: the production
   // CSP img-src allows self, blob: and data: and blocks remote https (GOO-722).
-  testMatch: ['html-isolation.spec.ts', 'csp-images.spec.ts'],
+  // csp-connect: connect-src lets listed origins through and blocks or
+  // reports an unlisted host (GOO-729).
+  testMatch: [
+    'html-isolation.spec.ts',
+    'csp-images.spec.ts',
+    'csp-connect.spec.ts',
+  ],
   workers: 1,
   retries: 0,
   use: {

@@ -99,9 +99,9 @@ over the others.
 | `golden-replay` | Golden Replay | Deterministic replay of `backend/tests/eval/test_agent_regression.py`, no credentials. |
 | `integration-tests` | Integration Tests (sharded) | Backend integration tests. |
 | `resilience-tests` | Resilience Tests | Retry, circuit-breaker and bulkhead tests. |
-| `frontend-tests` | Frontend Tests | Vitest suite. |
+| `frontend-tests` | Frontend Tests | Vitest suite. On PRs only, also the credential-free Playwright configs in [Pull-request browser checks](#pull-request-browser-checks). |
 | `security-scan` | Security Scan | Bandit on `backend/src` and `safety` on `backend/requirements.txt`. |
-| `e2e-tests` | E2E Tests | Playwright browser tests. |
+| `e2e-tests` | E2E Tests | `tests/e2e` Playwright tests on the docker stack (backend, frontend, GoTrue, seeded users). PRs run only the `@smoke` tests of the `chromium` project; pushes run the whole `chromium` project. |
 | `performance-tests` | Performance Tests | Performance benchmarks; not listed in the Release Gate `needs`. |
 | `test-summary` | Release Gate | Requires the selected jobs to pass and validates every skip. |
 
@@ -110,3 +110,55 @@ weekly (Monday 06:00 UTC) and manually dispatched LangSmith golden-set sweep on 
 self-hosted runner, using the credentials the `golden`, `langsmith` and `eval`
 markers need. The recorded agent-flow harness is described in
 [`evals/README.md`](../../evals/README.md).
+
+## Pull-request browser checks
+
+The `frontend-tests` step "Run credential-free chat, artifact and accessibility
+browser checks" runs only on pull requests. Each command runs from `frontend/`
+without credentials. A config either starts `next dev` with stub env
+(`NEXT_PUBLIC_VISUAL_TEST_FIXTURES=1`, a fake Supabase URL and anon key) and
+fulfils API calls with `page.route`, or serves its fixture through routes only.
+
+| Config | Covers |
+| --- | --- |
+| `playwright.replay-privacy.config.ts` | Sentry replay payload keeps tokens, link targets and artifact iframes out. |
+| `playwright.replay-router.config.ts` | Replay guard and URL strip against the real Next router. |
+| `playwright.chat-mobile-controls.config.ts --project=chromium-375` | Chat header controls at a 375px viewport. |
+| `playwright.artifact-isolation.config.ts` | Sandboxed artifact HTML, CSP `img-src` and CSP `connect-src`. |
+| `playwright.artifact-sharing.config.ts` | Artifact share dialog, revocation and pinned PDF bytes under the parent CSP. |
+| `playwright.response-layout.config.ts --ignore-snapshots` | Layout and axe scan of the chat response renderer at 4 viewports. The darwin screenshot baselines are not compared. |
+| `playwright.a11y-smoke.config.ts` | axe scan (WCAG 2.0/2.1 A and AA) of `/login`; fails on any serious or critical violation. |
+
+Reproduce a command as the PR lane runs it, without retries. Keep no `.env`,
+`.env.local` or `.env.development.local` in `frontend/` and export no
+credentials:
+
+```sh
+cd frontend
+CI=true pnpm exec playwright test --config=playwright.a11y-smoke.config.ts --retries=0
+```
+
+These spec groups stay out of the PR lane:
+
+- Live keys or a live deployment: `nous-flows/chat-terminal-reconciliation.spec.ts`,
+  `nous-flows/research-journey.live.spec.ts`, `agent-qa/live-agent-qa*.spec.ts`,
+  `smoke/agent-chat-smoke.spec.ts` and
+  `research-engine/daily-research-brief.spec.ts`. Each self-skips when its
+  credentials are absent.
+- Seeded backend stack: `nous-flows/nous-critical-flows.spec.ts` and the
+  `tests/e2e` `accessibility` project log in as seeded users.
+- Separate mock proxy: `nous-flows/research-project-identity.spec.ts` needs
+  `mock-project-identity-harness.mjs` running beside the app.
+- Legacy `frontend/playwright.config.ts` suites (`accessibility/*`,
+  `user-workflows/*`, `cross-browser/*`, `error-handling/*`, `monitoring/*`,
+  `multimodal/*`, `realtime/*`, visual regression): they need global setup,
+  login and routes that the stub environment does not serve.
+- Failed the local proof: `playwright.agent-citations.config.ts` fails every
+  run because its routes do not stub
+  `/api/v2/conversations/{id}/threads`, so the chat drops the conversation.
+  `playwright.pdf-preview.config.ts` (`channel: 'chromium'`) crashes Chromium
+  between tests on macOS.
+
+A spec joins the PR lane only after the same local proof: its command passes 5
+separate runs with `--retries=0` and 0 failures, and the only skips come from
+the spec's own `test.skip`.
