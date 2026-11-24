@@ -16,9 +16,13 @@
 # --skip-tests), and the unit suite run from the repo root as CI runs it.
 # --frontend adds type-check, the lint ratchets, and vitest with the coverage
 # ratchet. The Trigger.dev tsc gate and node tests run with --frontend or when
-# src/trigger, tests/trigger or the files they read changed. The truly-empty Alembic replay remains a visible advisory
-# measurement of legacy-chain health. Untracked (not yet `git add`-ed) files
-# count as changed, so a new file is ratcheted before it is committed.
+# src/trigger, tests/trigger or the files they read changed: the task-caller
+# trees the path contract scans (frontend/app, frontend/src, src, terminal/src,
+# packages) and frontend/package.json, which pins the tsc version. The node
+# tests fail when tests/trigger/*.test.mjs matches no file. The truly-empty
+# Alembic replay remains a visible advisory measurement of legacy-chain health.
+# Untracked (not yet `git add`-ed) files count as changed, so a new file is
+# ratcheted before it is committed.
 #
 # The three contract gates, and when each one runs:
 #   * OpenAPI snapshot drift        — ALWAYS (offline: in-memory SQLite + placeholder env)
@@ -77,12 +81,17 @@ warn() { printf '\033[33m%s\033[0m\n' "$1"; }
 # untracked files (a brand-new migration or a freshly generated api.d.ts is
 # untracked until `git add`, and a trigger that misses it would silently skip
 # the gate it is meant to arm). Prints "<unresolved-base>" when the base does
-# not resolve, so conditional gates fire instead of quietly passing.
+# not resolve, so conditional gates fire instead of quietly passing. Each git
+# call is captured on its own so a failure of either is the function's status:
+# in a `{ a; b; } | sort` group only the last command's status survives.
 changed_paths() {
   if [ -z "$MERGE_BASE" ]; then echo "<unresolved-base>"; return 0; fi
+  local diffed untracked
+  diffed="$(git diff --name-only "$MERGE_BASE" -- "$@")" || return
+  untracked="$(git ls-files --others --exclude-standard -- "$@")" || return
   {
-    git diff --name-only "$MERGE_BASE" -- "$@"
-    git ls-files --others --exclude-standard -- "$@"
+    if [ -n "$diffed" ]; then printf '%s\n' "$diffed"; fi
+    if [ -n "$untracked" ]; then printf '%s\n' "$untracked"; fi
   } | sort -u
 }
 
@@ -454,10 +463,13 @@ fi
 
 # Mirrors the frontend-tests job's two Trigger.dev steps (GOO-764). CI runs
 # them on every full-profile run; here they run with --frontend or whenever a
-# path they read changed (the task code, its tests, the OpenAPI snapshot the
-# path contract checks, or the root TypeScript/dependency config).
-TRIGGER_CHANGES="$(changed_paths src/trigger tests/trigger backend/openapi.json \
-  tsconfig.json trigger.config.ts package.json pnpm-lock.yaml)"
+# path they read changed: the task code, its tests, the OpenAPI snapshot the
+# path contract checks, the task-caller trees that contract scans (its
+# TASK_CALLER_DIRS), the root TypeScript/dependency config, or
+# frontend/package.json, whose typescript pin is the tsc that runs.
+TRIGGER_CHANGES="$(changed_paths src tests/trigger backend/openapi.json \
+  frontend/app frontend/src terminal/src packages frontend/package.json \
+  tsconfig.json trigger.config.ts package.json pnpm-lock.yaml)" || check 1 "list changed Trigger.dev paths"
 if [ "$DO_FRONTEND" -eq 1 ] || [ -n "$TRIGGER_CHANGES" ]; then
   if [ ! -x frontend/node_modules/.bin/tsc ] && [ ! -x node_modules/.bin/tsc ]; then
     warn "  node_modules are missing; run pnpm install --frozen-lockfile"
@@ -468,6 +480,8 @@ if [ "$DO_FRONTEND" -eq 1 ] || [ -n "$TRIGGER_CHANGES" ]; then
     check $? "Trigger.dev tsc"
     if [ "$SKIP_TESTS" -eq 0 ]; then
       step "Trigger.dev node tests (blocking)"
+      compgen -G 'tests/trigger/*.test.mjs'
+      check $? "Trigger.dev test files (tests/trigger/*.test.mjs)"
       node --experimental-transform-types --experimental-test-module-mocks --no-warnings --test tests/trigger/*.test.mjs
       check $? "Trigger.dev node tests"
     else

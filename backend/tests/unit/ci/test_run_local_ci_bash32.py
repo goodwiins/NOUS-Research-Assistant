@@ -1,5 +1,6 @@
 """Contracts that keep run_local_ci.sh honest on macOS Bash 3.2 (GOO-330)."""
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -23,4 +24,16 @@ def test_enumerator_exit_status_is_never_swallowed() -> None:
     # enumerator reads as "no changed files" and the gates it arms pass.
     script = _script()
     assert "done < <(" not in script
-    assert script.count('|| check 1 "list ') == script.count('done <<< "$LIST"')
+    lines = script.replace("\\\n", " ").splitlines()
+    checked_lists = [
+        ln
+        for ln in lines
+        if ln.lstrip().startswith('LIST="$(') and '|| check 1 "list ' in ln
+    ]
+    assert len(checked_lists) == script.count('done <<< "$LIST"')
+    # Every changed_paths capture is checked where it is assigned, loop or
+    # not, so a failed git diff fails the run instead of skipping a gate.
+    captures = [ln for ln in lines if "$(changed_paths " in ln]
+    assert captures
+    for line in captures:
+        assert re.search(r'\)" \|\| check 1 "list [^"]+"$', line), line

@@ -283,6 +283,11 @@ def _fake_local_ci_root(
         fake_root / "node_modules" / ".bin" / "tsc",
         "#!/usr/bin/env bash\nexit 0\n",
     )
+    # The node tests' glob must match a file, or the run fails on zero tests.
+    (fake_root / "tests" / "trigger").mkdir(parents=True)
+    (fake_root / "tests" / "trigger" / "fixture.test.mjs").write_text(
+        "\n", encoding="utf-8"
+    )
     _write_executable(
         command_dir / "git",
         """#!/usr/bin/env bash
@@ -392,7 +397,8 @@ def test_local_ci_executes_configured_python_from_space_containing_root(
     ), tools
     assert any(
         line.startswith(f"{fake_root}|node ")
-        and "--test tests/trigger/*.test.mjs" in line
+        # The glob expands to the fake root's test file.
+        and line.endswith("--test tests/trigger/fixture.test.mjs")
         for line in tools
     ), tools
     assert "Trigger.dev type-check" in result.stdout

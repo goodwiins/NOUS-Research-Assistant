@@ -435,17 +435,27 @@ def architecture_problems(script: str) -> list[str]:
     return problems
 
 
+TRIGGER_GUARD_CHECK = 'check $? "Trigger.dev test files (tests/trigger/*.test.mjs)"'
+
+
 def trigger_problems(workflow: dict[str, Any], script: str) -> list[str]:
     steps = {s.get("name"): s for s in workflow["jobs"]["frontend-tests"]["steps"]}
     tsc = steps["Type-check Trigger.dev tasks (tsc)"]["run"].strip()
+    guard = steps["Require Trigger.dev test files"]["run"].strip()
     node = steps["Check Trigger.dev tasks (node:test)"]["run"].strip()
-    return _gated_step_problems(
-        script,
-        f"( cd frontend && {tsc} )",
-        'check $? "Trigger.dev tsc"',
-        under_skip_tests=False,
-    ) + _gated_step_problems(
-        script, node, 'check $? "Trigger.dev node tests"', under_skip_tests=True
+    return (
+        _gated_step_problems(
+            script,
+            f"( cd frontend && {tsc} )",
+            'check $? "Trigger.dev tsc"',
+            under_skip_tests=False,
+        )
+        + _gated_step_problems(
+            script, guard, TRIGGER_GUARD_CHECK, under_skip_tests=True
+        )
+        + _gated_step_problems(
+            script, node, 'check $? "Trigger.dev node tests"', under_skip_tests=True
+        )
     )
 
 
@@ -490,6 +500,28 @@ def test_trigger_steps_mirror_the_frontend_tests_job() -> None:
     assert 'check $? "Trigger.dev tsc"' in script
     assert 'check $? "Trigger.dev node tests"' in script
     assert 'skipped "Trigger.dev node tests" "--skip-tests"' in script
+
+
+def test_the_trigger_test_file_guard_runs_right_before_the_node_tests() -> None:
+    """node --test passes with zero tests on an unmatched glob, so a step that
+    fails on no match runs first, from the same directory."""
+    steps = _workflow()["jobs"]["frontend-tests"]["steps"]
+    names = [s.get("name") for s in steps]
+    guard_at = names.index("Require Trigger.dev test files")
+    assert names[guard_at + 1] == "Check Trigger.dev tasks (node:test)"
+    assert steps[guard_at]["working-directory"] == "."
+    script = _script()
+    guard_line = f"      {steps[guard_at]['run'].strip()}\n"
+    node_line = f"      {steps[guard_at + 1]['run'].strip()}\n"
+    assert script.index(guard_line) < script.index(node_line)
+
+
+def test_the_trigger_guard_glob_is_the_node_test_glob() -> None:
+    steps = {s.get("name"): s for s in _workflow()["jobs"]["frontend-tests"]["steps"]}
+    guard = shlex.split(steps["Require Trigger.dev test files"]["run"])
+    node = shlex.split(steps["Check Trigger.dev tasks (node:test)"]["run"])
+    assert guard[:2] == ["compgen", "-G"] and len(guard) == 3
+    assert node[node.index("--test") + 1 :] == [guard[2]]
 
 
 def test_architecture_tests_run_even_with_skip_tests() -> None:
@@ -614,6 +646,20 @@ SCRIPT_PLANTS: dict[str, tuple[str, str]] = {
     "`&& \\` continuation gates the architecture step": (
         f"\n{ARCHITECTURE_COMMAND}\n",
         f'\n[ "$SKIP_TESTS" -eq 0 ] && \\\n  {ARCHITECTURE_COMMAND}\n',
+    ),
+    "|| true after the Trigger test-file guard": (
+        "      compgen -G 'tests/trigger/*.test.mjs'\n",
+        "      compgen -G 'tests/trigger/*.test.mjs' || true\n",
+    ),
+    "Trigger test-file guard outside the --skip-tests gate": (
+        '    if [ "$SKIP_TESTS" -eq 0 ]; then\n'
+        '      step "Trigger.dev node tests (blocking)"\n'
+        "      compgen -G 'tests/trigger/*.test.mjs'\n"
+        f"      {TRIGGER_GUARD_CHECK}\n",
+        "    compgen -G 'tests/trigger/*.test.mjs'\n"
+        f"    {TRIGGER_GUARD_CHECK}\n"
+        '    if [ "$SKIP_TESTS" -eq 0 ]; then\n'
+        '      step "Trigger.dev node tests (blocking)"\n',
     ),
     "`&& \\` continuation gates the Trigger tsc": (
         f"    {_TSC}\n",
