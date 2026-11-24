@@ -15,6 +15,7 @@ import React, {
 } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, MotionConfig } from 'framer-motion';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
   Download,
@@ -73,6 +74,7 @@ import { EntityErrorBoundary } from '@/components/entities/EntityErrorBoundary';
 import { KeyboardShortcutsDialog } from '@/components/entities/KeyboardShortcutsDialog';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useEntityPermissions } from '@/hooks/useEntityPermissions';
+import { invalidateEntityRelationships } from '@/hooks/useEntityRelationships';
 import { useAuth } from '@/hooks/useAuth';
 import { Entity, EntityType, GraphEdge } from '@/types/entity';
 import {
@@ -171,9 +173,9 @@ function EntityManagementContent() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const [relationshipDialogOpen, setRelationshipDialogOpen] = useState(false);
-  // Bumped after a saved relationship so the open detail dialog refetches its
-  // list (GOO-794). A failed save leaves it alone.
-  const [relationshipsVersion, setRelationshipsVersion] = useState(0);
+  // A saved relationship invalidates the relationship lists, so the open
+  // detail dialog refetches (GOO-794). A failed save leaves them alone.
+  const queryClient = useQueryClient();
   const [sourceEntityId, setSourceEntityId] = useState<string | null>(null);
   const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -639,7 +641,7 @@ function EntityManagementContent() {
     try {
       await entityService.createRelationship(data);
       toast.success('Relationship created successfully');
-      setRelationshipsVersion((version) => version + 1);
+      void invalidateEntityRelationships(queryClient);
       setRelationshipDialogOpen(false);
       setSourceEntityId(null);
       // Refresh relationships if on graph tab
@@ -1238,7 +1240,6 @@ function EntityManagementContent() {
               <div className="py-4">
                 <EntityDetail
                   entity={selectedEntity}
-                  relationshipsVersion={relationshipsVersion}
                   onEdit={() => {
                     setDetailDialogOpen(false);
                     setEditDialogOpen(true);

@@ -3,7 +3,7 @@
  * Entity detail view with role-based access control.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Edit,
   Clock,
@@ -14,6 +14,7 @@ import {
   Network,
   Code2,
   Database,
+  AlertCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -38,8 +39,11 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Entity, GraphEdge } from '@/types/entity';
-import { entityService } from '@/services/entityService';
 import { useEntityPermissions } from '@/hooks/useEntityPermissions';
+import {
+  useDeleteEntityRelationship,
+  useEntityRelationships,
+} from '@/hooks/useEntityRelationships';
 import { NeighborhoodExplorer } from './NeighborhoodExplorer';
 import { formatEntityType, entityTypeBadgeClass } from './entityType';
 import { cn } from '@/lib/utils';
@@ -49,12 +53,6 @@ interface EntityDetailProps {
   onEdit?: () => void;
   onClose?: () => void;
   onEntityClick?: (entity: Entity) => void;
-  /**
-   * Bumped by the parent after it saves a relationship for this entity. The
-   * dialog stays open while the relationship dialog is used (GOO-767), so a
-   * change here refetches the list (GOO-794).
-   */
-  relationshipsVersion?: number;
 }
 
 const formatField = (key: string): string => {
@@ -67,52 +65,25 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
   onEdit,
   onClose,
   onEntityClick,
-  relationshipsVersion = 0,
 }) => {
   const { canEdit, canDelete } = useEntityPermissions();
-  const [relationships, setRelationships] = useState<GraphEdge[]>([]);
-  // Which request's result is on screen. Loading is derived from it, so the
-  // effect never sets state synchronously; relationshipsVersion is bumped by
-  // the parent after a saved relationship (GOO-794).
-  const requestKey = `${entity?.id}:${relationshipsVersion}`;
-  const [settledKey, setSettledKey] = useState<string | null>(null);
-  const loading = settledKey !== requestKey;
+  // Relationships come only from the query hook, keyed by entity id. A save
+  // (GOO-794) or a delete invalidates it, so the open dialog refetches.
+  const relationshipsQuery = useEntityRelationships(entity?.id);
+  const relationships = relationshipsQuery.data ?? [];
+  const deleteRelationship = useDeleteEntityRelationship();
+  const deleting = deleteRelationship.isPending;
   const [relationshipToDelete, setRelationshipToDelete] =
     useState<GraphEdge | null>(null);
-  const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    if (!entity?.id) return;
-    let current = true;
-    entityService
-      .getEntityRelationships(entity.id)
-      .then((response) => {
-        if (current) setRelationships(response);
-      })
-      .catch((error: unknown) => {
-        console.error('Error fetching relationships:', error);
-      })
-      .finally(() => {
-        if (current) setSettledKey(requestKey);
-      });
-    // A response for an entity or version no longer shown is dropped.
-    return () => {
-      current = false;
-    };
-  }, [entity?.id, requestKey]);
-
-  const handleConfirmDeleteRelationship = async () => {
+  const handleConfirmDeleteRelationship = async (): Promise<void> => {
     if (!relationshipToDelete) return;
 
     try {
-      setDeleting(true);
-      await entityService.deleteRelationship(relationshipToDelete.id);
-      setRelationships(await entityService.getEntityRelationships(entity.id));
+      await deleteRelationship.mutateAsync(relationshipToDelete.id);
       setRelationshipToDelete(null);
     } catch (error) {
       console.error('Error deleting relationship:', error);
-    } finally {
-      setDeleting(false);
     }
   };
 
@@ -388,7 +359,7 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
-              {loading ? (
+              {relationshipsQuery.isPending ? (
                 <div
                   className="p-8 space-y-3"
                   role="status"
@@ -400,6 +371,27 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
                       className="h-12 bg-muted/50 border border-border rounded-md animate-pulse"
                     ></div>
                   ))}
+                </div>
+              ) : relationshipsQuery.isError ? (
+                <div
+                  className="text-center py-12 flex flex-col items-center gap-3"
+                  role="alert"
+                >
+                  <AlertCircle
+                    aria-hidden="true"
+                    className="w-8 h-8 text-destructive opacity-60"
+                  />
+                  <p className="text-sm text-muted-foreground">
+                    Couldn&apos;t load relationships
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void relationshipsQuery.refetch()}
+                    disabled={relationshipsQuery.isFetching}
+                  >
+                    Try again
+                  </Button>
                 </div>
               ) : relationships.length === 0 ? (
                 <div className="text-center py-12 flex flex-col items-center gap-3">
