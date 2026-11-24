@@ -28,12 +28,12 @@ Targets:
 
 from alembic import op
 
+from src.core.migration_indexes import ensure_user_message_index
+
 revision = "ensure_upsert_uq_constraints"
 down_revision = "uq_project_thread_constraint"
 branch_labels = None
 depends_on = None
-
-CHAT_MSG_INDEX = "uq_chat_messages_thread_client_msg_user"
 
 
 def upgrade() -> None:
@@ -81,14 +81,7 @@ def upgrade() -> None:
           AND a.role = 'user'
           AND b.role = 'user';
         """)
-    # CONCURRENTLY cannot run inside the migration's transaction.
-    with op.get_context().autocommit_block():
-        op.execute(
-            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "
-            f"{CHAT_MSG_INDEX} "
-            "ON chat_messages (thread_id, client_message_id) "
-            "WHERE client_message_id IS NOT NULL AND role = 'user'"
-        )
+    ensure_user_message_index()
 
 
 def downgrade() -> None:

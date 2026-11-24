@@ -73,10 +73,12 @@ a Job that still fails before an explicitly authorized retry. Provider-side
 secret content changes alone do not change Job identity; a new image/DB setting
 or an authorized retry is needed.
 
-There is no in-cluster alert for a failed Job. A failed Job keeps dev on the
-old build, so it surfaces as a failed scheduled `verify-dev-health.yml` run:
-the build mismatch after the 20 min grace, with an error line naming the
-migration Job.
+There is no in-cluster alert for a failed Job. After the 20 min grace period,
+the scheduled `verify-dev-health.yml` build check flags a stalled rollout only
+if the serving SHA differs from the selected `sourceSha`. It names the
+migration Job as a possible cause. A `SUPABASE_DB_URL` change can create a new
+migration Job with the same `sourceSha`. If that Job fails while the old pods
+still serve the matching SHA, the build check passes.
 
 Use a full application Argo sync. Resource-selective sync and standalone Helm
 upgrade do not enforce this wave barrier and must not be used to promote AWS

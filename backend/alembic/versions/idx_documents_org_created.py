@@ -13,6 +13,8 @@ list call walk an index in order.
 
 from alembic import op
 
+from src.core.migration_indexes import require_valid_index
+
 revision = "idx_documents_org_created"
 down_revision = "uq_documents_org_checksum"
 branch_labels = None
@@ -28,6 +30,7 @@ def upgrade() -> None:
             f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {INDEX_NAME} "
             "ON documents (organization_id, created_at)"
         )
+    require_valid_index("documents", INDEX_NAME)
 
 
 def downgrade() -> None:
