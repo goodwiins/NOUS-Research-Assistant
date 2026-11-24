@@ -2914,7 +2914,7 @@ export function useChatStreaming(
     // Cursor the earlier mount had already applied; the replay below starts
     // at 0 to rebuild this turn's content, and frames up to here are repeats
     // for everything outside the turn (activity store, tool side effects).
-    const savedCursor = Math.max(
+    let savedCursor = Math.max(
       run.streamSeq ?? 0,
       pendingSeqRef.current?.threadId === threadId
         ? pendingSeqRef.current.seq
@@ -2952,6 +2952,18 @@ export function useChatStreaming(
             lastProcessedSeq = seq;
             replayingPrefix = seq <= savedCursor;
             streamCallbacks.onSeq?.(seq);
+          },
+          onRunId: (runId) => {
+            // The saved cursor belongs to the run this effect started from.
+            // If the replay is a different (newer) run, the backend serves it
+            // from its start and none of its frames were handled here. The
+            // `id:` line of the accepted frame fires onSeq before this, so
+            // clear the flag that seq just set as well.
+            if (run.runId !== undefined && runId !== run.runId) {
+              savedCursor = 0;
+              replayingPrefix = false;
+            }
+            streamCallbacks.onRunId?.(runId);
           },
           onReplayGap: (firstSeq, expectedSeq) => {
             if (signal.aborted) return;
