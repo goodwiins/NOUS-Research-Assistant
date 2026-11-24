@@ -141,6 +141,9 @@ class ChatMessage(BaseModel):
             ondelete="SET NULL",
         ),
         nullable=True,
+        # Leading index for the purge's SET NULL check; ix_chat_messages_parent
+        # leads with thread_id and does not serve it (GOO-655).
+        index=True,
     )
     selected_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -189,6 +192,7 @@ class ChatMessage(BaseModel):
             "'superseded' — every display / model-context / export read filters "
             "IS NULL; by-id, idempotency and analytics reads deliberately do not."
         ),
+        index=True,
     )
     tool_executions = Column(JSONB, nullable=True)  # Agent tool execution details
 

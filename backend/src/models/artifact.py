@@ -55,7 +55,7 @@ class ArtifactVersion(BaseModel):
         String(36), ForeignKey("agent_runs.job_id")
     )
     thread_id: Mapped[UUID | None] = mapped_column(
-        GUID(), ForeignKey("threads.id", ondelete="SET NULL")
+        GUID(), ForeignKey("threads.id", ondelete="SET NULL"), index=True
     )
     grant_id: Mapped[UUID | None] = mapped_column(GUID())
 
@@ -110,7 +110,7 @@ class ArtifactReference(BaseModel):
         GUID(), ForeignKey("threads.id", ondelete="SET NULL"), index=True
     )
     message_id: Mapped[UUID | None] = mapped_column(
-        GUID(), ForeignKey("chat_messages.id", ondelete="SET NULL")
+        GUID(), ForeignKey("chat_messages.id", ondelete="SET NULL"), index=True
     )
 
 
@@ -138,7 +138,7 @@ class ArtifactLifecycleOutbox(BaseModel):
         String(36), ForeignKey("agent_runs.job_id")
     )
     thread_id: Mapped[UUID | None] = mapped_column(
-        GUID(), ForeignKey("threads.id", ondelete="SET NULL")
+        GUID(), ForeignKey("threads.id", ondelete="SET NULL"), index=True
     )
     # pending -> delivered (event appended) | skipped (no run, or run already closed)
     status: Mapped[str] = mapped_column(

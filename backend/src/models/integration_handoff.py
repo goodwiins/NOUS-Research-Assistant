@@ -36,7 +36,7 @@ class IntegrationHandoff(BaseModel):
         GUID(), ForeignKey("collections.id"), nullable=False
     )
     thread_id: Mapped[UUID] = mapped_column(
-        GUID(), ForeignKey("threads.id", ondelete="CASCADE"), nullable=False
+        GUID(), ForeignKey("threads.id", ondelete="CASCADE"), nullable=False, index=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     handoff_id: Mapped[UUID] = mapped_column(GUID(), nullable=False)
@@ -51,7 +51,9 @@ class IntegrationHandoff(BaseModel):
         GUID(), ForeignKey("integration_grants.id"), nullable=False
     )
     consent_id: Mapped[UUID | None] = mapped_column(
-        GUID(), ForeignKey("integration_grant_requests.id", ondelete="SET NULL")
+        GUID(),
+        ForeignKey("integration_grant_requests.id", ondelete="SET NULL"),
+        index=True,
     )
     created_by_user_id: Mapped[UUID] = mapped_column(
         GUID(), ForeignKey("users.id"), nullable=False

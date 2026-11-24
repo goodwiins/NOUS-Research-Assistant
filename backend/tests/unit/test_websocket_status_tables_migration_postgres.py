@@ -18,8 +18,9 @@ skip into a failure. Outside that lane, without a URL, it skips.
 
 Covered:
 
-* ``alembic upgrade head`` from an EMPTY database ends at ws02 with all four
-  tables, RLS on and no PostgREST grants; ``downgrade`` to ws01 keeps them;
+* ``alembic upgrade head`` from an EMPTY database passes ws02 and ends at the
+  single script head (a later revision, such as fk01, may follow ws02) with
+  all four tables, RLS on and no PostgREST grants; ``downgrade`` to ws01 keeps them;
 * the backfill path: missing tables are created, and existing exposed ones
   are locked down; a rerun is a no-op;
 * ws02 creates only its own tables and enum types. Another missing
@@ -48,6 +49,21 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_postgres]
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 PARENT = "ws01_websocket_status_tables"
 REVISION = "ws02_realtime_status_hardening"
+
+
+def _script_head() -> str:
+    """The single alembic head; ``upgrade head`` ends there, not at ws02 once a
+    later revision (fk01) follows it."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config()
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    heads = ScriptDirectory.from_config(config).get_heads()
+    assert len(heads) == 1, heads
+    return heads[0]
+
+
 TABLES = (
     "websocket_connections",
     "connection_events",
@@ -189,7 +205,7 @@ def test_alembic_upgrade_head_from_empty_postgres_has_locked_down_tables(
     _pg(scratch_db, _POSTGREST_ROLES_SQL)
     proc = _upgrade(scratch_db, "head")
     assert proc.returncode == 0, proc.stderr[-4000:]
-    assert _version(scratch_db) == REVISION
+    assert _version(scratch_db) == _script_head()
     _assert_locked_down(scratch_db)
 
 
@@ -205,7 +221,7 @@ def test_downgrade_to_ws01_keeps_the_tables_and_upgrade_head_is_a_no_op(
         assert _regclass(scratch_db, table) == table, table
     proc = _upgrade(scratch_db, "head")
     assert proc.returncode == 0, proc.stderr[-4000:]
-    assert _version(scratch_db) == REVISION
+    assert _version(scratch_db) == _script_head()
 
 
 def test_existing_exposed_tables_are_locked_down_and_missing_ones_created(
