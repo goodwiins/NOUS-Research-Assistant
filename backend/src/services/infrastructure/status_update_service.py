@@ -398,8 +398,8 @@ class StatusUpdateService(BaseService):
         title: str,
         message: str,
         notification_type: str = "info",
-        target_users: List[str] = None,
-        target_organizations: List[str] = None,
+        target_users: Optional[List[str]] = None,
+        target_organizations: Optional[List[str]] = None,
         action_url: str = None,
         broadcast_to_all: bool = False,
     ):
