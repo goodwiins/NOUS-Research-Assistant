@@ -1,16 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  ClockIcon,
-  CheckCircleIcon,
-  XCircleIcon,
-  DocumentTextIcon,
-  EyeIcon,
-  PhotoIcon,
-  MusicalNoteIcon,
-  VideoCameraIcon,
-  ArrowPathIcon,
-  InformationCircleIcon,
-} from '@heroicons/react/24/outline';
+  Clock,
+  CheckCircle,
+  XCircle,
+  FileText,
+  Eye,
+  ImageIcon,
+  Music,
+  Video,
+  RefreshCw,
+  Info,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Document } from '@/types';
 import { api } from '@/services/api-client';
@@ -153,7 +153,7 @@ const getProcessingSteps = (document: Document): ProcessingStep[] => {
       name: 'File Validation',
       description: 'Validating file format and integrity',
       status: 'pending',
-      icon: ClockIcon,
+      icon: Clock,
     },
   ];
 
@@ -168,7 +168,7 @@ const getProcessingSteps = (document: Document): ProcessingStep[] => {
       name: 'Text Extraction',
       description: 'Extracting text using OCR technology',
       status: 'pending',
-      icon: DocumentTextIcon,
+      icon: FileText,
     });
   }
 
@@ -179,7 +179,7 @@ const getProcessingSteps = (document: Document): ProcessingStep[] => {
       name: 'Audio/Video Transcription',
       description: 'Converting audio/video to text using speech recognition',
       status: 'pending',
-      icon: MusicalNoteIcon,
+      icon: Music,
     });
 
     // Add frame extraction for video
@@ -189,7 +189,7 @@ const getProcessingSteps = (document: Document): ProcessingStep[] => {
         name: 'Frame Extraction',
         description: 'Extracting key frames from video',
         status: 'pending',
-        icon: PhotoIcon,
+        icon: ImageIcon,
       });
     }
   }
@@ -201,21 +201,21 @@ const getProcessingSteps = (document: Document): ProcessingStep[] => {
       name: 'Entity Extraction',
       description: 'Identifying people, organizations, and key entities',
       status: 'pending',
-      icon: InformationCircleIcon,
+      icon: Info,
     },
     {
       id: 'embedding',
       name: 'Vector Embedding',
       description: 'Creating semantic embeddings for search',
       status: 'pending',
-      icon: EyeIcon,
+      icon: Eye,
     },
     {
       id: 'indexing',
       name: 'Search Indexing',
       description: 'Adding document to search index',
       status: 'pending',
-      icon: CheckCircleIcon,
+      icon: CheckCircle,
     }
   );
 
@@ -289,16 +289,16 @@ const getStepIcon = (step: ProcessingStep): React.ReactElement => {
         />
       );
     case 'completed':
-      return <CheckCircleIcon className={cn(iconClass, 'text-green-600')} />;
+      return <CheckCircle className={cn(iconClass, 'text-green-600')} />;
     case 'error':
-      return <XCircleIcon className={cn(iconClass, 'text-destructive')} />;
+      return <XCircle className={cn(iconClass, 'text-destructive')} />;
     case 'skipped':
       return <div className={cn(iconClass, 'text-muted-foreground')} />;
     default:
       return step.icon ? (
         <step.icon className={cn(iconClass, 'text-muted-foreground')} />
       ) : (
-        <ClockIcon className={cn(iconClass, 'text-muted-foreground')} />
+        <Clock className={cn(iconClass, 'text-muted-foreground')} />
       );
   }
 };
@@ -418,8 +418,8 @@ export const ProcessingStatus: React.FC<ProcessingStatusProps> = ({
 
   const getStatusIcon = (): React.ReactElement => {
     if (isCompleted)
-      return <CheckCircleIcon className="h-6 w-6 text-green-600" />;
-    if (hasError) return <XCircleIcon className="h-6 w-6 text-destructive" />;
+      return <CheckCircle className="h-6 w-6 text-green-600" />;
+    if (hasError) return <XCircle className="h-6 w-6 text-destructive" />;
     return (
       <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
     );
@@ -436,18 +436,18 @@ export const ProcessingStatus: React.FC<ProcessingStatusProps> = ({
   const getFileIcon = (): React.ReactElement => {
     switch (document.file_type) {
       case 'pdf':
-        return <DocumentTextIcon className="h-8 w-8 text-red-600" />;
+        return <FileText className="h-8 w-8 text-red-600" />;
       case 'txt':
-        return <DocumentTextIcon className="h-8 w-8 text-blue-600" />;
+        return <FileText className="h-8 w-8 text-blue-600" />;
       case 'jpg':
       case 'png':
-        return <PhotoIcon className="h-8 w-8 text-green-600" />;
+        return <ImageIcon className="h-8 w-8 text-green-600" />;
       case 'mp3':
-        return <MusicalNoteIcon className="h-8 w-8 text-purple-600" />;
+        return <Music className="h-8 w-8 text-purple-600" />;
       case 'mp4':
-        return <VideoCameraIcon className="h-8 w-8 text-orange-600" />;
+        return <Video className="h-8 w-8 text-orange-600" />;
       default:
-        return <DocumentTextIcon className="h-8 w-8 text-foreground" />;
+        return <FileText className="h-8 w-8 text-foreground" />;
     }
   };
 
@@ -492,7 +492,7 @@ export const ProcessingStatus: React.FC<ProcessingStatusProps> = ({
               className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-colors"
               aria-label="Retry processing"
             >
-              <ArrowPathIcon className="h-3 w-3" />
+              <RefreshCw className="h-3 w-3" />
             </button>
           )}
         </div>
@@ -558,7 +558,7 @@ export const ProcessingStatus: React.FC<ProcessingStatusProps> = ({
             className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded transition-colors"
             aria-label={expanded ? 'Collapse details' : 'Expand details'}
           >
-            <InformationCircleIcon className="h-5 w-5" />
+            <Info className="h-5 w-5" />
           </button>
         </div>
       </div>
@@ -681,7 +681,7 @@ export const ProcessingStatus: React.FC<ProcessingStatusProps> = ({
               onClick={onRetry}
               className="inline-flex items-center px-3 py-1 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
             >
-              <ArrowPathIcon className="h-3 w-3 mr-1" />
+              <RefreshCw className="h-3 w-3 mr-1" />
               Retry
             </button>
           )}

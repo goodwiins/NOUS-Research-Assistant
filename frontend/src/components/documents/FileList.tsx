@@ -1,17 +1,17 @@
 import React, { useState } from 'react';
 import { IconButton } from '@/components/ui/icon-button';
 import {
-  DocumentIcon,
-  EyeIcon,
-  TrashIcon,
-  ArrowDownTrayIcon,
-  EllipsisHorizontalIcon,
-  CalendarIcon,
-  DocumentTextIcon,
-  PhotoIcon,
-  MusicalNoteIcon,
-  VideoCameraIcon,
-} from '@heroicons/react/24/outline';
+  File,
+  Eye,
+  Trash2,
+  Download,
+  MoreHorizontal,
+  Calendar,
+  FileText,
+  ImageIcon,
+  Music,
+  Video,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Document } from '@/types';
 import { STATUS_COLORS } from '@/types/constants';
@@ -54,18 +54,18 @@ const FileListItem: React.FC<FileListItemProps> = ({
 
     switch (fileType) {
       case 'application/pdf':
-        return <DocumentTextIcon className={cn(iconClass, 'text-red-600')} />;
+        return <FileText className={cn(iconClass, 'text-red-600')} />;
       case 'text/plain':
-        return <DocumentIcon className={cn(iconClass, 'text-blue-600')} />;
+        return <File className={cn(iconClass, 'text-blue-600')} />;
       case 'image/jpeg':
       case 'image/png':
-        return <PhotoIcon className={cn(iconClass, 'text-green-600')} />;
+        return <ImageIcon className={cn(iconClass, 'text-green-600')} />;
       case 'audio/mpeg':
-        return <MusicalNoteIcon className={cn(iconClass, 'text-purple-600')} />;
+        return <Music className={cn(iconClass, 'text-purple-600')} />;
       case 'video/mp4':
-        return <VideoCameraIcon className={cn(iconClass, 'text-orange-600')} />;
+        return <Video className={cn(iconClass, 'text-orange-600')} />;
       default:
-        return <DocumentIcon className={cn(iconClass, 'text-foreground')} />;
+        return <File className={cn(iconClass, 'text-foreground')} />;
     }
   };
 
@@ -193,7 +193,7 @@ const FileListItem: React.FC<FileListItemProps> = ({
                 </div>
                 <span>•</span>
                 <span className="flex items-center space-x-1">
-                  <CalendarIcon className="h-3 w-3" />
+                  <Calendar className="h-3 w-3" />
                   <span>{formatDate(document.upload_timestamp)}</span>
                 </span>
               </div>
@@ -232,7 +232,7 @@ const FileListItem: React.FC<FileListItemProps> = ({
             >
               {onPreview && (
                 <IconButton
-                  icon={<EyeIcon className="h-4 w-4" />}
+                  icon={<Eye className="h-4 w-4" />}
                   label="Preview"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -246,7 +246,7 @@ const FileListItem: React.FC<FileListItemProps> = ({
 
               {onDownload && (
                 <IconButton
-                  icon={<ArrowDownTrayIcon className="h-4 w-4" />}
+                  icon={<Download className="h-4 w-4" />}
                   label="Download"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -260,7 +260,7 @@ const FileListItem: React.FC<FileListItemProps> = ({
 
               {onDelete && (
                 <IconButton
-                  icon={<TrashIcon className="h-4 w-4" />}
+                  icon={<Trash2 className="h-4 w-4" />}
                   label="Delete"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -353,7 +353,7 @@ export const FileList: React.FC<FileListProps> = ({
   if (documents.length === 0) {
     return (
       <div className={cn('text-center py-12', className)}>
-        <DocumentIcon className="mx-auto h-12 w-12 text-muted-foreground" />
+        <File className="mx-auto h-12 w-12 text-muted-foreground" />
         <h3 className="mt-2 text-sm font-medium text-foreground">
           No documents
         </h3>

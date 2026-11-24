@@ -455,7 +455,7 @@ ComponentName/
 
 - [Zustand Documentation](https://github.com/pmndrs/zustand)
 - [Recharts Documentation](https://recharts.org/)
-- [Heroicons](https://heroicons.com/)
+- [lucide-react](https://lucide.dev/)
 - [Tailwind CSS](https://tailwindcss.com/)
 - [Storybook Documentation](https://storybook.js.org/)
 

@@ -3,11 +3,7 @@ import { useEffect, useState } from 'react';
 import { useDocumentUpload } from './useDocumentUpload';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import {
-  CloudArrowUpIcon,
-  TrashIcon,
-  ArrowPathIcon,
-} from '@heroicons/react/24/outline';
+import { UploadCloud, Trash2, RefreshCw } from 'lucide-react';
 
 // Mock component to demonstrate the hook
 const UploadDemo = ({ options }: { options?: any }) => {
@@ -97,7 +93,7 @@ const UploadDemo = ({ options }: { options?: any }) => {
                 onClick={handleAddToQueue}
                 disabled={selectedFiles.length === 0}
               >
-                <CloudArrowUpIcon className="h-4 w-4 mr-2" />
+                <UploadCloud className="h-4 w-4 mr-2" />
                 Add to Queue ({selectedFiles.length})
               </Button>
             </div>
@@ -202,7 +198,7 @@ const UploadDemo = ({ options }: { options?: any }) => {
                 size="sm"
                 onClick={() => cleanupCompleted()}
               >
-                <TrashIcon className="h-4 w-4 mr-2" />
+                <Trash2 className="h-4 w-4 mr-2" />
                 Cleanup Completed
               </Button>
               <Button
@@ -273,7 +269,7 @@ const UploadDemo = ({ options }: { options?: any }) => {
                         size="sm"
                         onClick={() => retryUpload(item.id)}
                       >
-                        <ArrowPathIcon className="h-4 w-4" />
+                        <RefreshCw className="h-4 w-4" />
                       </Button>
                     )}
                     <Button
@@ -281,7 +277,7 @@ const UploadDemo = ({ options }: { options?: any }) => {
                       size="sm"
                       onClick={() => removeFromQueue(item.id)}
                     >
-                      <TrashIcon className="h-4 w-4" />
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
 
@@ -299,7 +295,7 @@ const UploadDemo = ({ options }: { options?: any }) => {
         {/* Empty State */}
         {queueItems.length === 0 && (
           <div className="bg-white p-12 rounded-lg shadow-sm text-center">
-            <CloudArrowUpIcon className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            <UploadCloud className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <h3 className="text-lg font-medium text-foreground mb-2">
               No files in queue
             </h3>
