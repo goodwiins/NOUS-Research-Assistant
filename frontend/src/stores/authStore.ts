@@ -1,6 +1,7 @@
 import { clearSupabaseAuthCookies } from '@/lib/supabase/clearAuthCookies';
 import { createClient as createSupabaseBrowserClient } from '@/lib/supabase/client';
 import { api } from '@/services/api-client';
+import { uploadService } from '@/services/uploadService';
 import { clearWorkspaceServiceCache } from '@/services/workspaceService';
 import { getAppQueryClient } from '@/lib/query-client';
 import {
@@ -11,6 +12,10 @@ import {
 import { useArtifactPanelStore } from '@/store/artifactPanelStore';
 import { resetAccountSession } from '@/lib/account-session';
 import { discardForeignChatAuthRecovery } from '@/hooks/chat/chatAuthRecovery';
+import {
+  clearUnsentChatStorage,
+  discardForeignUnsentChat,
+} from '@/hooks/chat/unsentChatStorage';
 import { useChatStore } from '@/store/chat-store';
 import { useAgentChatStore } from '@/store/agentChatStore';
 import { useProjectStore } from '@/store/projectStore';
@@ -52,6 +57,13 @@ interface AuthState {
    * never arrive. Set when that shape is detected.
    */
   pendingSignupPossiblyExisting: boolean;
+  /**
+   * GOO-752: getUser() verified this user, but /auth/me kept failing with a
+   * transient error (5xx, network) after every retry. The session is not
+   * dead, so page guards must not redirect to login; the shell shows a
+   * non-blocking banner with a retry instead.
+   */
+  profileUnavailable: boolean;
 
   // Actions
   signIn: (email: string, password: string) => Promise<void>;
@@ -66,6 +78,8 @@ interface AuthState {
   invalidateRejectedSession: (expectedUserId: string | null) => void;
   resetPassword: (email: string) => Promise<void>;
   fetchProfile: () => Promise<void>;
+  /** Re-runs the profile fetch, with its retries, after it settled unavailable. */
+  retryProfile: () => Promise<void>;
   updateUser: (user: Partial<User>) => void;
   clearPendingEmailConfirmation: () => void;
   clearError: () => void;
@@ -97,7 +111,48 @@ function errorStatusCode(error: unknown): number | undefined {
     : undefined;
 }
 
+/** Supabase AuthError carries the HTTP status on `status`. */
+function authErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object' || !('status' in error)) {
+    return undefined;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+const isRejectionStatus = (status: number | undefined): boolean =>
+  status === 401 || status === 403;
+
+/**
+ * GOO-788: this tab's unsent turns and drafts go only when the session has
+ * really ended: an explicit sign-out, SIGNED_OUT, a 401/403 rejection, or
+ * another account (observeIdentity). A network, timeout or 5xx failure while
+ * verifying on reload must keep them: that is exactly when a send failed and
+ * the user reloads. The record's owner stamp already keeps it from any other
+ * account.
+ */
+function discardUnsentChatText(): void {
+  attempt('clear unsent chat text', clearUnsentChatStorage);
+}
+
 let authStateListenerRegistered = false;
+
+// FL2E-2: a transient /auth/me failure after getUser() verified the user is
+// retried on this schedule, with isLoading held so the shell does not settle
+// into signed-out and redirect, before it settles as "profile unavailable".
+// The count belongs to one identity revision (GOO-752): an account change or
+// a new sign-in starts the next identity with its full budget, and only one
+// retry timer is ever pending.
+const PROFILE_RETRY_DELAYS_MS = [1000, 3000] as const;
+let profileRetryAttempt = 0;
+let profileRetryRevision = -1;
+let profileRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function resetProfileRetries(): void {
+  profileRetryAttempt = 0;
+  if (profileRetryTimer !== null) clearTimeout(profileRetryTimer);
+  profileRetryTimer = null;
+}
 
 // The latest explicit login or signup owns its profile request. signIn fetches /auth/me itself
 // with the freshly issued access token, so the SIGNED_IN the same call emits
@@ -146,6 +201,9 @@ function clearUserScopedClientState(): void {
   api.clearAuth();
   getAppQueryClient()?.clear();
   resetAccountSession();
+  // The upload queue is a module singleton too: abort in-flight uploads and
+  // drop queued files so the next account's token never uploads them.
+  attempt('cancel queued uploads', () => uploadService.cancelAllUploads());
   attempt('reset the chat store', () => useChatStore.getState().reset());
   attempt('reset the agent chat store', () =>
     useAgentChatStore.getState().reset()
@@ -157,7 +215,9 @@ function clearUserScopedClientState(): void {
   attempt('reset the pipeline store', () =>
     usePipelineStore.getState().reset()
   );
-  attempt('clear citations', () => useCitationStore.getState().clearCitations());
+  attempt('clear citations', () =>
+    useCitationStore.getState().clearCitations()
+  );
   attempt('reset the research engine store', () =>
     useResearchEngineStore.setState(useResearchEngineStore.getInitialState())
   );
@@ -184,6 +244,7 @@ function clearUserScopedClientState(): void {
 function clearSession(): void {
   authRevision += 1;
   profileFetchInFlight = null;
+  resetProfileRetries();
   sessionUserId = null;
   activeSignIn = null;
   clearUserScopedClientState();
@@ -193,6 +254,7 @@ function clearSession(): void {
     isAuthenticated: false,
     isLoading: false,
     error: null,
+    profileUnavailable: false,
     ...CLEARED_PENDING_CONFIRMATION,
   });
 }
@@ -213,6 +275,9 @@ function observeIdentity(userId: string): void {
   // A rejected session keeps its staged chat draft for the same user's
   // re-login, so clearSession() cannot drop it; any other identity must.
   discardForeignChatAuthRecovery(userId);
+  // Unsent turns and drafts (GOO-788): another account never sees them, even
+  // when no sign-out came between.
+  discardForeignUnsentChat(userId);
   // In-memory identity answers first: a tab still holding A must clear on
   // B's event even when another tab already re-stamped the shared storage as
   // B. Only a fresh load, where memory knows nothing, consults the persisted
@@ -223,6 +288,7 @@ function observeIdentity(userId: string): void {
   if (previousId !== userId) {
     authRevision += 1;
     profileFetchInFlight = null;
+    resetProfileRetries();
     clearUserScopedClientState();
     useAuthStore.setState({
       user: null,
@@ -230,6 +296,7 @@ function observeIdentity(userId: string): void {
       isAuthenticated: false,
       isLoading: true,
       error: null,
+      profileUnavailable: false,
       ...CLEARED_PENDING_CONFIRMATION,
     });
   }
@@ -279,6 +346,7 @@ function getSupabaseClient(): SupabaseClient {
       }
 
       if (event === 'SIGNED_OUT') {
+        discardUnsentChatText();
         settleMissingSession();
       }
     });
@@ -296,6 +364,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   isAuthenticated: false,
   isLoading: true,
   error: null,
+  profileUnavailable: false,
   ...CLEARED_PENDING_CONFIRMATION,
 
   signIn: async (email: string, password: string) => {
@@ -348,6 +417,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
           organization: profileData.organization ?? null,
           isAuthenticated: true,
           isLoading: false,
+          profileUnavailable: false,
           ...CLEARED_PENDING_CONFIRMATION,
         });
       } else {
@@ -469,6 +539,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   signOut: async () => {
+    discardUnsentChatText();
     clearSession();
     const revision = authRevision;
 
@@ -504,6 +575,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       return;
     }
 
+    // The backend answered 401 for this account: the session is over.
+    discardUnsentChatText();
     clearSession();
     clearSupabaseAuthCookies();
   },
@@ -556,6 +629,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     // SDK callbacks can re-enter this action.
     const request = Promise.resolve().then(async () => {
       if (revision !== authRevision) return;
+      // Set once getUser() has verified the JWT for this request.
+      let verifiedUserId: string | null = null;
       try {
         const supabase = getSupabaseClient();
         // SECURITY (audit #7): gate on getUser(), which verifies the JWT with
@@ -570,12 +645,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
         if (revision !== authRevision) return;
         if (userError || !user) {
+          // Only Supabase rejecting the token ends the session for the
+          // unsent text; offline, a timeout or a 5xx keeps it (GOO-788).
+          if (isRejectionStatus(authErrorStatus(userError))) {
+            discardUnsentChatText();
+          }
           settleMissingSession();
           return;
         }
         observeIdentity(user.id);
         revision = authRevision;
         profileFetchInFlight = request;
+        verifiedUserId = user.id;
 
         const {
           data: { session },
@@ -594,12 +675,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         if (revision !== authRevision) return;
         observeIdentity(profileData.user.id);
         publishVerifiedAccount(profileData.user.id);
+        resetProfileRetries();
 
         set({
           user: profileData.user,
           organization: profileData.organization ?? null,
           isAuthenticated: true,
           isLoading: false,
+          error: null,
+          profileUnavailable: false,
           ...CLEARED_PENDING_CONFIRMATION,
         });
       } catch (error) {
@@ -621,6 +705,43 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
           return;
         }
 
+        // FL2E-2: the same holds on a first load. getUser() has already
+        // verified this user, so a non-401/403 failure means the profile is
+        // unavailable, not that the session is dead. Keep the identity and
+        // every cache; retry a few times while still loading, then settle
+        // with the error. A later fetchProfile (TOKEN_REFRESHED, a reload)
+        // can still recover.
+        if (!tokenRejected && verifiedUserId !== null) {
+          if (profileRetryRevision !== authRevision) {
+            resetProfileRetries();
+            profileRetryRevision = authRevision;
+          }
+          const delay = PROFILE_RETRY_DELAYS_MS[profileRetryAttempt];
+          if (delay === undefined) {
+            resetProfileRetries();
+            set({ isLoading: false, error: message, profileUnavailable: true });
+            return;
+          }
+          profileRetryAttempt += 1;
+          const retryRevision = authRevision;
+          // An outside fetch that fails while a retry is pending replaces
+          // that retry rather than starting a second chain.
+          if (profileRetryTimer !== null) clearTimeout(profileRetryTimer);
+          profileRetryTimer = setTimeout(() => {
+            profileRetryTimer = null;
+            if (
+              retryRevision === authRevision &&
+              !activeSignIn &&
+              !get().user
+            ) {
+              void get().fetchProfile();
+            }
+          }, delay);
+          set({ error: message });
+          return;
+        }
+
+        if (tokenRejected) discardUnsentChatText();
         settleMissingSession();
         set({ error: message });
       }
@@ -632,6 +753,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     } finally {
       if (profileFetchInFlight === request) profileFetchInFlight = null;
     }
+  },
+
+  retryProfile: async () => {
+    if (get().isAuthenticated) return;
+    set({ isLoading: true });
+    await get().fetchProfile();
   },
 
   updateUser: (userData: Partial<User>) => {

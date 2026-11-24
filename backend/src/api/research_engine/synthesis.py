@@ -23,6 +23,7 @@ from src.schemas.research_engine import (
     SynthesisPreview,
     SynthesisResultResponse,
 )
+from src.services.research import draft_release_service
 from src.services.research_engine import synthesis_service
 from src.services.research_engine.project_access import ResearchAction, resolve_project
 
@@ -76,7 +77,9 @@ async def execute_synthesis_route(
     db: AsyncSession = Depends(get_db),
 ) -> SynthesisResultResponse:
     user_id = cast(UUID, current_user.id)
-    context = await resolve_project(db, project_id, user_id, ResearchAction.REVIEW)
+    context = await draft_release_service.resolve_for_staling(
+        db, project_id, user_id, ResearchAction.REVIEW
+    )
     row, replayed = await synthesis_service.execute(db, context, user_id, body)
     if replayed:
         response.status_code = 200

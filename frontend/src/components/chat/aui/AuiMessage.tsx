@@ -448,6 +448,44 @@ export function AuiUserMessage({
             </div>
             {/* The action bar mounts on hover; keep persistent alternatives
                 ahead of it so revealing Edit cannot move their click target. */}
+            {message?.sendFailed ? (
+              // Always visible, not on hover: the server never accepted this
+              // turn, and these are the only ways to send it (GOO-772).
+              <div
+                data-testid="send-failed"
+                className="mt-1.5 flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[12px] text-(--nous-fg-2)"
+              >
+                <span className="inline-flex items-center gap-1 font-medium text-destructive">
+                  <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5" />
+                  Not sent
+                </span>
+                <span className="text-left">{message.sendFailed.message}</span>
+                {onEdit ? (
+                  <span className="inline-flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onEdit(message.content)}
+                      disabled={editDisabled}
+                      title={editDisabled ? RETRY_UNAVAILABLE_REASON : undefined}
+                      aria-label="Retry sending this message"
+                      className="inline-flex items-center gap-1 rounded-md border border-(--nous-border-1) px-2 py-0.5 font-medium text-(--nous-fg-1) hover:bg-(--nous-bg-2) disabled:opacity-50"
+                    >
+                      <RotateCcw aria-hidden="true" className="h-3 w-3" />
+                      Retry
+                    </button>
+                    <button
+                      type="button"
+                      onClick={startEdit}
+                      aria-label="Edit unsent message"
+                      className="inline-flex items-center gap-1 rounded-md border border-(--nous-border-1) px-2 py-0.5 font-medium text-(--nous-fg-1) hover:bg-(--nous-bg-2)"
+                    >
+                      <Pencil aria-hidden="true" className="h-3 w-3" />
+                      Edit
+                    </button>
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
             <MessageBranchControls message={message} />
             <MessageActions
               onEdit={canEdit ? startEdit : undefined}

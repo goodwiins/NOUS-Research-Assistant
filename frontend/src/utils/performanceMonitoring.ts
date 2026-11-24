@@ -451,7 +451,12 @@ class PerformanceMonitor {
       localStorage.setItem('performanceSession', JSON.stringify(sessionData));
 
       // In a real implementation, send to analytics service
-      console.log('Performance data flushed:', sessionData);
+      // Counts only: metric and interaction contexts can carry the search
+      // query or a file name, and console output reaches Sentry (GOO-638).
+      console.log('Performance data flushed', {
+        metrics: this.metrics.length,
+        interactions: this.interactions.length,
+      });
 
       // Clear sent data
       this.metrics = [];

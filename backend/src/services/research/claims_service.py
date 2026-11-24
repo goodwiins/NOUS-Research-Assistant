@@ -52,6 +52,7 @@ from src.services.research.extraction_forms_service import (
     _flush_or_conflict,
     current_version,
     document_pins,
+    load_document_pins,
 )
 from src.services.research_decisions import (
     DecisionIdempotencyConflict,
@@ -224,6 +225,7 @@ async def _invalidate(
         actor_id=actor_id,
         actor_role=actor_role,
         cause={"family": AGGREGATE_TYPE, "event_id": str(event_id), "kind": kind},
+        edges=context.release_edges,
     )
 
 
@@ -1297,14 +1299,20 @@ async def export_package(
     document_ids = {row.document_id for row in links if row.document_id}
     document_ids |= {a.document_id for a in accepted}
     documents = []
-    for document in (
-        await db.execute(select(Document).where(Document.id.in_(document_ids)))
-    ).scalars():
-        source_hash, text_hash = document_pins(document)
+    pins = await load_document_pins(db, document_ids)
+    for document_id, title in (
+        await db.execute(
+            select(Document.id, Document.title).where(Document.id.in_(document_ids))
+        )
+    ).all():
+        pin = pins.get(document_id)
+        if pin is None:  # two reads; one the pins read missed is skipped
+            continue
+        source_hash, text_hash = pin
         documents.append(
             {
-                "id": str(document.id),
-                "title": document.title,
+                "id": str(document_id),
+                "title": title,
                 "source_hash": source_hash,
                 "current_text_sha256": text_hash,
             }

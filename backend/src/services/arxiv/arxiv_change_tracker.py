@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,7 @@ from src.core.database import get_async_session, get_db
 from src.models.document import Document
 from src.services.arxiv.arxiv_kg_integration import ArXivKnowledgeGraphIntegration
 from src.services.arxiv.arxiv_service import ArXivIngestionService
+from src.services.arxiv.papers import is_withdrawal_notice
 from src.services.knowledge_graph import KnowledgeGraphService
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,30 @@ class ChangeRecord:
     # against the *new* (already-written) metadata and finds no diff — the
     # failed change is silently dropped instead of re-emitted.
     old_paper_metadata: Optional[Dict[str, Any]] = None
+
+
+# Per-category page size for the change scan. A page this full means arXiv
+# had more results, so the scan is truncated (no deletion evidence).
+_SCAN_PAGE_SIZE = 20
+
+
+def _parse_arxiv_datetime(value: Any) -> Optional[datetime]:
+    """An arXiv timestamp (``2024-01-02T03:04:05Z``) as an aware datetime."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _reports_withdrawn(paper: Dict[str, Any]) -> bool:
+    """True when arXiv's own record carries the withdrawal notice."""
+    text = " ".join(str(paper.get(k) or "") for k in ("comment", "abstract"))
+    return is_withdrawal_notice(text)
 
 
 class ArXivChangeTracker:
@@ -250,6 +275,7 @@ class ArXivChangeTracker:
         tracked_categories: Optional[Set[str]] = None,
         commit: bool = True,
         scan_truncated: bool = False,
+        window_start: Optional[datetime] = None,
     ) -> List[ChangeRecord]:
         """Detect changes under the shared tracker state lock."""
         if not commit:
@@ -259,6 +285,7 @@ class ArXivChangeTracker:
                 tracked_categories=tracked_categories,
                 commit=False,
                 scan_truncated=scan_truncated,
+                window_start=window_start,
             )
 
         with self._state_update_lock():
@@ -273,6 +300,7 @@ class ArXivChangeTracker:
                 tracked_categories=tracked_categories,
                 commit=True,
                 scan_truncated=scan_truncated,
+                window_start=window_start,
             )
             # Persist the read/modify/write as one locked operation. apply_changes
             # may later revert failed records and save the corrected state.
@@ -286,6 +314,7 @@ class ArXivChangeTracker:
         tracked_categories: Optional[Set[str]] = None,
         commit: bool = True,
         scan_truncated: bool = False,
+        window_start: Optional[datetime] = None,
     ) -> List[ChangeRecord]:
         """
         Detect changes between current papers and stored state, scoped to a
@@ -308,6 +337,14 @@ class ArXivChangeTracker:
                 deletion detection is skipped this round (R2-M1: papers
                 sliding below the top-N cut were accumulating misses toward
                 a false "deleted" verdict).
+
+            window_start: Start of the scan's submission-date window. A
+                stored paper submitted before it (or with no stored date) is
+                not observable by this scan, so its absence is no evidence.
+
+        A "deleted" record is only a candidate: ``track_category_changes``
+        keeps it only if arXiv reports the paper withdrawn
+        (``_confirm_deletions``).
 
         Returns:
             List of change records
@@ -350,6 +387,9 @@ class ArXivChangeTracker:
                             :5
                         ],  # Store first 5 authors
                         "primary_category": paper.get("primary_category"),
+                        # Submission date: the windowed scan filters on it,
+                        # so only a paper inside the window can be "missing".
+                        "published": paper.get("published"),
                         # sha256 only (not the full abstract) to keep the state
                         # file small; enough to detect abstract-only edits.
                         "abstract_hash": hashlib.sha256(
@@ -374,6 +414,11 @@ class ArXivChangeTracker:
                 org_state[paper["id"]]["last_seen"] = datetime.now(
                     timezone.utc
                 ).isoformat()
+                # Backfill the submission date for rows stored before it
+                # was tracked; the deletion check needs it.
+                if paper.get("published"):
+                    metadata = org_state[paper["id"]].setdefault("paper_metadata", {})
+                    metadata["published"] = paper.get("published")
 
                 if new_hash != old_hash:
                     # Determine what changed
@@ -418,6 +463,9 @@ class ArXivChangeTracker:
                         "title": paper.get("title", ""),
                         "authors": paper.get("authors", [])[:5],
                         "primary_category": paper.get("primary_category"),
+                        # Submission date: the windowed scan filters on it,
+                        # so only a paper inside the window can be "missing".
+                        "published": paper.get("published"),
                         "abstract_hash": new_abstract_hash,
                     }
 
@@ -455,6 +503,16 @@ class ArXivChangeTracker:
                 )
                 if stored_category not in tracked_categories:
                     # Not covered by this scan — cannot conclude deletion.
+                    continue
+
+            if window_start is not None:
+                published = _parse_arxiv_datetime(
+                    (data.get("paper_metadata", {}) or {}).get("published")
+                )
+                if published is None or published < window_start:
+                    # Outside (or not known to be inside) the date window:
+                    # it is absent because the query cannot return it.
+                    data.pop("miss_count", None)
                     continue
 
             miss_count = data.get("miss_count", 0) + 1
@@ -810,6 +868,47 @@ class ArXivChangeTracker:
             doc.document_metadata = md
             await db.commit()
 
+    async def _confirm_deletions(
+        self, changes: List[ChangeRecord], organization_id: Any, commit: bool
+    ) -> List[ChangeRecord]:
+        """Keep a "deleted" candidate only if arXiv reports it withdrawn.
+
+        Missing from a scan is never enough: arXiv does not delete papers, it
+        withdraws them and says so. A paper the id lookup still returns
+        without a withdrawal notice is live (its miss count is reset); a
+        failed lookup leaves the candidate for the next scan.
+        """
+        kept: List[ChangeRecord] = []
+        rejected: List[Tuple[ChangeRecord, bool]] = []
+        for change in changes:
+            if change.change_type != "deleted":
+                kept.append(change)
+                continue
+            details = await self._fetch_paper_details(change.paper_id)
+            if details is not None and _reports_withdrawn(details):
+                kept.append(change)
+            else:
+                rejected.append((change, details is not None))
+
+        if rejected and commit:
+            with self._state_update_lock():
+                shared = self._redis_get_state()
+                if isinstance(shared, dict):
+                    self.state = shared
+                org_state = self._org_state(organization_id)
+                for change, still_live in rejected:
+                    self._revert_change_state(organization_id, change)
+                    if still_live and change.paper_id in org_state:
+                        org_state[change.paper_id].pop("miss_count", None)
+                self._save_state_unlocked()
+        for change, still_live in rejected:
+            logger.info(
+                "Paper %s missing from scan but not withdrawn (%s); not deleted",
+                change.paper_id,
+                "still on arXiv" if still_live else "lookup failed, retry later",
+            )
+        return kept
+
     async def track_category_changes(
         self,
         categories: List[str],
@@ -836,13 +935,18 @@ class ArXivChangeTracker:
 
         # Search for papers in categories
         all_papers = []
+        window_start = datetime.now(timezone.utc) - timedelta(days=days_back)
+        scan_truncated = False
         async with ArXivIngestionService() as service:
             for category in categories:
                 papers = await service.search_papers(
                     query=f"cat:{category}",
-                    max_results=20,  # Small batch for fast response - increase for production
-                    date_from=datetime.now(timezone.utc) - timedelta(days=days_back),
+                    max_results=_SCAN_PAGE_SIZE,
+                    date_from=window_start,
                 )
+                # A full page means arXiv had more: absence is no evidence.
+                if len(papers) >= _SCAN_PAGE_SIZE:
+                    scan_truncated = True
                 all_papers.extend(papers)
                 logger.info(f"Found {len(papers)} papers in {category}")
 
@@ -863,6 +967,11 @@ class ArXivChangeTracker:
             organization_id=organization_id,
             tracked_categories=set(categories),
             commit=update_db,
+            scan_truncated=scan_truncated,
+            window_start=window_start,
+        )
+        changes = await self._confirm_deletions(
+            changes, organization_id, commit=update_db
         )
 
         # Group changes by type

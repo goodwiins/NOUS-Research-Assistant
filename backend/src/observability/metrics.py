@@ -37,7 +37,10 @@ logger = structlog.get_logger(__name__)
 
 # Global meter and metrics instances
 _meter = None
-_metrics_registry = {}
+
+HISTOGRAM = "histogram"
+COUNTER = "counter"
+UPDOWN_COUNTER = "updown_counter"
 
 
 @dataclass
@@ -48,6 +51,17 @@ class MetricConfig:
     description: str
     unit: str = ""
     enabled: bool = True
+    # Explicit instrument type. None keeps the legacy name-based guess for
+    # existing configs; set it whenever the name is ambiguous (e.g. *_count
+    # recorded as a histogram).
+    kind: Optional[str] = None
+
+
+def _active_meter() -> metrics.Meter:
+    """The configured meter, or the OTel global (proxy) meter before
+    ``configure_metrics()`` ran (Celery workers, scripts). Proxy instruments
+    forward to the real provider once one is set, and are no-ops otherwise."""
+    return _meter if _meter is not None else metrics.get_meter(__name__)
 
 
 class MetricsRegistry:
@@ -64,7 +78,7 @@ class MetricsRegistry:
         """Create or get a histogram metric"""
         with self._lock:
             if config.name not in self.histograms:
-                self.histograms[config.name] = _meter.create_histogram(
+                self.histograms[config.name] = _active_meter().create_histogram(
                     name=config.name, description=config.description, unit=config.unit
                 )
             return self.histograms[config.name]
@@ -73,7 +87,7 @@ class MetricsRegistry:
         """Create or get a counter metric"""
         with self._lock:
             if config.name not in self.counters:
-                self.counters[config.name] = _meter.create_counter(
+                self.counters[config.name] = _active_meter().create_counter(
                     name=config.name, description=config.description, unit=config.unit
                 )
             return self.counters[config.name]
@@ -82,7 +96,9 @@ class MetricsRegistry:
         """Create or get an up-down counter metric"""
         with self._lock:
             if config.name not in self.updown_counters:
-                self.updown_counters[config.name] = _meter.create_up_down_counter(
+                self.updown_counters[
+                    config.name
+                ] = _active_meter().create_up_down_counter(
                     name=config.name, description=config.description, unit=config.unit
                 )
             return self.updown_counters[config.name]
@@ -91,13 +107,52 @@ class MetricsRegistry:
         """Create or get an observable gauge metric"""
         with self._lock:
             if config.name not in self.gauges:
-                self.gauges[config.name] = _meter.create_observable_gauge(
+                self.gauges[config.name] = _active_meter().create_observable_gauge(
                     name=config.name,
                     description=config.description,
                     unit=config.unit,
                     callbacks=[callback],
                 )
             return self.gauges[config.name]
+
+    def kind_of(self, name: str) -> Optional[str]:
+        if name in self.histograms:
+            return HISTOGRAM
+        if name in self.counters:
+            return COUNTER
+        if name in self.updown_counters:
+            return UPDOWN_COUNTER
+        return None
+
+
+# Usable from import time: before configure_metrics() this was a plain dict,
+# so ``.histograms`` raised AttributeError and callers swallowed every metric.
+_metrics_registry = MetricsRegistry()
+_reported_kind_conflicts: set = set()
+
+
+def _instrument(name: str, kind: str) -> Any:
+    """Get or create the instrument ``name`` of ``kind``.
+
+    Unregistered names used to be dropped silently, so every metric outside
+    the default list (HTTP errors, Redis, httpx, SLO, track_performance) was
+    never emitted. A name already registered as a different kind is not
+    re-created (OTel would emit a conflicting duplicate); it is logged once.
+    """
+    existing = _metrics_registry.kind_of(name)
+    if existing is not None and existing != kind:
+        if name not in _reported_kind_conflicts:
+            _reported_kind_conflicts.add(name)
+            logger.warning(
+                "metric_kind_conflict", metric=name, registered=existing, used=kind
+            )
+        return None
+    config = MetricConfig(name=name, description=name)
+    if kind == HISTOGRAM:
+        return _metrics_registry.create_histogram(config)
+    if kind == COUNTER:
+        return _metrics_registry.create_counter(config)
+    return _metrics_registry.create_updown_counter(config)
 
 
 def configure_metrics() -> metrics.Meter:
@@ -224,6 +279,7 @@ def initialize_default_metrics():
                 name="search_results_count",
                 description="Number of search results returned",
                 unit="results",
+                kind=HISTOGRAM,
             ),
         ]
     )
@@ -335,7 +391,13 @@ def create_metrics(configs: List[MetricConfig]) -> Dict[str, Any]:
 
     for metric_config in configs:
         if metric_config.enabled:
-            if "duration" in metric_config.name or "latency" in metric_config.name:
+            if metric_config.kind == HISTOGRAM:
+                metric = _metrics_registry.create_histogram(metric_config)
+            elif metric_config.kind == COUNTER:
+                metric = _metrics_registry.create_counter(metric_config)
+            elif metric_config.kind == UPDOWN_COUNTER:
+                metric = _metrics_registry.create_updown_counter(metric_config)
+            elif "duration" in metric_config.name or "latency" in metric_config.name:
                 metric = _metrics_registry.create_histogram(metric_config)
             elif "total" in metric_config.name or "count" in metric_config.name:
                 metric = _metrics_registry.create_counter(metric_config)
@@ -353,8 +415,8 @@ def record_histogram(
     metric_name: str, value: float, attributes: Optional[Dict[str, str]] = None
 ):
     """Record a histogram metric value"""
-    if metric_name in _metrics_registry.histograms:
-        histogram = _metrics_registry.histograms[metric_name]
+    histogram = _instrument(metric_name, HISTOGRAM)
+    if histogram is not None:
         if attributes:
             histogram.record(value, attributes)
         else:
@@ -365,8 +427,8 @@ def increment_counter(
     metric_name: str, value: int = 1, attributes: Optional[Dict[str, str]] = None
 ):
     """Increment a counter metric"""
-    if metric_name in _metrics_registry.counters:
-        counter = _metrics_registry.counters[metric_name]
+    counter = _instrument(metric_name, COUNTER)
+    if counter is not None:
         if attributes:
             counter.add(value, attributes)
         else:
@@ -377,8 +439,8 @@ def increment_updown_counter(
     metric_name: str, value: int = 1, attributes: Optional[Dict[str, str]] = None
 ):
     """Increment an up-down counter metric"""
-    if metric_name in _metrics_registry.updown_counters:
-        counter = _metrics_registry.updown_counters[metric_name]
+    counter = _instrument(metric_name, UPDOWN_COUNTER)
+    if counter is not None:
         if attributes:
             counter.add(value, attributes)
         else:

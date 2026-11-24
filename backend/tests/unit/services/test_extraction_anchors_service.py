@@ -81,6 +81,7 @@ def world(monkeypatch: pytest.MonkeyPatch) -> _World:
         effective_roles=frozenset(
             {ResearchProjectRole.REVIEWER, ResearchProjectRole.ADJUDICATOR}
         ),
+        release_edges=None,
     )
     w = _World(
         db=db,
@@ -398,7 +399,7 @@ async def test_human_override_observation_verified_then_accepted(
 
 
 async def test_legacy_cell_view_is_legacy_unanchored_with_uncalibrated_confidence(
-    world: _World,
+    world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     legacy = SimpleNamespace(
         document_id=world.document.id,
@@ -411,8 +412,12 @@ async def test_legacy_cell_view_is_legacy_unanchored_with_uncalibrated_confidenc
         side_effect=[
             _result(rows=[legacy]),
             _result(rows=[]),
-            _result(rows=[world.document]),
         ]
+    )
+    monkeypatch.setattr(
+        svc,
+        "load_document_pins",
+        AsyncMock(return_value={world.document.id: _pins(world.document)}),
     )
     world.version.provenance = "legacy_unversioned"
     world.version.version_no, world.version.created_at = 1, NOW
@@ -425,7 +430,7 @@ async def test_legacy_cell_view_is_legacy_unanchored_with_uncalibrated_confidenc
 
 
 async def test_cell_view_counts_distinct_values_and_shows_machine_anchor(
-    world: _World,
+    world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     machine = _observation(world, "120")
     human = _observation(world, "118", kind="human", created_at=NOW)
@@ -433,8 +438,12 @@ async def test_cell_view_counts_distinct_values_and_shows_machine_anchor(
         side_effect=[
             _result(rows=[]),
             _result(rows=[machine, human]),
-            _result(rows=[world.document]),
         ]
+    )
+    monkeypatch.setattr(
+        svc,
+        "load_document_pins",
+        AsyncMock(return_value={world.document.id: _pins(world.document)}),
     )
     world.version.provenance = "authored"
     world.version.version_no, world.version.created_at = 1, NOW

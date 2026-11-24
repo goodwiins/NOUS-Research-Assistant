@@ -22,7 +22,7 @@ from typing import Any, Mapping, Sequence, cast
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import exists, select
+from sqlalchemy import Text, exists, func, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -84,11 +84,18 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _STATUS_RANK = {"verified": 0, "ambiguous": 1, "unverified": 2}
 
 
-def document_source_hash(document: Any) -> str:
-    """The document's content version: its checksum, else sha256 of its text."""
-    checksum = document.checksum_sha256
+def _valid_checksum(checksum: object) -> str | None:
+    """The stored checksum, lowercased, if it is a SHA-256 hex digest."""
     if isinstance(checksum, str) and _SHA256_RE.fullmatch(checksum.lower()):
         return checksum.lower()
+    return None
+
+
+def document_source_hash(document: Any) -> str:
+    """The document's content version: its checksum, else sha256 of its text."""
+    checksum = _valid_checksum(document.checksum_sha256)
+    if checksum is not None:
+        return checksum
     text = document.content_text or ""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -98,6 +105,55 @@ def document_pins(document: Any) -> tuple[str, str]:
     text_hash = anchors.text_sha256(document.content_text or "")
     assert text_hash is not None
     return document_source_hash(document), text_hash
+
+
+def _pins_from_hashes(checksum: object, text_hash: str) -> tuple[str, str]:
+    """``document_pins`` from a stored checksum and a precomputed text hash."""
+    return _valid_checksum(checksum) or text_hash, text_hash
+
+
+async def load_document_pins(
+    db: AsyncSession, document_ids: Any
+) -> dict[UUID, tuple[str, str]]:
+    """``document_pins`` for many documents without loading their text.
+
+    Staleness checks run on every superseding write, under the project lock.
+    Hydrating whole ``Document`` rows only to hash ``content_text`` makes
+    every such write ship the project's full text to the app. On PostgreSQL
+    the hash is computed in the database (same bytes: SHA-256 of the UTF-8
+    text, ``''`` for NULL); other dialects (SQLite unit tests) fall back to
+    selecting the text column alone.
+    """
+    ids = list(document_ids)
+    if not ids:
+        return {}
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        text_hash = func.encode(
+            func.sha256(
+                func.convert_to(
+                    func.coalesce(Document.content_text, literal("", Text)), "UTF8"
+                )
+            ),
+            "hex",
+        )
+        rows = await db.execute(
+            select(Document.id, Document.checksum_sha256, text_hash).where(
+                Document.id.in_(ids)
+            )
+        )
+        return {
+            row[0]: _pins_from_hashes(row[1], cast(str, row[2])) for row in rows.all()
+        }
+    rows = await db.execute(
+        select(Document.id, Document.checksum_sha256, Document.content_text).where(
+            Document.id.in_(ids)
+        )
+    )
+    return {
+        row[0]: _pins_from_hashes(row[1], cast(str, anchors.text_sha256(row[2] or "")))
+        for row in rows.all()
+    }
 
 
 def _changed(pins: tuple[str, str], source_hash: str, text_hash: str | None) -> bool:
@@ -209,16 +265,20 @@ async def _invalidate_releases(
     event_id: UUID | None,
     kind: str,
     document_id: UUID | None = None,
+    edges: Sequence[Any] | None = None,
 ) -> None:
     """GOO-307: stale the releases built on ``changed``, in this transaction.
     With ``document_id``, that document's outdated source revisions count as
     changed too: span links hang off the source itself, so a changed text
-    stales their releases even when no accepted tip was pinned to it."""
+    stales their releases even when no accepted tip was pinned to it.
+    ``edges``: the context's ``release_edges`` (GOO-721), or None."""
     from src.services.research import draft_release_service  # import cycle
 
     if document_id is not None:
+        if not await draft_release_service._live_release_ids(db, collection_id):
+            return  # nothing to stale; skip building the graph for sources
         changed = changed | await draft_release_service.source_nodes(
-            db, collection_id, document_id
+            db, collection_id, document_id, edges
         )
     await draft_release_service.invalidate_dependents(
         db,
@@ -231,6 +291,7 @@ async def _invalidate_releases(
             "event_id": None if event_id is None else str(event_id),
             "kind": kind,
         },
+        edges=edges,
     )
 
 
@@ -408,6 +469,7 @@ async def create_version(
             actor_role="editor",
             event_id=event_id,
             kind="extraction.staled",
+            edges=context.release_edges,
         )
     await db.commit()
     await db.refresh(version)
@@ -489,10 +551,12 @@ async def _stale_changed_source(
     document: Any,
     actor_id: UUID,
     actor_role: str,
+    edges: Sequence[Any] | None = None,
 ) -> list[str]:
     """Name this document's accepted tips pinned to an older source in one
     ``extraction.staled`` v2 event (``source_changed``). Rows are never
-    updated; tips staled before are skipped. The caller holds the stream."""
+    updated; tips staled before are skipped. The caller holds the stream.
+    ``edges``: the context's ``release_edges`` (GOO-721), or None."""
     pins = document_pins(document)
     versions = [cast(UUID, v.id) for v in await _versions(db, matrix.id)]
     already = await _staled_ids(db, stream)
@@ -535,6 +599,7 @@ async def _stale_changed_source(
         event_id=event_id,
         kind="source_changed",
         document_id=document.id,
+        edges=edges,
     )
     return staled
 
@@ -888,6 +953,7 @@ async def assert_anchor_acceptable(
             document=document,
             actor_id=actor_id,
             actor_role="adjudicator",
+            edges=context.release_edges,
         )
         return SourceChanged(staled)
     if data.missingness is not None:
@@ -1076,6 +1142,7 @@ async def accept_value(
             actor_role="adjudicator",
             event_id=event_id,
             kind="extraction.accepted",
+            edges=context.release_edges,
         )
     await db.commit()
     await db.refresh(row)
@@ -1266,14 +1333,7 @@ async def cell_view(
             if row.missingness
             else cast(str | None, row.anchor_status) or "unverified"
         )
-    # ponytail: loads text to hash it; add a stored text hash if that ever
-    # gets slow.
-    pins: dict[Any, tuple[str, str]] = {
-        document.id: document_pins(document)
-        for document in (
-            await db.execute(select(Document).where(Document.id.in_(allowed)))
-        ).scalars()
-    }
+    pins: dict[Any, tuple[str, str]] = await load_document_pins(db, allowed)
     hashes = {document_id: pin[0] for document_id, pin in pins.items()}
     accepted: dict[tuple[Any, str], list[rules.Accepted]] = {}
     for tip in await _tips(db, list(by_id)):

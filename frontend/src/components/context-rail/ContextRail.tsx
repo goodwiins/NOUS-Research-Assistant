@@ -1,7 +1,7 @@
 'use client';
 
 import { cn } from '@/lib/utils';
-import { useCitationsForThread } from '@/hooks';
+import { useCitationsForThread } from '@/hooks/useCitationsForThread';
 import {
   Dialog,
   DialogOverlay,

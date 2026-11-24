@@ -6,12 +6,20 @@
  * rehype-katex were wired in.
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import React from 'react';
 import { render, waitFor } from '@testing-library/react';
 import { ChatMarkdown } from '../ChatMarkdown';
 
 describe('ChatMarkdown math', () => {
+  // KaTeX is a lazily-loaded chunk. Loading it cold (transforming katex and
+  // rehype-katex) took over waitFor's 1 s default once under coverage
+  // (GOO-773), so import it once here, with its own budget. React.lazy then
+  // resolves from the module cache and the waits below only cover a render.
+  beforeAll(async () => {
+    await import('../ChatMarkdownMath');
+  }, 30_000);
+
   it('renders inline math instead of the raw source', async () => {
     const { container } = render(
       <ChatMarkdown content={'Attention scales as $O(n^2)$ in sequence length.'} />

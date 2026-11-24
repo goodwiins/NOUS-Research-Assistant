@@ -25,10 +25,8 @@ function setup(): {
   const { result } = renderHook(() =>
     useChatComposerActions({
       workspace: null,
-      setInput: vi.fn(),
       handleSubmit,
-      isLoading: false,
-      storeIsStreaming: false,
+      isBusy: false,
       displayedMessages: [
         makeChatPageMessage({
           id: 'user-row',

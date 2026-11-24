@@ -34,6 +34,11 @@ export interface APIError {
 
 export class APIErrorClass extends Error {
   public error: APIError['error'];
+  /**
+   * The URL the failing request went to, set by the API client. Lets auth
+   * handling tell a backend 401 from a third-party one (GOO-727).
+   */
+  public requestUrl?: string;
 
   constructor(error: APIError['error']) {
     super(error.message);

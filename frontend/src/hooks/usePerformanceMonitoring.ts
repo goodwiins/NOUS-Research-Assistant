@@ -141,7 +141,7 @@ export const useSearchPerformance = () => {
       return result;
     } catch (error) {
       const duration = Date.now() - startTime;
-      loggingService.error(`Search query failed: ${query}`, error as Error);
+      loggingService.error('Search query failed', error as Error);
 
       performanceMonitor.recordMetric('search_error', duration, 'ms', {
         query,

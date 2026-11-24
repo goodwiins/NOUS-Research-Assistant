@@ -15,47 +15,28 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Entity, GraphEdge } from '@/types/entity';
 import { entityService } from '@/services/entityService';
 import { cn } from '@/lib/utils';
+import type { TypeList } from './typeList';
 
 interface RelationshipFormProps {
   sourceEntityId?: string;
   initialData?: Partial<GraphEdge>;
   onSubmit: (data: any) => void;
   onCancel: () => void;
-  availableTypes?: string[];
+  /** The graph's relationship types; never replaced by a built-in list (GOO-756). */
+  types: TypeList;
 }
-
-// Complete list matching backend RelationshipType enum
-const DEFAULT_RELATIONSHIP_TYPES = [
-  'WORKS_FOR',
-  'KNOWS',
-  'RELATED_TO',
-  'LOCATED_IN',
-  'PART_OF',
-  'MENTIONED_IN',
-  'APPEARS_WITH',
-  'CREATED_BY',
-  'OWNS',
-  'MANAGES',
-  'COLLABORATES_WITH',
-  'REPORTS_TO',
-  'MEMBER_OF',
-  'ATTENDED',
-  'SPOKE_AT',
-  'PUBLISHED_BY',
-  'CITED',
-  'REFERENCES',
-  'CUSTOM',
-];
 
 export const RelationshipForm: React.FC<RelationshipFormProps> = ({
   sourceEntityId,
   initialData,
   onSubmit,
   onCancel,
-  availableTypes
+  types
 }) => {
-  // Use available types from props or fall back to defaults
-  const relationshipTypes = availableTypes || DEFAULT_RELATIONSHIP_TYPES;
+  // Only the graph's own types: while they load or after they fail, the type
+  // picker and submit stay disabled and say why.
+  const typesReady = types.status === 'loaded';
+  const relationshipTypes = typesReady ? types.types : [];
   const [formData, setFormData] = useState({
     source_entity_id: sourceEntityId || '',
     target_entity_id: '',
@@ -238,9 +219,21 @@ export const RelationshipForm: React.FC<RelationshipFormProps> = ({
         <Select
           value={formData.relationship_type}
           onValueChange={(value) => setFormData(prev => ({ ...prev, relationship_type: value }))}
+          disabled={!typesReady}
         >
-          <SelectTrigger className="bg-(--nous-bg-1) border-(--nous-border-1) font-mono text-sm text-(--nous-fg-1) focus:border-(--nous-sol)">
-            <SelectValue placeholder="SELECT_RELATIONSHIP_TYPE" />
+          <SelectTrigger
+            id="type"
+            className="bg-(--nous-bg-1) border-(--nous-border-1) font-mono text-sm text-(--nous-fg-1) focus:border-(--nous-sol)"
+          >
+            <SelectValue
+              placeholder={
+                types.status === 'loading'
+                  ? 'Loading relationship types…'
+                  : types.status === 'failed'
+                    ? 'Relationship types unavailable'
+                    : 'SELECT_RELATIONSHIP_TYPE'
+              }
+            />
           </SelectTrigger>
           <SelectContent className="bg-(--nous-bg-2) border-(--nous-border-1) max-h-60">
             {relationshipTypes.map((type) => (
@@ -250,6 +243,11 @@ export const RelationshipForm: React.FC<RelationshipFormProps> = ({
             ))}
           </SelectContent>
         </Select>
+        {types.status === 'failed' && (
+          <p role="alert" className="text-xs text-destructive">
+            Relationship types couldn&apos;t be loaded, so a link can&apos;t be created right now.
+          </p>
+        )}
       </div>
 
       {/* Strength and Confidence */}
@@ -371,6 +369,7 @@ export const RelationshipForm: React.FC<RelationshipFormProps> = ({
         </Button>
         <Button 
           type="submit"
+          disabled={!typesReady}
           className="font-mono text-xs bg-(--nous-sol) text-(--nous-bg-1) hover:shadow-[0_0_15px_var(--nous-sol-glow)]"
         >
           <Save className="h-3.5 w-3.5 mr-2" />

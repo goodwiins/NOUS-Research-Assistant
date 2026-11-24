@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Table2, Crop, Loader2 } from 'lucide-react';
+import { Table2, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ExtractedTablePreview } from '@/components/documents/ExtractedTablePreview';
 import { CropExtractOverlay } from '@/components/documents/CropExtractOverlay';
@@ -45,14 +45,10 @@ export function DocumentTablesTab({
         </h3>
         {isPdf && (
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => onSetCropActive(true)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors inline-flex items-center gap-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            >
-              <Crop aria-hidden="true" className="w-3.5 h-3.5" />
-              Crop extract
-            </button>
+            {/* "Crop extract" is hidden (FR-8): its overlay is drawn over this
+                tab, not over a rendered PDF page, so the region it sends cannot
+                map to the page coordinates the backend expects. Re-enable it
+                once a PDF page renderer supplies the page and its scale. */}
             <button
               type="button"
               onClick={onFetchTables}

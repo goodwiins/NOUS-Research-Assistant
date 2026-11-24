@@ -15772,6 +15772,11 @@ export interface components {
             /** Processing Error */
             processing_error?: string | null;
             /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
+            /**
              * Processing Retry Count
              * @default 0
              */
@@ -15844,6 +15849,11 @@ export interface components {
             mime_type: string;
             /** Organization Id */
             organization_id: string;
+            /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
             processing_status: components["schemas"]["ApiDocumentStatus"];
             /** Tags */
             tags?: string[] | null;
@@ -16411,6 +16421,12 @@ export interface components {
             claim_hash: string;
             /** @description Overall consensus level */
             consensus_level: components["schemas"]["ConsensusLevel"];
+            /**
+             * Failed Sources
+             * @description Number of sources whose stance could not be classified (provider error, timeout or ungrounded answer). A meter with failed sources is partial and is never cached.
+             * @default 0
+             */
+            failed_sources: number;
             /**
              * Neutral
              * @description Number of neutral sources
@@ -25032,6 +25048,20 @@ export interface components {
             weights: {
                 [key: string]: number;
             };
+        };
+        /**
+         * WorkerHealthResponse
+         * @description Overall health of the Celery worker infrastructure
+         */
+        WorkerHealthResponse: {
+            /** Healthy */
+            healthy: boolean;
+            /** Issues */
+            issues: string[];
+            /** Timestamp */
+            timestamp: string;
+            /** Workers Online */
+            workers_online: number;
         };
         /**
          * WorkerStatsResponse
@@ -43401,7 +43431,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["WorkerHealthResponse"];
                 };
             };
         };

@@ -24,13 +24,19 @@ from src.schemas.quality_metrics import (
 )
 from src.services.quality.performance_dashboard_service import (
     DashboardWidgetType,
+    MetricsUnavailable,
     MetricTimeRange,
+    chart_granularity,
     performance_dashboard_service,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Stable, safe body for "the metrics store is down": the client shows
+# "unavailable" instead of an empty chart (GOO-732).
+_METRICS_UNAVAILABLE = "Metrics are temporarily unavailable"
 
 
 def _is_org_admin(user: User) -> bool:
@@ -55,6 +61,33 @@ def _scope_overview_for(user: User, overview: Dict[str, Any]) -> Dict[str, Any]:
     return scoped
 
 
+def _section_value(overview: Dict[str, Any], section: str, key: str) -> Any:
+    """``overview[section][key]``, or None when either is missing."""
+    values = overview.get(section)
+    return values.get(key) if isinstance(values, dict) else None
+
+
+def _system_metrics(overview: Dict[str, Any]) -> Dict[str, Any]:
+    """``/dashboard`` summary built from the (already scoped) overview."""
+    return {
+        # The overview carries no document count.
+        "total_documents": None,
+        "total_searches": _section_value(
+            overview, "search_performance", "total_searches"
+        ),
+        "avg_response_time": _section_value(
+            overview, "search_performance", "avg_response_time"
+        ),
+        # No availability measurement exists. system_health.uptime is host
+        # uptime in seconds (and operator-only), not an availability figure.
+        "uptime": None,
+        # system_health is platform-operator only; others get null.
+        "error_rate": _section_value(overview, "system_health", "error_rate"),
+        # user_engagement is org-admin only; others get null.
+        "active_users": _section_value(overview, "user_engagement", "active_users"),
+    }
+
+
 @router.get("/dashboard")
 async def get_performance_dashboard(
     time_range: MetricTimeRange = Query(
@@ -72,16 +105,13 @@ async def get_performance_dashboard(
             ),
         )
 
-        # Transform data to match expected format from notebook
+        # Flatten the real nested sections (GOO-724). These keys used to be
+        # read from the top level of the overview, where they never exist, so
+        # every value was a default: zeros and a made-up "99.9%" uptime.
+        # A value with no measurement, or from a section this caller may not
+        # see (_scope_overview_for, GOO-633), is null, never a default.
         return {
-            "system_metrics": {
-                "total_documents": dashboard.get("total_documents", 0),
-                "total_searches": dashboard.get("total_searches", 0),
-                "avg_response_time": dashboard.get("avg_response_time", 0),
-                "uptime": dashboard.get("uptime", "99.9%"),
-                "error_rate": dashboard.get("error_rate", 0),
-                "active_users": dashboard.get("active_users", 0),
-            },
+            "system_metrics": _system_metrics(dashboard),
             "performance_trends": dashboard.get("performance_trends", []),
             "alerts": dashboard.get("alerts", []),
             "timestamp": dashboard.get("timestamp", datetime.utcnow().isoformat()),
@@ -141,8 +171,8 @@ async def get_system_health_metrics(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Failed to get system health metrics: {e}")
+    except Exception:
+        logger.exception("Failed to get system health metrics")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -277,6 +307,10 @@ async def get_metric_chart_data(
     time_range: MetricTimeRange = Query(
         MetricTimeRange.LAST_24H, description="Time range for metrics"
     ),
+    # Kept for compatibility but not honoured: the bucket size follows
+    # time_range (1h/24h: hour, 7d: day, longer: week), and the response
+    # reports the one used. A 503 means the metrics store is unreachable, so
+    # an outage is never drawn as an empty chart (GOO-732).
     granularity: str = Query(
         "hour", pattern="^(minute|hour|day|week|month)$", description="Data granularity"
     ),
@@ -292,7 +326,8 @@ async def get_metric_chart_data(
             "cpu_usage",
             "memory_usage",
             "disk_usage",
-            "error_rate",
+            # error_rate is not offered: nothing records failed searches, so
+            # it has no series (GOO-732).
             "throughput",
             "latency",
         ]
@@ -312,14 +347,18 @@ async def get_metric_chart_data(
         return {
             "metric_name": metric_name,
             "time_range": time_range.value,
-            "granularity": granularity,
+            # What the data is bucketed by, not what was asked for: weekly
+            # totals were being labelled with the caller's "day".
+            "granularity": chart_granularity(time_range),
             "data": chart_data,
         }
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Failed to get metric chart data: {e}")
+    except MetricsUnavailable:
+        raise HTTPException(status_code=503, detail=_METRICS_UNAVAILABLE)
+    except Exception:
+        logger.exception("Failed to get metric chart data")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -386,8 +425,10 @@ async def create_dashboard_widgets(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Failed to create dashboard widgets: {e}")
+    except MetricsUnavailable:
+        raise HTTPException(status_code=503, detail=_METRICS_UNAVAILABLE)
+    except Exception:
+        logger.exception("Failed to create dashboard widgets")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -748,7 +789,11 @@ def _convert_to_csv(data: Dict[str, Any]) -> Dict[str, Any]:
     rows = [headers]
 
     for key, value in flattened.items():
-        if isinstance(value, (int, float)):
+        # A null metric keeps its row with an empty cell: dropping it hid the
+        # column, and writing 0 would invent a value.
+        if value is None:
+            rows.append([key, ""])
+        elif isinstance(value, (int, float)):
             rows.append([key, str(value)])
 
     return {

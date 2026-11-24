@@ -1,7 +1,7 @@
 'use client';
 
 import { FileText } from 'lucide-react';
-import type { CitationItem } from '@/hooks';
+import type { CitationItem } from '@/hooks/useCitationsForThread';
 import { CollapsibleCard } from './CollapsibleCard';
 
 function scoreColor(percent: number): string {

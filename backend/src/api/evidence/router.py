@@ -349,6 +349,7 @@ async def get_evidence_meter(
         loaded, classifier_sources = await to_thread_finish_on_cancel(
             _load_sources_and_release,
             db,
+            guard_session=db,
             organization_id=current_user.organization_id,
             source_ids=parsed_source_ids,
             claim=claim,
@@ -413,6 +414,7 @@ async def get_evidence_meter(
             saved_count = await to_thread_finish_on_cancel(
                 _save_and_commit,
                 db,
+                guard_session=db,
                 classifications=classifications,
                 claim_hash=claim_hash,
                 claim_text=claim,
@@ -426,18 +428,30 @@ async def get_evidence_meter(
                 status_code=500, detail="Failed to generate evidence meter"
             ) from exc
 
-        # Cache the result — keyed by org so cross-tenant requests never share entries
-        meter_dict = evidence_meter.model_dump()
-        meter_dict["cached"] = False
+        # Cache the result — keyed by org so cross-tenant requests never share entries.
+        # A partial meter (any source failed to classify) is never cached: the
+        # key does not change when the provider recovers, so a cached outage
+        # result would outlive the outage.
+        if evidence_meter.failed_sources:
+            logger.warning(
+                "Evidence meter is partial; not caching claim_hash=%s "
+                "failed_sources=%d source_count=%d",
+                claim_hash,
+                evidence_meter.failed_sources,
+                len(source_revisions),
+            )
+        else:
+            meter_dict = evidence_meter.model_dump()
+            meter_dict["cached"] = False
 
-        await cache_service.set_evidence_meter(
-            claim_hash,
-            source_revisions,
-            classifier_version,
-            current_user.organization_id,
-            meter_dict,
-            ttl=86400,  # 24 hour cache
-        )
+            await cache_service.set_evidence_meter(
+                claim_hash,
+                source_revisions,
+                classifier_version,
+                current_user.organization_id,
+                meter_dict,
+                ttl=86400,  # 24 hour cache
+            )
 
         logger.info(
             "Evidence meter generated claim_hash=%s source_count=%d",
@@ -621,6 +635,7 @@ async def classify_sources_for_claim(
         _loaded, classifier_sources = await to_thread_finish_on_cancel(
             _load_sources_and_release,
             db,
+            guard_session=db,
             organization_id=current_user.organization_id,
             source_ids=source_ids,
             claim=claim,
@@ -650,6 +665,7 @@ async def classify_sources_for_claim(
         saved_count = await to_thread_finish_on_cancel(
             _save_and_commit,
             db,
+            guard_session=db,
             classifications=classifications,
             claim_hash=claim_hash,
             claim_text=claim,
@@ -668,7 +684,7 @@ async def classify_sources_for_claim(
     except HTTPException:
         raise
     except Exception:
-        await to_thread_finish_on_cancel(db.rollback)
+        await to_thread_finish_on_cancel(db.rollback, guard_session=db)
         logger.error("Failed to classify sources")
         raise HTTPException(status_code=500, detail="Classification failed")
 

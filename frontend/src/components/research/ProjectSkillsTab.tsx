@@ -182,6 +182,9 @@ export function ProjectSkillsTab({
           />
           {data.capabilities.can_admin && (
             <SkillReviewPanel
+              // Remount per skill/request/proposed version so acknowledgements
+              // never carry over to warnings the reviewer has not seen (FR-6).
+              key={`${selectedSkill.id}:${selectedRequest?.id ?? 'none'}:${selectedRequest?.proposed_version_id ?? 'none'}`}
               projectId={projectId}
               skill={selectedSkill}
               request={selectedRequest}

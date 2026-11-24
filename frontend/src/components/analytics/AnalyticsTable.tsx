@@ -45,6 +45,17 @@ import {
   FileText,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { CombinedSearchQueryRow } from '@/services/documentAnalyticsApi';
+
+/** One row of the document analytics table. */
+export interface DocumentTableRow {
+  id: string;
+  filename: string;
+  type: string;
+  size: number;
+  uploadedAt: string;
+  status: string;
+}
 
 interface Column<T> {
   key: keyof T;
@@ -477,7 +488,7 @@ export function AnalyticsTable<T extends Record<string, any>>({
 
 // Preset table configurations
 export const createDocumentAnalyticsTable = () => {
-  const columns = [
+  const columns: Column<DocumentTableRow>[] = [
     {
       key: 'filename',
       title: 'Document',
@@ -541,8 +552,12 @@ export const createDocumentAnalyticsTable = () => {
   return { columns };
 };
 
+// Shown when a source does not report a per-query value, instead of an
+// invented one (FL2C-2).
+const NOT_REPORTED = '—';
+
 export const createSearchAnalyticsTable = () => {
-  const columns = [
+  const columns: Column<CombinedSearchQueryRow>[] = [
     {
       key: 'query',
       title: 'Query',
@@ -554,27 +569,17 @@ export const createSearchAnalyticsTable = () => {
       ),
     },
     {
-      key: 'type',
-      title: 'Type',
+      key: 'count',
+      title: 'Searches',
       sortable: true,
-      render: (value: string) => <Badge variant="outline">{value}</Badge>,
+      render: (value: number) => value.toLocaleString(),
     },
     {
-      key: 'results',
-      title: 'Results',
+      key: 'avgResponseTimeMs',
+      title: 'Avg time',
       sortable: true,
-    },
-    {
-      key: 'clickRate',
-      title: 'Click rate',
-      sortable: true,
-      render: (value: number) => `${(value * 100).toFixed(1)}%`,
-    },
-    {
-      key: 'lastSearched',
-      title: 'Last searched',
-      sortable: true,
-      render: (value: string) => formatDate(value),
+      render: (value: number | null) =>
+        value == null ? NOT_REPORTED : `${Math.round(value)} ms`,
     },
   ];
 

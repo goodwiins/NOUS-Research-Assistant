@@ -4,13 +4,17 @@ Multimodal Processing Service with async pipeline for OCR, transcription, and AI
 
 import asyncio
 import io
+import json
 import logging
 import os
+import re
+import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from sqlalchemy.orm import Session
 
@@ -71,8 +75,122 @@ from src.services.documents.storage_utils import local_file_for_document
 from src.services.embedding.embedding_service import EmbeddingService
 from src.services.processing import pdf_lock
 from src.services.processing.entity_extraction_service import EntityExtractionService
+from src.shared.enums import SatelliteSyncStatus
 
 logger = logging.getLogger(__name__)
+
+
+_entity_service_lock = threading.Lock()
+_entity_service_instance: Optional[EntityExtractionService] = None
+
+
+def _shared_entity_service() -> EntityExtractionService:
+    """One EntityExtractionService (one loaded spaCy model) per process.
+
+    Blocking; call it via ``asyncio.to_thread``. A failed load is not cached,
+    so the next document tries again.
+    """
+    global _entity_service_instance
+    with _entity_service_lock:
+        if _entity_service_instance is None:
+            _entity_service_instance = EntityExtractionService()
+        return _entity_service_instance
+
+
+_PAGE_MARKER_RE = re.compile(r"\[Page \d+\]")
+_NEEDS_TEXT = frozenset({DocumentType.PDF, DocumentType.IMAGE})
+_NO_TEXT_ERROR = "No text could be extracted from this document"
+# Fixed messages for steps that catch their own errors: these land in
+# processing_results and job.result, which the API returns.
+_KG_ENTITY_ERROR = "Could not store an entity in the knowledge graph"
+_KG_RELATIONSHIP_ERROR = "Could not store a relationship in the knowledge graph"
+_KG_EXTRACTION_ERROR = "Could not extract relationships"
+_KG_STORAGE_ERROR = "Knowledge graph storage failed"
+_QUALITY_ERROR = "Quality assessment failed"
+# Step outputs that can carry a PDF's or image's text (step name -> key).
+_TEXT_OUTPUTS = (
+    ("pdf_processing", "text_content"),
+    ("ocr_extraction", "ocr_text"),
+    ("image_ocr", "extracted_text"),
+)
+
+
+def _usable_text(text: Optional[str]) -> bool:
+    """True when ``text`` has content beyond ``[Page N]`` markers."""
+    return bool(text) and bool(_PAGE_MARKER_RE.sub("", text or "").strip())
+
+
+def _extracted_text(results: Dict[str, Any]) -> Optional[str]:
+    for step, key in _TEXT_OUTPUTS:
+        text = (results.get(step) or {}).get(key)
+        if isinstance(text, str) and _usable_text(text):
+            return text
+    return None
+
+
+class KnowledgeGraphStorageFailed(Exception):
+    """The KG step failed (GOO-743). Raised with ``_KG_STORAGE_ERROR`` only:
+    the pipeline turns it into the step's warning, and the cause is logged
+    where it happened."""
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    # The type name, never repr/str: those can carry document text or paths.
+    return f"<{type(value).__name__}>"
+
+
+def _json_safe(results: Dict[str, Any]) -> Dict[str, Any]:
+    """``results`` as plain JSON. They are stored in ``document_metadata`` and
+    ``job.result``; an object the JSON column rejects fails the commit and
+    would strand the document in PROCESSING (GOO-743)."""
+    return cast(Dict[str, Any], json.loads(json.dumps(results, default=_json_default)))
+
+
+def _failed_run(errors: List[str], warnings: List[str]) -> Dict[str, Any]:
+    """What a crashed run stores in place of the previous run's results."""
+    return {"success": False, "errors": list(errors), "warnings": list(warnings)}
+
+
+def _try_fail_job(job: Any, error_msg: str, document_id: Any) -> bool:
+    """Mark ``job`` FAILED; on error, log it and return False (GOO-776).
+
+    The caller is already handling a failure: a ``fail_job`` exception must not
+    replace that original error, so the caller re-raises the original instead.
+    """
+    try:
+        job.fail_job(error_msg)
+    except Exception:
+        logger.error(
+            "fail_job raised while recording the failure of document %s",
+            document_id,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+def _record_warnings(document: Document, warnings: List[str], partial: bool) -> None:
+    """Write this run's warnings, replacing any earlier run's. ``partial`` is
+    set only for a document that completed with warnings."""
+    warnings = list(warnings)
+    document.add_metadata("processing_warnings", warnings)
+    document.add_metadata("processing_partial", bool(partial and warnings))
+
+
+def _entity_span(properties: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """Character span of an entity: spaCy entities carry ``start_char`` /
+    ``end_char``, the regex ones ``start`` / ``end``."""
+    props = properties or {}
+    return {
+        "start": int(props.get("start_char", props.get("start", 0)) or 0),
+        "end": int(props.get("end_char", props.get("end", 0)) or 0),
+    }
 
 
 class ProcessingStep:
@@ -129,6 +247,9 @@ class MultimodalProcessingService:
         Main processing pipeline for multimodal documents
         """
         start_time = time.time()
+        # Read while the session is healthy: after a failed flush, reading an
+        # expired attribute raises PendingRollbackError (GOO-743).
+        document_id = getattr(document, "id", "?")
         processing_results = {
             "text_extraction": {},
             "entity_extraction": {},
@@ -137,7 +258,10 @@ class MultimodalProcessingService:
             "quality_assessment": {},
             "processing_time": 0,
             "success": False,
+            # Required-step failures: the document and the job fail.
             "errors": [],
+            # Optional-step failures: recorded and surfaced, never fatal.
+            "warnings": [],
         }
 
         try:
@@ -175,8 +299,30 @@ class MultimodalProcessingService:
                     step.error_message = str(e)
                     step.end_time = time.time()
 
-                    error_msg = f"Processing step '{step.name}' failed: {str(e)}"
-                    logger.error(error_msg)
+                    # Stable text only: these strings reach processing_error,
+                    # processing_warnings and the document API. The exception
+                    # detail goes to the log (exc_info), never to the client.
+                    error_msg = f"Processing step '{step.name}' failed"
+
+                    if not step.required:
+                        # Optional means optional: the document still
+                        # completes. The failure is a warning, stored on the
+                        # document (processing_warnings) and in the job result.
+                        logger.warning(
+                            "Optional processing step '%s' failed for document %s",
+                            step.name,
+                            getattr(document, "id", "?"),
+                            exc_info=True,
+                        )
+                        processing_results["warnings"].append(f"{step.name} failed")
+                        continue
+
+                    logger.error(
+                        "Required processing step '%s' failed for document %s",
+                        step.name,
+                        getattr(document, "id", "?"),
+                        exc_info=True,
+                    )
                     processing_results["errors"].append(error_msg)
 
                     if step.required:
@@ -184,7 +330,10 @@ class MultimodalProcessingService:
                         # This branch returns before update_document_with_results
                         # (the only other place that sets doc status), so without
                         # this the document would be stranded in PROCESSING.
-                        job.fail_job(error_msg)
+                        if not _try_fail_job(job, error_msg, document_id):
+                            # The outer handler still ends the document FAILED,
+                            # then re-raises this step's error (GOO-776).
+                            raise
                         try:
                             document.update_processing_status(
                                 ProcessingStatus.FAILED, error_msg
@@ -202,12 +351,28 @@ class MultimodalProcessingService:
                             )
                             document.processing_status = ProcessingStatus.FAILED
                             document.processing_error = error_msg
+                        # This path skips update_document_with_results: replace
+                        # a previous run's flags, results and indexed state so
+                        # they don't outlive it (GOO-743).
+                        _record_warnings(
+                            document, processing_results["warnings"], partial=False
+                        )
+                        document.add_metadata(
+                            "processing_results",
+                            _failed_run(
+                                processing_results["errors"],
+                                processing_results["warnings"],
+                            ),
+                        )
+                        document.is_indexed = False
                         self.db.commit()
                         return processing_results
 
             # Finalize processing
             processing_results["processing_time"] = time.time() - start_time
             processing_results["success"] = len(processing_results["errors"]) == 0
+            # Stored on the document and the job: plain JSON only (GOO-743).
+            processing_results = _json_safe(processing_results)
 
             # Update document with processing results
             await self.update_document_with_results(document, processing_results)
@@ -219,14 +384,53 @@ class MultimodalProcessingService:
 
             return processing_results
 
-        except Exception as e:
-            error_msg = f"Document processing failed: {str(e)}"
-            logger.error(error_msg)
-
-            job.fail_job(error_msg)
-            self.db.commit()
-
+        except Exception as exc:
+            error_msg = "Document processing failed"
+            # processing_results may be the finalized copy, which already says
+            # success=True: a crash after that point is still a failure (GOO-776).
+            processing_results["success"] = False
             processing_results["errors"].append(error_msg)
+            # The failure may be the session itself (a rejected flush), which
+            # expires every loaded attribute: roll back before reading any,
+            # so the FAILED state below can be written (GOO-743).
+            try:
+                self.db.rollback()
+            except Exception:
+                logger.warning("rollback after a failed run failed", exc_info=True)
+            logger.exception("Document processing failed for document %s", document_id)
+
+            job_failed = _try_fail_job(job, error_msg, document_id)
+            # End terminal: a document left in PROCESSING is never retried.
+            document.processing_status = ProcessingStatus.FAILED
+            document.processing_error = error_msg
+            document.is_indexed = False
+            try:
+                _record_warnings(
+                    document, processing_results["warnings"], partial=False
+                )
+                document.add_metadata(
+                    "processing_results",
+                    _failed_run(
+                        processing_results["errors"], processing_results["warnings"]
+                    ),
+                )
+            except Exception:
+                logger.warning("could not reset processing flags", exc_info=True)
+            try:
+                self.db.commit()
+            except Exception:
+                logger.error(
+                    "could not record the failure of document %s",
+                    document_id,
+                    exc_info=True,
+                )
+                self.db.rollback()
+
+            if not job_failed:
+                # The job could not be marked FAILED, so the returned dict
+                # would be the only record of the failure: surface the real
+                # error to the caller instead (GOO-776).
+                raise exc
             return processing_results
 
     def get_processing_pipeline(
@@ -237,7 +441,10 @@ class MultimodalProcessingService:
         # Common steps for all document types
         common_steps = [
             ProcessingStep("Text Extraction", self.extract_text_content),
-            ProcessingStep("Entity Extraction", self.extract_entities),
+            # Advisory: it returns transient entities (the persisted entity
+            # pipeline is processing_tasks), and its spaCy model is optional
+            # in the image, so it must never fail ingestion.
+            ProcessingStep("Entity Extraction", self.extract_entities, required=False),
             ProcessingStep(
                 "Knowledge Graph Storage",
                 self.store_entities_in_knowledge_graph,
@@ -872,55 +1079,80 @@ class MultimodalProcessingService:
         in ``processing_tasks.process_document_ingestion``, which is made
         idempotent separately via ``_reset_pipeline_entities``
         (delete-before-insert on the same document).
+
+        Errors propagate; ``process_document`` records them once, as a
+        warning, because this step is optional.
         """
-        try:
-            if not self.entity_service:
-                self.entity_service = EntityExtractionService(self.db)
+        text_content = document.content_text or ""
+        if not text_content:
+            return {"entities": [], "entity_count": 0, "extraction_method": "none"}
 
-            text_content = document.content_text or ""
-            if not text_content:
-                return {"entities": [], "entity_count": 0, "extraction_method": "none"}
+        if not self.entity_service:
+            # spacy.load is slow and blocking: load it off the event loop, and
+            # once per process, not per document.
+            self.entity_service = await asyncio.to_thread(_shared_entity_service)
 
-            results = {
-                "entities": [],
-                "entity_count": 0,
-                "extraction_method": "spacy",
-                "processing_time": 0,
+        results: Dict[str, Any] = {
+            "entities": [],
+            "entity_count": 0,
+            "extraction_method": "spacy",
+            "processing_time": 0,
+        }
+
+        start_time = time.time()
+
+        # Synchronous, CPU-bound spaCy call: keep it off the event loop.
+        # (It used to be awaited with the wrong arguments, which raised a
+        # TypeError for every document with text, and the step was
+        # required, so every run and every retry failed the job: IS-5.)
+        entities = await asyncio.to_thread(
+            self.entity_service.extract_entities_from_text,
+            document,
+            text_content,
+        )
+
+        results["entities"] = [
+            {
+                "text": entity.name,
+                "label": entity.entity_type.value,
+                "confidence": entity.confidence,
+                **_entity_span(entity.properties),
             }
+            for entity in entities
+        ]
 
-            start_time = time.time()
+        results["entity_count"] = len(entities)
+        results["processing_time"] = time.time() - start_time
 
-            # Extract entities
-            entities = await self.entity_service.extract_entities_from_text(
-                text_content,
-                document_id=document.id,
-                organization_id=document.organization_id,
-            )
-
-            results["entities"] = [
-                {
-                    "text": entity.name,
-                    "label": entity.entity_type.value,
-                    "confidence": entity.confidence_score,
-                    "start": entity.metadata.get("start", 0) if entity.metadata else 0,
-                    "end": entity.metadata.get("end", 0) if entity.metadata else 0,
-                }
-                for entity in entities
-            ]
-
-            results["entity_count"] = len(entities)
-            results["processing_time"] = time.time() - start_time
-
-            return results
-
-        except Exception as e:
-            logger.error(f"Entity extraction failed: {str(e)}")
-            raise
+        return results
 
     async def store_entities_in_knowledge_graph(
         self, document: Document, job: ProcessingJob
     ) -> Dict[str, Any]:
         """Store extracted entities and relationships in the knowledge graph.
+
+        Records the outcome on ``document.neo4j_index_status`` like
+        ``processing_tasks._index_entities_to_graph``: ``completed`` when every
+        entity and relationship landed, ``failed`` otherwise, and then raises
+        ``KnowledgeGraphStorageFailed`` so the pipeline records the step's
+        warning. The reconciler re-drives COMPLETED documents whose graph
+        status is ``failed`` (GOO-743); a swallowed error was never retried.
+        """
+        results = await self._store_in_knowledge_graph(document, job)
+        if results.get("errors"):
+            # Each failure was logged with its stack where it happened.
+            document.neo4j_index_status = SatelliteSyncStatus.FAILED.value
+            raise KnowledgeGraphStorageFailed(_KG_STORAGE_ERROR)
+        if results.get("reason") != "No text content":
+            document.neo4j_index_status = SatelliteSyncStatus.COMPLETED.value
+            document.neo4j_indexed_at = datetime.now(timezone.utc)
+        return results
+
+    async def _store_in_knowledge_graph(
+        self, document: Document, job: ProcessingJob
+    ) -> Dict[str, Any]:
+        """The writes behind ``store_entities_in_knowledge_graph``, which turns
+        any collected error into the step's failure.
 
         Reclaim-safe: writes land in Neo4j via
         ``knowledge_graph_service.create_entity`` / ``create_relationship``,
@@ -1041,10 +1273,13 @@ class MultimodalProcessingService:
                         f"Stored entity in knowledge graph: {entity.name} ({entity_type_str})"
                     )
 
-                except Exception as e:
-                    error_msg = f"Failed to store entity {entity.name}: {str(e)}"
-                    logger.warning(error_msg)
-                    results["errors"].append(error_msg)
+                except Exception:
+                    logger.warning(
+                        "Failed to store entity %r in the knowledge graph",
+                        entity.name,
+                        exc_info=True,
+                    )
+                    results["errors"].append(_KG_ENTITY_ERROR)
 
             # Extract and store relationships
             try:
@@ -1118,15 +1353,16 @@ class MultimodalProcessingService:
                             f"Stored relationship: {source_entity.name} --[{graph_rel_type.value}]--> {target_entity.name}"
                         )
 
-                    except Exception as e:
-                        error_msg = f"Failed to store relationship: {str(e)}"
-                        logger.warning(error_msg)
-                        results["errors"].append(error_msg)
+                    except Exception:
+                        logger.warning(
+                            "Failed to store a relationship in the knowledge graph",
+                            exc_info=True,
+                        )
+                        results["errors"].append(_KG_RELATIONSHIP_ERROR)
 
-            except Exception as e:
-                error_msg = f"Failed to extract relationships: {str(e)}"
-                logger.warning(error_msg)
-                results["errors"].append(error_msg)
+            except Exception:
+                logger.warning("Failed to extract relationships", exc_info=True)
+                results["errors"].append(_KG_EXTRACTION_ERROR)
 
             results["processing_time"] = time.time() - start_time
 
@@ -1136,13 +1372,15 @@ class MultimodalProcessingService:
 
             return results
 
-        except Exception as e:
-            logger.error(f"Failed to store entities in knowledge graph: {str(e)}")
+        except Exception:
+            logger.error(
+                "Failed to store entities in the knowledge graph", exc_info=True
+            )
             return {
                 "entities_stored": 0,
                 "relationships_stored": 0,
                 "processing_time": 0,
-                "errors": [str(e)],
+                "errors": [_KG_STORAGE_ERROR],
             }
 
     async def generate_embeddings(
@@ -1282,11 +1520,11 @@ class MultimodalProcessingService:
 
             return results
 
-        except Exception as e:
-            logger.error(f"Quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Quality assessment failed", exc_info=True)
             return {
                 "quality_assessment_performed": False,
-                "error": str(e),
+                "error": _QUALITY_ERROR,
                 "overall_score": 0.0,
             }
 
@@ -1327,6 +1565,7 @@ class MultimodalProcessingService:
         Staged only; the Bedrock queue tick marks the document indexed later.
         """
         from src.services.bedrock_sync import (
+            STAGE_WRITE_COLUMNS,
             bedrock_sync_enabled,
             begin_stage_write,
             finish_stage_write,
@@ -1336,6 +1575,11 @@ class MultimodalProcessingService:
         if not (bedrock_sync_enabled() and results.get("success")):
             return
         if not document.content_text:
+            return
+        self.db.refresh(
+            document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
+        )
+        if document.is_deleted:
             return
         write_token = begin_stage_write(document)
         self.db.commit()  # durable before the upload starts
@@ -1367,6 +1611,18 @@ class MultimodalProcessingService:
                     document.content_text, captions
                 )
 
+            # A PDF or image is only worth indexing with text. Optional OCR
+            # failing used to fail the document by accident; now that optional
+            # failures are warnings, check for usable text explicitly.
+            if results["success"] and document.document_type in _NEEDS_TEXT:
+                if not _usable_text(document.content_text):
+                    recovered = _extracted_text(results)
+                    if recovered:
+                        document.content_text = recovered
+                    else:
+                        results["success"] = False
+                        results["errors"].append(_NO_TEXT_ERROR)
+
             # Update processing status
             if results["success"]:
                 document.processing_status = ProcessingStatus.COMPLETED
@@ -1377,13 +1633,19 @@ class MultimodalProcessingService:
             # Update processing timestamps
             document.processing_completed_at = datetime.utcnow()
 
-            # Store processing results in metadata
+            # Store processing results in metadata. Optional-step failures are
+            # kept visible: processing_partial marks a document that completed
+            # without some optional output (GOO-658). Written every run, so a
+            # clean retry clears them.
+            _record_warnings(
+                document, results.get("warnings") or [], partial=results["success"]
+            )
             document.add_metadata("processing_results", results)
             document.add_metadata("processed_at", datetime.utcnow().isoformat())
 
-            # Mark as indexed if successful
-            if results["success"]:
-                document.is_indexed = True
+            # Indexed only by a successful run; a failed rerun (the no-text
+            # guard above included) clears an earlier run's flag (GOO-743).
+            document.is_indexed = bool(results["success"])
 
             self.db.commit()
 

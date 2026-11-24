@@ -3,10 +3,10 @@
  * actions (close, pin, rail toggle, full-page link) and per-kind bodies.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import { flushSync } from 'react-dom';
-import { act } from '@testing-library/react';
+import { act, cleanup } from '@testing-library/react';
 import { render, screen, waitFor } from '@/test/test-utils';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
@@ -41,6 +41,15 @@ vi.mock('@/lib/pdf/chat-intent', () => ({
 }));
 vi.mock('@/components/chat/ChatRagContext', () => ({
   useChatRag: () => ({ setPdfContext: quoteFlow.setContext }),
+}));
+
+// GOO-781: the handoff card polls the chat's handoff. Unmocked, it went out
+// through the real api-client, whose 1000 ms retry backoff outlived the file
+// and ran after the test environment was torn down. "No handoff yet" is the
+// real server's answer for a chat that has none.
+vi.mock('@/hooks/chat/useThreadHandoff', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/chat/useThreadHandoff')>()),
+  useThreadHandoff: () => ({ data: null, isError: false, refetch: vi.fn() }),
 }));
 
 vi.mock('@/services/documentService', () => ({
@@ -109,6 +118,21 @@ function ArtifactWithRadixPalette(): React.ReactElement {
 }
 
 describe('ArtifactPanel', () => {
+  // GOO-781: a test that runs on fake timers unmounts and flushes them here,
+  // while the environment is alive. Radix HoverCard calls its close handler
+  // twice (pointerleave, then blur) and keeps only the second timer id, so
+  // its unmount clears one timer and the other fired after teardown
+  // ("window is not defined"). This hook runs before the setup file's
+  // cleanup, so it unmounts first itself.
+  afterEach(() => {
+    if (!vi.isFakeTimers()) return;
+    cleanup();
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     useChatStore.getState().reset();
@@ -407,6 +431,9 @@ describe('ArtifactPanel', () => {
   });
 
   it('opens the document referenced by a draft [Doc N] citation', async () => {
+    // Hovering and clicking the citation starts HoverCard timers; see the
+    // afterEach above.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(projectService.getDraft).mockResolvedValue({
       id: 'draft-1',
       project_id: 'proj-1',

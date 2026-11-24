@@ -4,8 +4,10 @@ import React from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { rehypeFreshTail } from '@/lib/rehypeFreshTail';
+import { MATH_DELIMITERS } from '@/lib/markdown-utils';
 import dynamic from 'next/dynamic';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { SafeMarkdownImage } from '@/components/markdown/SafeMarkdownImage';
 
 const SyntaxHighlighter = dynamic(
   () =>
@@ -88,6 +90,8 @@ export const baseComponents: Components = {
   // rel="noopener noreferrer" so a malicious target can't reach back via
   // window.opener (reverse tabnabbing).
   a: MarkdownLink,
+  // SECURITY (GOO-636): never auto-load model-written remote images.
+  img: SafeMarkdownImage,
   // GFM tables can exceed the bubble width; scroll them instead of breaking
   // the chat column layout.
   table({ children }) {
@@ -128,14 +132,6 @@ export const inlineComponents: Components = {
     return <span>{children}</span>;
   },
 };
-
-/**
- * Cheap check for anything KaTeX would render: `$$…$$`, `$…$`, `\(…\)` or
- * `\[…\]`. Only decides whether to fetch the math chunk, so a false positive
- * costs one request and a false negative renders the source as written —
- * neither changes what remark-math itself does with the text.
- */
-const MATH_DELIMITERS = /\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\(|\\\[/;
 
 /** Applied only while a turn streams — see `freshTail`. */
 const FRESH_TAIL_PLUGINS: React.ComponentProps<

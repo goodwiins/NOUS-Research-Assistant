@@ -4,7 +4,9 @@ Mutation proof: see docs/engineering/agent-approvals.md for the removed guards
 and exact regression commands. The PostgreSQL suite uses this real graph.
 """
 
+import importlib.metadata
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypedDict
 
@@ -12,6 +14,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
+from packaging.requirements import Requirement
 
 from src.services.agent.confirmation_service import (
     ApprovalExpired,
@@ -21,6 +24,37 @@ from src.services.agent.confirmation_service import (
 )
 
 pytestmark = pytest.mark.unit
+
+REQUIREMENTS_PATH = Path(__file__).resolve().parents[3] / "requirements.txt"
+
+
+def langgraph_floor_problem(
+    requirements: str, installed: str | None = None
+) -> str | None:
+    """Why the installed langgraph cannot pass the per-call interrupt id test.
+
+    The floor comes from requirements.txt, so it moves with the pin. GOO-782:
+    a local venv on langgraph 1.2.7 failed the identical-gates test 20/20 with
+    an opaque `approval_id != approval_id` while CI (the lock, 1.2.24) passed
+    20/20; the test was never clock- or order-dependent.
+    """
+    for raw in requirements.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        requirement = Requirement(line)
+        if requirement.name != "langgraph":
+            continue
+        if installed is None:
+            installed = importlib.metadata.version("langgraph")
+        if requirement.specifier.contains(installed, prereleases=True):
+            return None
+        return (
+            f"installed langgraph {installed} does not satisfy requirements.txt "
+            f"({requirement}): sequential identical interrupts share one id "
+            "below the floor. Reinstall: pip install -r backend/requirements.txt"
+        )
+    return "requirements.txt no longer pins langgraph; update this guard"
 
 
 def _snapshot() -> SimpleNamespace:
@@ -174,7 +208,10 @@ async def test_identical_sequential_gates_get_distinct_receipts() -> None:
     # digest is identical, so only the per-call interrupt id (LangGraph
     # >=1.2.20) separates them. requirements.txt pins that floor; on <=1.2.19
     # the two gates collapse to one approval id and the first receipt would
-    # approve the second.
+    # approve the second. A stale venv fails here, naming the cause (GOO-782).
+    problem = langgraph_floor_problem(REQUIREMENTS_PATH.read_text(encoding="utf-8"))
+    if problem:
+        pytest.fail(problem)
     graph = identical_gate_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "thread"}}
     await graph.ainvoke({"user_id": "user"}, config)
@@ -197,3 +234,33 @@ async def test_identical_sequential_gates_get_distinct_receipts() -> None:
             run_id="run",
             user_id="user",
         )
+
+
+_PINNED = "fastapi>=0.1\nlanggraph>=1.2.20,<2.0  # per-call interrupt ids\n"
+
+
+@pytest.mark.parametrize(
+    "requirements, installed, expected",
+    [
+        (_PINNED, "1.2.7", "installed langgraph 1.2.7 does not satisfy"),
+        (_PINNED, "1.2.19", "installed langgraph 1.2.19 does not satisfy"),
+        (_PINNED, "1.2.20", None),
+        (_PINNED, "1.2.24", None),
+        ("fastapi>=0.1\nlanggraph-checkpoint>=4.3\n", "1.2.24", "no longer pins"),
+    ],
+)
+def test_langgraph_floor_guard_names_a_stale_install(
+    requirements: str, installed: str, expected: str | None
+) -> None:
+    """The guard reads the floor from requirements text and fails closed."""
+    problem = langgraph_floor_problem(requirements, installed)
+    if expected is None:
+        assert problem is None
+    else:
+        assert problem is not None and expected in problem
+
+
+def test_the_real_requirements_pin_the_interrupt_id_floor() -> None:
+    text = REQUIREMENTS_PATH.read_text(encoding="utf-8")
+    assert langgraph_floor_problem(text, "1.2.19") is not None
+    assert langgraph_floor_problem(text, "1.2.20") is None

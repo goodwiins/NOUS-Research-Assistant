@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Generator
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -16,6 +16,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+
+from src.core.thread_offload import session_is_abandoned
 
 # Import base model from models
 from src.models.base import Base
@@ -240,13 +242,18 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-def get_db_sync() -> Session:
+def get_db_sync() -> Generator[Session, None, None]:
     """Get database session (synchronous)"""
     db = SessionLocal()
     try:
         yield db
     finally:
-        db.close()
+        # A thread that to_thread_finish_on_cancel gave up on still uses this
+        # Session; it closes it itself when it finishes (GOO-698). Closing it
+        # here, under the thread, would drop its work so far while the rest
+        # went on in a fresh transaction.
+        if not session_is_abandoned(db):
+            db.close()
 
 
 async def get_db() -> AsyncSession:

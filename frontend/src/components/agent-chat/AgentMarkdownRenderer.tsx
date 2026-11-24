@@ -27,6 +27,7 @@ const SyntaxHighlighter = dynamic(
   }
 );
 import { Copy, Check } from 'lucide-react';
+import { SafeMarkdownImage } from '@/components/markdown/SafeMarkdownImage';
 import { AgentCitationBadge } from './AgentCitationBadge';
 import {
   parseMessageWithCitations,
@@ -84,6 +85,8 @@ function CodeBlockCopyButton({ code }: { code: string }) {
 }
 
 const markdownComponents = {
+  // SECURITY (GOO-636): never auto-load model-written remote images.
+  img: SafeMarkdownImage,
   code({
     inline,
     className,

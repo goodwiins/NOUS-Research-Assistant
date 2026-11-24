@@ -1235,16 +1235,8 @@ async def _try_primary_do_kb_read_impl(
                 org_id=org_id,
                 session=session,
                 project_id=scoped_project_id,
+                **({"canonical_ids_only": True} if bedrock_enabled else {}),
             )
-            # A shared KB must never emit an unresolvable document, even if
-            # provider-side metadata filtering was bypassed or misconfigured.
-            if bedrock_enabled:
-                chunks_to_emit = [
-                    chunk
-                    for chunk in chunks_to_emit
-                    if chunk.document_id in title_by_key
-                ]
-
             # Two distinct empty-result paths that trigger the hybrid fallback:
             if scoped_project_id and not title_by_key and result.chunks:
                 logger.info(

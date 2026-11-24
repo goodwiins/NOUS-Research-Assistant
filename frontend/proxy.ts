@@ -1,6 +1,12 @@
-import { type NextRequest } from 'next/server';
+import { type NextRequest, type NextResponse } from 'next/server';
 import { updateSession } from '@/lib/supabase/middleware';
 import { AUTH_RETURN_TO_HEADER } from '@/utils/authRedirect';
+import {
+  buildCsp,
+  connectSrcReportOnly,
+  processCspEnv,
+  reportingEndpoints,
+} from '@/lib/csp';
 
 /**
  * Per-request CSP with a script nonce (audit #4 completion).
@@ -14,34 +20,10 @@ import { AUTH_RETURN_TO_HEADER } from '@/utils/authRedirect';
  * style-src keeps 'unsafe-inline' (styled-jsx/Tailwind inline styles — a style
  * nonce is a separate follow-up). The static CSP was removed from
  * next.config.js: two CSP headers enforce their intersection.
+ *
+ * The policy itself lives in src/lib/csp.ts (GOO-722) so tests and the
+ * Playwright CSP specs use the exact production policy.
  */
-function buildCsp(nonce: string): string {
-  return [
-    "default-src 'self'",
-    "base-uri 'self'",
-    "object-src 'none'",
-    "frame-src 'self' blob:",
-    "frame-ancestors 'none'",
-    "form-action 'self'",
-    // React dev mode needs eval() for debugging features (callstack
-    // reconstruction); never emitted in production builds.
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${
-      process.env.NODE_ENV === 'development' ? " 'unsafe-eval'" : ''
-    }`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
-    "font-src 'self' data:",
-    // Dev: the browser calls the backend directly (getPublicApiOrigin falls
-    // back to http://localhost:8000), which https:/wss: alone would block.
-    `connect-src 'self' https: wss:${
-      process.env.NODE_ENV === 'development'
-        ? ' http://localhost:8000 ws://localhost:8000 http://127.0.0.1:8000 ws://127.0.0.1:8000'
-        : ''
-    }`,
-    "worker-src 'self' blob:",
-    ...(process.env.NODE_ENV === 'development' ? [] : ['upgrade-insecure-requests']),
-  ].join('; ');
-}
 
 // NOTE (AU8, 2026-07-16): this proxy intentionally does NOT gate auth. It
 // only refreshes the Supabase session cookie (updateSession) and sets the
@@ -53,7 +35,7 @@ function buildCsp(nonce: string): string {
 // existing guarded layout) — there is no middleware backstop here. See the
 // comment on app/(dashboard)/layout.tsx for the full history of why an
 // earlier comment implied otherwise.
-export async function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest): Promise<NextResponse> {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const csp = buildCsp(nonce);
 
@@ -75,6 +57,17 @@ export async function proxy(request: NextRequest) {
   // And the browser needs the policy on the response.
   response.headers.set('Content-Security-Policy', csp);
 
+  // GOO-729: the explicit connect-src list, observed before it is enforced.
+  // Built from public config plus this request's host, which is how the
+  // browser derives the API origin when NEXT_PUBLIC_API_URL is unset.
+  // Reports go to the same-origin /api/csp-report route, which scrubs them.
+  const requestUrl = new URL(request.url);
+  response.headers.set(
+    'Content-Security-Policy-Report-Only',
+    connectSrcReportOnly(processCspEnv(), requestUrl)
+  );
+  response.headers.set('Reporting-Endpoints', reportingEndpoints(requestUrl));
+
   return response;
 }
 
@@ -86,7 +79,9 @@ export const config = {
      * - _next/image (image optimization)
      * - favicon.ico (favicon)
      * - public assets
+     * - api/csp-report: anonymous browser reports; no session refresh, no
+     *   auth redirect, no CSP headers on the 204 (GOO-729)
      */
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    '/((?!_next/static|_next/image|favicon.ico|api/csp-report/?$|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 };
