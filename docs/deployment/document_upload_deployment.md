@@ -138,9 +138,9 @@ class Settings:
 
 #### PostgreSQL
 ```bash
-# Apply database migrations (from backend/). This creates the whole schema,
+# Apply database migrations. This creates the whole schema,
 # including the document upload tables.
-python -m alembic upgrade head
+cd backend && alembic upgrade head
 ```
 
 The standalone `006_document_upload_schema.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
