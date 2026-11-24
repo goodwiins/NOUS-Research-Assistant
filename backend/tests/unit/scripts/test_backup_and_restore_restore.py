@@ -456,8 +456,10 @@ def test_help_states_the_velero_version(tmp_path: Path) -> None:
 # - `get crd externalsecrets...` prints the CRD unless $RB_NO_ESO=1;
 # - `get externalsecret aws-database-credentials` prints its name when
 #   $RB_RDS=1, prints nothing otherwise;
-# - `get crd scaledobjects.keda.sh` fails (KEDA is not installed);
-# - $RB_FAIL lists calls that exit 1 instead: deploy, crd, es, drop.
+# - `get crd scaledobjects.keda.sh` prints the CRD when $RB_KEDA=1, prints
+#   nothing otherwise (matching `--ignore-not-found`), and fails when $RB_FAIL
+#   contains `keda`;
+# - $RB_FAIL lists calls that exit 1 instead: deploy, crd, es, keda, drop.
 RUNBOOK_KUBECTL_STUB = """#!/bin/sh
 echo "kubectl $*" >> "$STUB_LOG"
 fails() { case " ${RB_FAIL:-} " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -472,7 +474,10 @@ case "$*" in
         fails es && exit 1
         [ "${RB_RDS:-0}" = 1 ] && echo externalsecret/aws-database-credentials
         exit 0 ;;
-    *"get crd scaledobjects.keda.sh"*) exit 1 ;;
+    *"get crd scaledobjects.keda.sh"*)
+        fails keda && exit 1
+        [ "${RB_KEDA:-0}" = 1 ] && echo crd/scaledobjects.keda.sh
+        exit 0 ;;
     *"DROP DATABASE"*) fails drop && exit 1; exit 0 ;;
 esac
 exit 0
@@ -494,7 +499,10 @@ def _runbook_block() -> str:
 
 
 def _run_runbook(
-    tmp_path: Path, backup_id: str = BACKUP_ID, **extra: str
+    tmp_path: Path,
+    backup_id: str = BACKUP_ID,
+    namespace: str = "multimodal-rag-system",
+    **extra: str,
 ) -> Tuple[subprocess.CompletedProcess, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -511,6 +519,9 @@ def _run_runbook(
     log = tmp_path / "stub.log"
     log.touch()
     block = _runbook_block().replace("  BACKUP_ID=  ", f"  BACKUP_ID={backup_id}  ", 1)
+    if namespace != "multimodal-rag-system":
+        assert block.count("  NS=multimodal-rag-system ") == 1
+        block = block.replace("  NS=multimodal-rag-system ", f"  NS={namespace} ", 1)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
     env["STUB_LOG"] = str(log)
     env.update(extra)
@@ -561,6 +572,7 @@ def test_runbook_runs_every_step_for_in_cluster_postgres(tmp_path: Path) -> None
         ("kubectl fails on the deployment", {"RB_FAIL": "deploy"}),
         ("kubectl fails on the CRD", {"RB_FAIL": "crd"}),
         ("kubectl fails on the ExternalSecret", {"RB_FAIL": "es"}),
+        ("kubectl fails on the KEDA CRD", {"RB_FAIL": "keda"}),
     ],
 )
 def test_runbook_stops_before_touching_workloads(
@@ -569,8 +581,28 @@ def test_runbook_stops_before_touching_workloads(
     result, calls = _run_runbook(tmp_path, **extra)
     assert result.returncode != 0, case
     assert "STOPPED, nothing changed" in result.stderr, case
+    assert "writers are still scaled down" not in result.stderr, case
     for destructive in DESTRUCTIVE + ("backup-and-restore.sh",):
         assert destructive not in calls, (case, destructive)
+
+
+def test_runbook_pauses_and_resumes_keda_when_installed(tmp_path: Path) -> None:
+    result, calls = _run_runbook(tmp_path, RB_KEDA="1")
+    assert result.returncode == 0, result.stderr
+    assert "autoscaling.keda.sh/paused-replicas=0 --overwrite" in calls
+    assert "autoscaling.keda.sh/paused-replicas-" in calls
+    assert "writers are still scaled down" not in result.stderr
+
+
+def test_runbook_comments_have_no_apostrophes() -> None:
+    # In default zsh (without interactivecomments), an unmatched apostrophe in a
+    # comment line inside the pasted subshell leaves the prompt stuck at quote>.
+    block = _runbook_block()
+    for line in block.splitlines():
+        if "#" not in line:
+            continue
+        comment = line.split("#", 1)[1]
+        assert "'" not in comment, line
 
 
 def test_runbook_refuses_without_a_backup_id(tmp_path: Path) -> None:
@@ -581,16 +613,7 @@ def test_runbook_refuses_without_a_backup_id(tmp_path: Path) -> None:
 
 
 def test_runbook_refuses_an_empty_namespace(tmp_path: Path) -> None:
-    block = _runbook_block()
-    assert block.count("  NS=multimodal-rag-system ") == 1
-    original = _runbook_block
-    try:
-        globals()["_runbook_block"] = lambda: original().replace(
-            "  NS=multimodal-rag-system ", "  NS= ", 1
-        )
-        result, calls = _run_runbook(tmp_path)
-    finally:
-        globals()["_runbook_block"] = original
+    result, calls = _run_runbook(tmp_path, namespace="")
     assert result.returncode != 0
     assert "NS is empty" in result.stderr
     assert calls == ""
@@ -609,8 +632,10 @@ def test_cluster_recovery_delegates_the_data_restore() -> None:
 
 
 def test_runbook_stops_when_a_step_fails(tmp_path: Path) -> None:
-    # set -e: a failed drop must not go on to load the dump.
+    # set -e: a failed drop must not go on to load the dump, and the operator
+    # is reminded that writers remain scaled down.
     result, calls = _run_runbook(tmp_path, RB_FAIL="drop")
     assert result.returncode != 0
     assert "DROP DATABASE" in calls
     assert "backup-and-restore.sh" not in calls
+    assert "writers are still scaled down" in result.stderr
