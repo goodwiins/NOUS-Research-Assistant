@@ -343,3 +343,88 @@ async def test_cancelling_the_call_cancels_connector_searches() -> None:
         await call
     await asyncio.sleep(0)
     assert conn.cancelled, "an orphaned connector search kept running"
+
+
+# ---------------------------------------------------------------------------
+# The remaining sites: max_depth (x2) and do_kb_retrieve top_k
+# ---------------------------------------------------------------------------
+
+# raw value -> expected, as (raw, kind) where kind picks default / lo / hi.
+_BAD_INPUTS = [("abc", "default"), (True, "default"), (-4, "lo"), (999, "hi")]
+
+
+def _expect(kind: str, default: int, hi: int) -> int:
+    return {"default": default, "lo": 1, "hi": hi}[kind]
+
+
+@pytest.mark.parametrize(("raw", "kind"), _BAD_INPUTS)
+async def test_explore_entity_neighborhood_max_depth(raw: Any, kind: str) -> None:
+    from src.services.knowledge_graph.knowledge_graph_service import (
+        knowledge_graph_service,
+    )
+
+    seen: Dict[str, Any] = {}
+
+    def _neighborhood(**kwargs: Any) -> Dict[str, Any]:
+        seen.update(kwargs)
+        return {"entities": [], "relationships": []}
+
+    with patch.object(
+        knowledge_graph_service, "get_neighborhood", side_effect=_neighborhood
+    ):
+        result = await tools_impl._tool_explore_entity_neighborhood(
+            {"entity_id": "e-1", "max_depth": raw}, _user()
+        )
+
+    assert "error" not in result
+    assert seen["max_depth"] == _expect(kind, 2, 3)
+    assert type(seen["max_depth"]) is int
+
+
+@pytest.mark.parametrize(("raw", "kind"), _BAD_INPUTS)
+async def test_find_entity_paths_max_depth(raw: Any, kind: str) -> None:
+    from src.services.knowledge_graph.knowledge_graph_service import (
+        knowledge_graph_service,
+    )
+
+    seen: Dict[str, Any] = {}
+
+    def _paths(**kwargs: Any) -> List[Any]:
+        seen.update(kwargs)
+        return []
+
+    with patch.object(knowledge_graph_service, "find_paths", side_effect=_paths):
+        result = await tools_impl._tool_find_entity_paths(
+            {
+                "source_entity_id": "e-1",
+                "target_entity_id": "e-2",
+                "max_depth": raw,
+            },
+            _user(),
+        )
+
+    assert "error" not in result
+    assert seen["max_depth"] == _expect(kind, 3, 5)
+    assert type(seen["max_depth"]) is int
+
+
+@pytest.mark.parametrize(("raw", "kind"), _BAD_INPUTS)
+async def test_do_kb_retrieve_top_k(raw: Any, kind: str) -> None:
+    kb_settings = SimpleNamespace(
+        DO_KB_ENABLED=False, BEDROCK_KB_ID="", DO_KB_DEFAULT_TOP_K=8
+    )
+    local = AsyncMock(return_value={"chunks": [], "total": 0})
+
+    with (
+        patch("src.core.config.settings", kb_settings),
+        patch.object(tools_impl, "_local_unscoped_fulltext_retrieve", local),
+    ):
+        result = await tools_impl._tool_do_kb_retrieve(
+            {"query": "attention", "top_k": raw}, None, _user()
+        )
+
+    assert "error" not in result
+    assert local.await_args is not None
+    top_k = local.await_args.kwargs["top_k"]
+    assert top_k == _expect(kind, 8, 20)
+    assert type(top_k) is int

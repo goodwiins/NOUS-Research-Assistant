@@ -3769,7 +3769,7 @@ async def _tool_do_kb_retrieve(
 
     from src.core.config import settings as _kb_settings
 
-    top_k = max(1, min(int(args.get("top_k", _kb_settings.DO_KB_DEFAULT_TOP_K)), 20))
+    top_k = coerce_int(args.get("top_k"), _kb_settings.DO_KB_DEFAULT_TOP_K, 1, 20)
 
     scoped_intent = args.get("document_ids") is not None
     requested_document_ids: list[UUID] = []
@@ -5137,7 +5137,7 @@ async def _tool_explore_entity_neighborhood(
         return {"error": "Authentication required"}
 
     entity_id = args.get("entity_id", "")
-    max_depth = max(1, min(args.get("max_depth", 2), 3))
+    max_depth = coerce_int(args.get("max_depth"), 2, 1, 3)
     limit = coerce_int(args.get("limit"), 30, 1, 50)
 
     if not entity_id:
@@ -5216,7 +5216,7 @@ async def _tool_find_entity_paths(
 
     source_id = args.get("source_entity_id", "")
     target_id = args.get("target_entity_id", "")
-    max_depth = max(1, min(args.get("max_depth", 3), 5))
+    max_depth = coerce_int(args.get("max_depth"), 3, 1, 5)
 
     if not source_id or not target_id:
         return {"error": "source_entity_id and target_entity_id are required"}
