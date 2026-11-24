@@ -1228,7 +1228,12 @@ async def test_compiled_writing_resolves_named_local_source_before_retrieval(
         assert "documents.organization_id" in sql[1]
         assert "documents.is_deleted = false" in sql[1]
         assert "documents.id in" in sql[1]
-        if provider_result != "authorized":
+        if provider_result == "unresolved" and retrieval_backend == "bedrock":
+            # Bedrock keys must be document UUIDs; a non-UUID key resolves to
+            # nothing, so the chunk is dropped without a resolver query.
+            assert len(sql) == 2
+            assert "Evidence from the named local source." not in str(retrieval_result)
+        elif provider_result != "authorized":
             assert "documents.organization_id" in sql[2]
             assert "documents.is_deleted = false" in sql[2]
 

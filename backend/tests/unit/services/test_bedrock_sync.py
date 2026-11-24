@@ -981,3 +981,121 @@ def test_pipeline_stages_the_final_text_after_results_are_stored(
     assert s3.puts[f"{PREFIX}{org_id}/{doc_id}.txt"] == b"new"
     assert results["bedrock_kb_stage"] == "staged"
     assert _load(session_factory, doc_id).do_kb_sync_status == PENDING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_stage", [False, True])
+async def test_stage_preserves_other_writer_token(
+    session_factory: Any,
+    enabled: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    async_stage: bool,
+) -> None:
+    """Remove the post-upload locked refresh and the second token is lost.
+
+    Focus: pytest -q backend/tests/unit/services/test_bedrock_sync.py -k preserves_other_writer
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from src.services.documents.satellite_state import pending_writes
+
+    doc_id = _add(session_factory)
+    with session_factory() as db:
+        token = bs.begin_stage_write(db.get(Document, doc_id))
+        db.commit()
+
+    other_token = None
+
+    def upload(*args: Any) -> None:
+        nonlocal other_token
+        with session_factory() as other:
+            other_token = bs.begin_stage_write(other.get(Document, doc_id))
+            other.commit()
+        visible = pending_writes(_load(session_factory, doc_id), bs.WRITE_SATELLITE)
+        assert set(visible) == {token, other_token}
+
+    monkeypatch.setattr(bs, "upload_document_objects", upload)
+    if async_stage:
+        url = session_factory.kw["bind"].url.set(drivername="sqlite+aiosqlite")
+        engine = create_async_engine(url)
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+                doc = await db.get(Document, doc_id)
+                assert await bs.stage_document(db, doc) is bs.StageOutcome.STAGED
+                bs.finish_stage_write(doc, token)
+                await db.commit()
+        finally:
+            await engine.dispose()
+    else:
+        with session_factory() as db:
+            doc = db.get(Document, doc_id)
+            assert bs.stage_document_sync(db, doc) is bs.StageOutcome.STAGED
+            bs.finish_stage_write(doc, token)
+            db.commit()
+
+    assert other_token is not None
+    assert set(pending_writes(_load(session_factory, doc_id), bs.WRITE_SATELLITE)) == {
+        other_token
+    }
+
+
+@pytest.mark.asyncio
+async def test_prune_only_deleted_and_missing_staged_objects(
+    session_factory: Any, enabled: Any, s3: Any
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    org = uuid4()
+    live = _add(session_factory, org)
+    deleted = _add(session_factory, org)
+    with session_factory() as db:
+        db.get(Document, deleted).soft_delete()
+        db.commit()
+
+    deleted_key = bs.content_key(org, deleted, "pdf")
+    missing_sidecar = bs.sidecar_key(bs.content_key(org, uuid4()))
+    s3.list_objects = MagicMock(
+        side_effect=[
+            [
+                bs.content_key(org, live),
+                deleted_key,
+                bs.sidecar_key(deleted_key),
+                missing_sidecar,
+                f"{PREFIX}{org}/{uuid4()}.csv",
+                f"unrelated/{org}/{uuid4()}.txt",
+            ],
+            [
+                bs.content_key(org, live),
+                deleted_key,
+                bs.sidecar_key(deleted_key),
+                missing_sidecar,
+            ],
+            [bs.content_key(org, live)],
+        ]
+    )
+    engine = create_async_engine(
+        session_factory.kw["bind"].url.set(drivername="sqlite+aiosqlite")
+    )
+    client = FakeBedrock()
+    try:
+        async with async_sessionmaker(engine)() as db:
+            assert await bs.prune_staged_objects(db, client, s3, apply=False) == {
+                "stale_objects": 3
+            }
+            assert not s3.deletes and not client.calls
+            assert await bs.prune_staged_objects(db, client, s3, apply=True) == {
+                "stale_objects": 3,
+                "started_job": "job-1",
+            }
+            assert s3.deletes == [
+                deleted_key,
+                bs.sidecar_key(deleted_key),
+                missing_sidecar,
+            ]
+            assert await bs.prune_staged_objects(db, client, s3, apply=True) == {
+                "stale_objects": 0,
+                "started_job": "job-2",
+            }
+            assert client.calls == ["list", "start", "list", "start"]
+    finally:
+        await engine.dispose()
