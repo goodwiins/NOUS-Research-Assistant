@@ -35,7 +35,9 @@ Telemetry package for the NOUS backend. Three pillars — metrics, tracing, stru
 
 ## Prometheus metrics
 
-The `/metrics` endpoint (registered by `setup_observability`) serves all metrics from the default `REGISTRY`. Key metric names:
+The backend currently serves no Prometheus endpoint. `setup_observability` in `integration.py` would register `/metrics`, but it has no caller (from this package `main.py` calls only `configure_logging`, `configure_tracing` and `configure_metrics`), and `PrometheusMetricsCollector.start_metrics_server` is not called either. Live alerting is CloudWatch, defined in `infrastructure/terraform/monitoring.tf`.
+
+The metrics below are registered in-process; nothing scrapes them. Key metric names:
 
 **HTTP**
 
@@ -69,7 +71,7 @@ The `/metrics` endpoint (registered by `setup_observability`) serves all metrics
 - `system_cpu_percent` / `system_memory_bytes` / `system_disk_bytes`
 - `websocket_connections_total` / `websocket_connections_active` / `websocket_messages_total`
 
-Prometheus scrapes `:8000/metrics` (or the `prometheus_port` configured in `config.py`, default 9090 for a standalone server). The OTLP exporter pushes to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://jaeger:4317`) every 15 s.
+OTLP push export is off by default (`OTEL_EXPORTER_OTLP_ENABLED`). When enabled, the OTLP exporter pushes to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://jaeger:4317`) every 15 s.
 
 ## Distributed tracing
 
