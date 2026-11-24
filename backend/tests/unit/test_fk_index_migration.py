@@ -23,7 +23,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1].parent
-PARENT = "ws01_websocket_status_tables"
+PARENT = "ws02_realtime_status_hardening"
 REVISION = "fk01_purge_path_fk_indexes"
 # Mirrors the revision.
 FK_COLUMNS = (

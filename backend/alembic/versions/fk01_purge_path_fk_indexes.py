@@ -1,7 +1,7 @@
 """Index the foreign keys a thread purge has to check (GOO-655).
 
 Revision ID: fk01_purge_path_fk_indexes
-Revises: ws01_websocket_status_tables
+Revises: ws02_realtime_status_hardening
 Create Date: 2026-11-23 00:00:00
 
 ``purge_soft_deleted_threads`` hard-deletes a chat's ``chat_messages`` and
@@ -53,7 +53,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 revision = "fk01_purge_path_fk_indexes"
-down_revision = "ws01_websocket_status_tables"
+down_revision = "ws02_realtime_status_hardening"
 branch_labels = None
 depends_on = None
 
