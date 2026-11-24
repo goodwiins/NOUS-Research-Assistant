@@ -67,7 +67,7 @@ tests/contract/
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.11+
 - pytest with required plugins
 - httpx for async HTTP testing
 - faker for test data generation
@@ -250,13 +250,13 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
-        python-version: 3.9
+        python-version: '3.11'
     - name: Install dependencies
       run: |
         pip install -r backend/requirements.dev.txt
     - name: Run contract tests
       run: |
-        python tests/contract/run_contract_tests.py --type fast --save-results
+        python tests/contract/run_contract_tests.py --type fast --no-html
     - name: Upload test results
       uses: actions/upload-artifact@v2
       with:

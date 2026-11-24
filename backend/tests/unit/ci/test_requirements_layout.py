@@ -21,7 +21,7 @@ FORBIDDEN = {
 
 
 def _normalise(name: str) -> str:
-    return re.sub(r"[_.]", "-", name.lower())
+    return re.sub(r"[-_.]+", "-", name.lower())
 
 
 def _package_names(path: Path) -> list[str]:
