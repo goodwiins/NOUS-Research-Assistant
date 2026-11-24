@@ -42,6 +42,13 @@ def pod_specs(
 
 class DeploymentConsistency(unittest.TestCase):
     def test_migration_completes_before_all_new_consumers(self) -> None:
+        application_path = CHART.parents[1] / "argocd/applications/aws-dev.yaml"
+        application = yaml.safe_load(application_path.read_text())
+        self.assertNotIn(
+            "ApplyOutOfSyncOnly=true",
+            application["spec"]["syncPolicy"]["syncOptions"],
+            "release retries must check the health of an already-applied migration Job",
+        )
         docs = render()
         jobs = [
             d

@@ -6,11 +6,13 @@ name: Helm Validate
 on:
   pull_request:
     paths:
+      - "infrastructure/argocd/applications/aws-dev.yaml"
       - "infrastructure/helm/knowledge-graph-analytics/**"
       - ".github/workflows/helm-validate.yml"
   push:
     branches: [develop, main]
     paths:
+      - "infrastructure/argocd/applications/aws-dev.yaml"
       - "infrastructure/helm/knowledge-graph-analytics/**"
       - ".github/workflows/helm-validate.yml"
   workflow_dispatch:
