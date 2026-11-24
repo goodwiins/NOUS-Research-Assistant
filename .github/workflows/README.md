@@ -61,7 +61,6 @@ actually required by the repository.
 | `agent-eval.yml` | Weekly schedule (Monday 06:00 UTC) or manual dispatch | LangSmith golden-set regression sweep against the compiled agent graph. Runs on a `[self-hosted, linux]` runner whose current status is unverified (see [the runner page](../../infrastructure/runner/README.md)). |
 | `opencode.yml` | `/oc` or `/opencode` issue or review comments from an owner, member or collaborator | Runs the opencode assistant; uses `OPENCODE_API_KEY`. |
 | `secret-scan.yml` | Pull request or push on `main`/`develop`, or manual dispatch | Gitleaks scan of the repository history. |
-| `trigger-deploy.yml` | Push to `main` touching `src/trigger/**`, `trigger.config.ts` or `package.json` | Deploys Trigger.dev tasks with secrets from Infisical. Not part of the AWS dev release path. |
 
 The frontend deploys separately through Vercel. Its draft claims/release
 controls discover available operations from the deployed backend schema and
@@ -73,8 +72,8 @@ see the [chart contract](../../infrastructure/helm/knowledge-graph-analytics/REA
 See also [the secrets reference](../SECRETS_SETUP.md).
 
 The retired manual staging/production deploy paths and duplicate deployment
-workflow tree have been removed. `trigger-deploy.yml` remains unchanged; its
-Trigger.dev production deployment is not part of the AWS dev release path.
+workflow tree have been removed. Trigger.dev tasks are deployed by hand with
+`pnpm trigger:deploy`, outside CI and the AWS dev release path.
 
 ## Change-based PR checks
 
