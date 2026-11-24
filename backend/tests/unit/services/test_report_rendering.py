@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import io
 import json
@@ -449,3 +450,258 @@ def test_bridged_provider_cluster_uses_retained_bibliography() -> None:
     assert source["doi"] == "10.5555/bridge"
     assert source["publication_year"] == 2022
     assert source["journal"] == "Bridge Journal"
+
+
+_EVIDENCE_BY_LEVEL = {
+    "full_text": "e0001",
+    "abstract": "e0002",
+    "metadata_only": "e0003",
+    "workspace_document": "e0004",
+}
+
+
+def _brief_context(
+    claims: list[dict[str, Any]],
+    *,
+    verification: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Minimal contract-v1 context with one evidence item per evidence level."""
+    sources = [
+        {
+            "source_id": f"source{evidence_id}",
+            "title": f"Source {evidence_id}",
+            "evidence_level": level,
+        }
+        for level, evidence_id in _EVIDENCE_BY_LEVEL.items()
+    ]
+    extractions = [
+        {
+            "source_id": f"source{evidence_id}",
+            "part_id": "p0001",
+            "data": {"level": level},
+            "evidence": [
+                {
+                    "evidence_id": evidence_id,
+                    "part_id": "p0001",
+                    "pointer": "body:0-8",
+                    "quote": f"Quote {evidence_id}",
+                }
+            ],
+        }
+        for level, evidence_id in _EVIDENCE_BY_LEVEL.items()
+    ]
+    return {
+        "contract_version": 1,
+        "query": "Does the brief flag weak evidence",
+        "method": "Bounded provider search",
+        "source_records": sources,
+        "screening": [
+            {"source_id": source["source_id"], "included": True, "reason": "Fits"}
+            for source in sources
+        ],
+        "extractions": extractions,
+        "synthesis": {"sections": [{"heading": "Results", "claims": claims}]},
+        "verification": verification or {"passed": True, "claims": []},
+    }
+
+
+def _claim(text: str, *references: tuple[str, str]) -> dict[str, Any]:
+    return {
+        "claim_id": text.replace(" ", "_"),
+        "claim_text": text,
+        "evidence": [
+            {"evidence_id": evidence_id, "relation": relation}
+            for evidence_id, relation in references
+        ],
+    }
+
+
+def _finding_line(markdown: str, text: str) -> str:
+    return next(line for line in markdown.splitlines() if text in line)
+
+
+def test_markdown_brief_puts_findings_and_uncertainty_before_audit_appendix() -> None:
+    report = build_report(
+        _brief_context(
+            [_claim("Full claim", (_EVIDENCE_BY_LEVEL["full_text"], "supports"))]
+        )
+    )
+
+    markdown = render_markdown(report)
+
+    headings = [
+        "**Verification:**",
+        "\n## Research question\n",
+        "\n## Findings\n",
+        "\n## Uncertainty\n",
+        "\n## Method and coverage\n",
+        "\n## Limitations\n",
+        "\n## References\n",
+        "\n## Provenance\n",
+        "\n## Screening\n",
+        "\n## Extracted evidence\n",
+    ]
+    positions = [markdown.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    assert "## Query and method" not in markdown
+    assert "## Source coverage" not in markdown
+    method_section = markdown.split("\n## Method and coverage\n", 1)[1].split(
+        "\n## Limitations\n", 1
+    )[0]
+    assert "Bounded provider search" in method_section
+    assert "- Exhaustive search:" in method_section
+    assert "- Partial provider failures:" in method_section
+    assert "- Sources returned: 4" in method_section
+
+
+def test_markdown_brief_marks_abstract_only_finding() -> None:
+    report = build_report(
+        _brief_context(
+            [
+                _claim(
+                    "Abstract claim",
+                    (_EVIDENCE_BY_LEVEL["abstract"], "supports"),
+                    (_EVIDENCE_BY_LEVEL["metadata_only"], "supports"),
+                )
+            ]
+        )
+    )
+
+    markdown = render_markdown(report)
+
+    assert _finding_line(markdown, "Abstract claim") == (
+        "- **Abstract-only evidence:** Abstract claim "
+        "[`e0002` (supports), `e0003` (supports)]"
+    )
+    assert (
+        "- Findings supported only by abstract or metadata evidence: 1 of 1" in markdown
+    )
+    assert "- Claims not confirmed by verification: 0" in markdown
+
+
+def test_markdown_brief_marks_metadata_only_and_unknown_evidence() -> None:
+    report = build_report(
+        _brief_context(
+            [
+                _claim(
+                    "Metadata claim", (_EVIDENCE_BY_LEVEL["metadata_only"], "supports")
+                ),
+                _claim("Dangling claim", ("e9999", "supports")),
+            ]
+        )
+    )
+
+    # A later duplicate id cannot upgrade the first recorded evidence level.
+    report["evidence"].append(
+        {
+            "evidence_id": _EVIDENCE_BY_LEVEL["metadata_only"],
+            "evidence_level": "full_text",
+        }
+    )
+
+    markdown = render_markdown(report)
+
+    assert _finding_line(markdown, "Metadata claim").startswith(
+        "- **Metadata-only evidence:** Metadata claim ["
+    )
+    assert _finding_line(markdown, "Dangling claim").startswith(
+        "- **Metadata-only evidence:** Dangling claim ["
+    )
+    assert (
+        "- Findings supported only by abstract or metadata evidence: 2 of 2" in markdown
+    )
+
+
+def test_markdown_brief_leaves_full_text_and_workspace_findings_unmarked() -> None:
+    report = build_report(
+        _brief_context(
+            [
+                _claim(
+                    "Mixed claim",
+                    (_EVIDENCE_BY_LEVEL["abstract"], "supports"),
+                    (_EVIDENCE_BY_LEVEL["full_text"], "supports"),
+                ),
+                _claim(
+                    "Workspace claim",
+                    (_EVIDENCE_BY_LEVEL["workspace_document"], "supports"),
+                ),
+                _claim(
+                    "Contradicted abstract claim",
+                    (_EVIDENCE_BY_LEVEL["full_text"], "supports"),
+                    (_EVIDENCE_BY_LEVEL["abstract"], "contradicts"),
+                ),
+                _claim(
+                    "Unsupported claim",
+                    (_EVIDENCE_BY_LEVEL["abstract"], "contradicts"),
+                ),
+            ]
+        )
+    )
+
+    markdown = render_markdown(report)
+
+    assert _finding_line(markdown, "Mixed claim") == (
+        "- Mixed claim [`e0002` (supports), `e0001` (supports)]"
+    )
+    assert _finding_line(markdown, "Workspace claim") == (
+        "- Workspace claim [`e0004` (supports)]"
+    )
+    assert _finding_line(markdown, "Contradicted abstract claim") == (
+        "- Contradicted abstract claim [`e0001` (supports), `e0002` (contradicts)]"
+    )
+    assert _finding_line(markdown, "Unsupported claim") == (
+        "- Unsupported claim [`e0002` (contradicts)]"
+    )
+    assert "-only evidence:**" not in markdown
+    assert (
+        "- Findings supported only by abstract or metadata evidence: 0 of 4" in markdown
+    )
+
+
+def test_unverified_markdown_brief_keeps_banner_and_failed_checks_on_top() -> None:
+    report = build_report(
+        _brief_context(
+            [_claim("Abstract claim", (_EVIDENCE_BY_LEVEL["abstract"], "supports"))],
+            verification={
+                "passed": False,
+                "claims": [
+                    {
+                        "claim_id": "Abstract_claim",
+                        "status": "contradicted",
+                        "reason": "Quote disagrees",
+                        "evidence_ids": [_EVIDENCE_BY_LEVEL["abstract"]],
+                    }
+                ],
+            },
+        )
+    )
+
+    markdown = render_markdown(report)
+
+    assert report["final_status"] == "unverified"
+    question = markdown.index("\n## Research question\n")
+    assert markdown.index("> **UNVERIFIED.**") < question
+    assert markdown.index("\n## Failed verification checks\n") < question
+    assert (
+        markdown.index("- `Abstract\\_claim` (contradicted): Quote disagrees.")
+        < question
+    )
+    assert "- Claims not confirmed by verification: 1" in markdown
+
+
+def test_render_markdown_is_pure_and_deterministic() -> None:
+    report = build_report(
+        _brief_context(
+            [
+                _claim("Abstract claim", (_EVIDENCE_BY_LEVEL["abstract"], "supports")),
+                _claim("Full claim", (_EVIDENCE_BY_LEVEL["full_text"], "supports")),
+            ]
+        )
+    )
+    snapshot = copy.deepcopy(report)
+
+    first = render_markdown(report)
+    second = render_markdown(report)
+
+    assert first == second
+    assert report == snapshot
