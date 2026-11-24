@@ -1,19 +1,19 @@
 import React, { useState } from 'react';
 import {
-  DocumentTextIcon,
-  PhotoIcon,
-  MusicalNoteIcon,
-  VideoCameraIcon,
-  ClockIcon,
-  CheckCircleIcon,
-  XCircleIcon,
-  EyeIcon,
-  TrashIcon,
-  EllipsisHorizontalIcon,
-  ArrowDownTrayIcon,
-  InformationCircleIcon,
-  CheckIcon,
-} from '@heroicons/react/24/outline';
+  FileText,
+  ImageIcon,
+  Music,
+  Video,
+  Clock,
+  CheckCircle,
+  XCircle,
+  Eye,
+  Trash2,
+  MoreHorizontal,
+  Download,
+  Info,
+  Check,
+} from 'lucide-react';
 import { Document } from '@/types';
 import { cn } from '@/lib/utils';
 import { ProcessingStatus } from './ProcessingStatus';
@@ -49,35 +49,33 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
     const iconClass = 'h-8 w-8';
     switch (document.file_type) {
       case 'pdf':
-        return <DocumentTextIcon className={cn(iconClass, 'text-red-600')} />;
+        return <FileText className={cn(iconClass, 'text-red-600')} />;
       case 'txt':
-        return <DocumentTextIcon className={cn(iconClass, 'text-blue-600')} />;
+        return <FileText className={cn(iconClass, 'text-blue-600')} />;
       case 'jpg':
       case 'png':
-        return <PhotoIcon className={cn(iconClass, 'text-green-600')} />;
+        return <ImageIcon className={cn(iconClass, 'text-green-600')} />;
       case 'mp3':
-        return <MusicalNoteIcon className={cn(iconClass, 'text-purple-600')} />;
+        return <Music className={cn(iconClass, 'text-purple-600')} />;
       case 'mp4':
-        return <VideoCameraIcon className={cn(iconClass, 'text-orange-600')} />;
+        return <Video className={cn(iconClass, 'text-orange-600')} />;
       default:
-        return (
-          <DocumentTextIcon className={cn(iconClass, 'text-foreground')} />
-        );
+        return <FileText className={cn(iconClass, 'text-foreground')} />;
     }
   };
 
   const getStatusIcon = () => {
     switch (document.processing_status) {
       case 'queued':
-        return <ClockIcon className="h-4 w-4 text-yellow-600" />;
+        return <Clock className="h-4 w-4 text-yellow-600" />;
       case 'processing':
         return (
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
         );
       case 'indexed':
-        return <CheckCircleIcon className="h-4 w-4 text-green-600" />;
+        return <CheckCircle className="h-4 w-4 text-green-600" />;
       case 'failed':
-        return <XCircleIcon className="h-4 w-4 text-red-600" />;
+        return <XCircle className="h-4 w-4 text-red-600" />;
       default:
         return null;
     }
@@ -173,7 +171,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
           )}
           aria-label={selected ? 'Deselect document' : 'Select document'}
         >
-          {selected && <CheckIcon className="h-3.5 w-3.5" />}
+          {selected && <Check className="h-3.5 w-3.5" />}
         </button>
       </div>
 
@@ -249,7 +247,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
             {/* Actions Menu */}
             <div className="relative">
               <IconButton
-                icon={<EllipsisHorizontalIcon className="h-5 w-5" />}
+                icon={<MoreHorizontal className="h-5 w-5" />}
                 label="More options"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -277,7 +275,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                         }}
                         className="flex items-center w-full px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                       >
-                        <EyeIcon className="h-4 w-4 mr-2 text-muted-foreground" />
+                        <Eye className="h-4 w-4 mr-2 text-muted-foreground" />
                         Preview
                       </button>
                       <button
@@ -288,7 +286,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                         }}
                         className="flex items-center w-full px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                       >
-                        <ArrowDownTrayIcon className="h-4 w-4 mr-2 text-muted-foreground" />
+                        <Download className="h-4 w-4 mr-2 text-muted-foreground" />
                         Download
                       </button>
                       <button
@@ -299,7 +297,7 @@ export const DocumentCard: React.FC<DocumentCardProps> = ({
                         }}
                         className="flex items-center w-full px-3 py-2 text-sm text-destructive hover:bg-destructive/10 transition-colors"
                       >
-                        <TrashIcon className="h-4 w-4 mr-2" />
+                        <Trash2 className="h-4 w-4 mr-2" />
                         Delete
                       </button>
                     </div>

@@ -1,21 +1,21 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  PlayIcon,
-  PauseIcon,
-  SpeakerWaveIcon,
-  SpeakerXMarkIcon,
-  ArrowsPointingOutIcon,
-  ArrowsPointingInIcon,
-  DocumentTextIcon,
-  PhotoIcon,
-  MusicalNoteIcon,
-  VideoCameraIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  MagnifyingGlassPlusIcon,
-  MagnifyingGlassMinusIcon,
-  ArrowDownTrayIcon,
-} from '@heroicons/react/24/outline';
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  Maximize2,
+  Minimize2,
+  FileText,
+  ImageIcon,
+  Music,
+  Video,
+  ChevronLeft,
+  ChevronRight,
+  ZoomIn,
+  ZoomOut,
+  Download,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -381,16 +381,16 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
     switch (document.file_type) {
       case 'pdf':
       case 'txt':
-        return <DocumentTextIcon className="h-6 w-6" aria-hidden="true" />;
+        return <FileText className="h-6 w-6" aria-hidden="true" />;
       case 'jpg':
       case 'png':
-        return <PhotoIcon className="h-6 w-6" aria-hidden="true" />;
+        return <ImageIcon className="h-6 w-6" aria-hidden="true" />;
       case 'mp3':
-        return <MusicalNoteIcon className="h-6 w-6" aria-hidden="true" />;
+        return <Music className="h-6 w-6" aria-hidden="true" />;
       case 'mp4':
-        return <VideoCameraIcon className="h-6 w-6" aria-hidden="true" />;
+        return <Video className="h-6 w-6" aria-hidden="true" />;
       default:
-        return <DocumentTextIcon className="h-6 w-6" aria-hidden="true" />;
+        return <FileText className="h-6 w-6" aria-hidden="true" />;
     }
   };
 
@@ -462,7 +462,7 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
           <div className="flex items-center space-x-2">
             {allowDownload && (
               <Button variant="outline" size="sm" onClick={handleDownload}>
-                <ArrowDownTrayIcon
+                <Download
                   className="h-4 w-4 mr-2"
                   aria-hidden="true"
                 />
@@ -482,12 +482,12 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                 }
               >
                 {isFullscreen ? (
-                  <ArrowsPointingInIcon
+                  <Minimize2
                     className="h-4 w-4"
                     aria-hidden="true"
                   />
                 ) : (
-                  <ArrowsPointingOutIcon
+                  <Maximize2
                     className="h-4 w-4"
                     aria-hidden="true"
                   />
@@ -524,7 +524,7 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                       onClick={goToPreviousPage}
                       disabled={currentPage === 1}
                     >
-                      <ChevronLeftIcon
+                      <ChevronLeft
                         className="h-4 w-4 mr-2"
                         aria-hidden="true"
                       />
@@ -540,7 +540,7 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                       disabled={currentPage === totalPages}
                     >
                       Next
-                      <ChevronRightIcon
+                      <ChevronRight
                         className="h-4 w-4 ml-2"
                         aria-hidden="true"
                       />
@@ -568,7 +568,7 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                     onClick={() => handleImageZoom(0.1)}
                     aria-label="Zoom in"
                   >
-                    <MagnifyingGlassPlusIcon
+                    <ZoomIn
                       className="h-4 w-4"
                       aria-hidden="true"
                     />
@@ -579,7 +579,7 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                     onClick={() => handleImageZoom(-0.1)}
                     aria-label="Zoom out"
                   >
-                    <MagnifyingGlassMinusIcon
+                    <ZoomOut
                       className="h-4 w-4"
                       aria-hidden="true"
                     />
@@ -632,7 +632,7 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                 <div className="max-w-2xl mx-auto">
                   {/* Audio Visualizer */}
                   <div className="bg-muted h-32 rounded-lg mb-6 flex items-center justify-center">
-                    <MusicalNoteIcon
+                    <Music
                       className="h-12 w-12 text-muted-foreground animate-pulse"
                       aria-hidden="true"
                     />
@@ -648,9 +648,9 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                         aria-label={isPlaying ? 'Pause' : 'Play'}
                       >
                         {isPlaying ? (
-                          <PauseIcon className="h-4 w-4" aria-hidden="true" />
+                          <Pause className="h-4 w-4" aria-hidden="true" />
                         ) : (
-                          <PlayIcon className="h-4 w-4" aria-hidden="true" />
+                          <Play className="h-4 w-4" aria-hidden="true" />
                         )}
                       </Button>
                       <div className="flex-1">
@@ -676,12 +676,12 @@ export const MultimodalViewer: React.FC<MultimodalViewerProps> = ({
                           aria-label={isMuted ? 'Unmute' : 'Mute'}
                         >
                           {isMuted ? (
-                            <SpeakerXMarkIcon
+                            <VolumeX
                               className="h-4 w-4"
                               aria-hidden="true"
                             />
                           ) : (
-                            <SpeakerWaveIcon
+                            <Volume2
                               className="h-4 w-4"
                               aria-hidden="true"
                             />

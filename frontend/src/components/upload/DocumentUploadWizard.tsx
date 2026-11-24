@@ -1,19 +1,19 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
-  CloudArrowUpIcon,
-  DocumentIcon,
-  CheckCircleIcon,
-  ExclamationTriangleIcon,
-  XMarkIcon,
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  EyeIcon,
-  ClockIcon,
-  DocumentTextIcon,
-  PhotoIcon,
-  MusicalNoteIcon,
-  VideoCameraIcon,
-} from '@heroicons/react/24/outline';
+  UploadCloud,
+  FileIcon,
+  CheckCircle,
+  AlertTriangle,
+  X,
+  ArrowLeft,
+  ArrowRight,
+  Eye,
+  Clock,
+  FileText,
+  ImageIcon,
+  Music,
+  Video,
+} from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { cn } from '@/lib/utils';
 import { useDocumentUpload } from '@/hooks/upload/useDocumentUpload';
@@ -354,7 +354,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
   const validationErrorBanner = validationErrors.length > 0 ? (
         <div role="alert" className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
           <div className="flex items-start space-x-3">
-            <ExclamationTriangleIcon className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
               <h4 className="text-sm font-medium text-destructive">
                 Upload Validation Errors
@@ -408,7 +408,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                 )}
               >
                 {currentStepIndex(step) < currentStepIndex(currentStep) ? (
-                  <CheckCircleIcon className="w-4 h-4" />
+                  <CheckCircle className="w-4 h-4" />
                 ) : (
                   index + 1
                 )}
@@ -447,7 +447,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
 
                 <div className="flex flex-col items-center space-y-4">
                   <div className="p-6 bg-primary/10 rounded-full">
-                    <CloudArrowUpIcon className="h-12 w-12 text-primary" />
+                    <UploadCloud className="h-12 w-12 text-primary" />
                   </div>
 
                   <div>
@@ -473,7 +473,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                       fileInputRef.current?.click();
                     }}
                   >
-                    <DocumentIcon className="h-4 w-4 mr-2" />
+                    <FileIcon className="h-4 w-4 mr-2" />
                     Browse Files
                   </Button>
                 </div>
@@ -524,7 +524,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                               aria-label="Preview file"
                               onClick={() => setShowPreview(entry.preview!)}
                             >
-                              <EyeIcon className="h-4 w-4" />
+                              <Eye className="h-4 w-4" />
                             </Button>
                           )}
                           <Button
@@ -534,7 +534,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                             onClick={() => removeFile(entry.id)}
                             className="text-muted-foreground hover:text-destructive"
                           >
-                            <XMarkIcon className="h-4 w-4" />
+                            <X className="h-4 w-4" />
                           </Button>
                         </div>
                       </div>
@@ -592,7 +592,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                           aria-label="Preview file"
                           onClick={() => setShowPreview(entry.preview!)}
                         >
-                          <EyeIcon className="h-4 w-4" />
+                          <Eye className="h-4 w-4" />
                         </Button>
                       )}
                       <Button
@@ -602,7 +602,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                         onClick={() => removeFile(entry.id)}
                         className="text-muted-foreground hover:text-destructive"
                       >
-                        <XMarkIcon className="h-4 w-4" />
+                        <X className="h-4 w-4" />
                       </Button>
                     </div>
                   </div>
@@ -734,7 +734,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
               {isUploading && (
                 <div className="flex items-center justify-center space-x-4 text-sm text-muted-foreground">
                   <div className="flex items-center space-x-1">
-                    <ClockIcon className="h-4 w-4" />
+                    <Clock className="h-4 w-4" />
                     <span>{estimatedTimeRemaining}</span>
                   </div>
                   <div className="flex items-center space-x-1">
@@ -748,7 +748,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
           {currentStep === 'complete' && (
             <div className="space-y-6 text-center">
               <div className="p-8">
-                <CheckCircleIcon className="h-16 w-16 text-(--nous-terra) mx-auto mb-4" />
+                <CheckCircle className="h-16 w-16 text-(--nous-terra) mx-auto mb-4" />
                 <h3 className="text-xl font-semibold text-foreground mb-2">
                   Upload Complete!
                 </h3>
@@ -792,7 +792,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                 onClick={handlePrevious}
                 disabled={hasActiveUploads}
               >
-                <ArrowLeftIcon className="h-4 w-4 mr-2" />
+                <ArrowLeft className="h-4 w-4 mr-2" />
                 Previous
               </Button>
             )}
@@ -812,7 +812,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                 {currentStep === 'complete' ? 'Done' : (
                   <>
                     Next
-                    <ArrowRightIcon className="h-4 w-4 ml-2" />
+                    <ArrowRight className="h-4 w-4 ml-2" />
                   </>
                 )}
               </Button>
