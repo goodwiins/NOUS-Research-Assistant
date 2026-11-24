@@ -209,9 +209,23 @@ class DeploymentConsistency(unittest.TestCase):
         # graph); it reaches the broker through the container's REDIS_URL.
         self.assertNotIn("src.tasks", readiness)
         self.assertIn('-b "$REDIS_URL"', readiness)
-        self.assertGreaterEqual(
-            worker["readinessProbe"]["timeoutSeconds"],
-            worker["livenessProbe"]["timeoutSeconds"],
+        self.assertIn("--timeout=30", readiness)
+        self.assertEqual(
+            {
+                key: worker["readinessProbe"][key]
+                for key in (
+                    "initialDelaySeconds",
+                    "periodSeconds",
+                    "timeoutSeconds",
+                    "failureThreshold",
+                )
+            },
+            {
+                "initialDelaySeconds": 30,
+                "periodSeconds": 60,
+                "timeoutSeconds": 45,
+                "failureThreshold": 3,
+            },
         )
         beat = containers["celery-beat"]
         probe = " ".join(beat["livenessProbe"]["exec"]["command"])

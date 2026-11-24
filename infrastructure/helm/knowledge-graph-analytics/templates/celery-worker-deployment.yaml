@@ -129,9 +129,9 @@ spec:
               command:
                 - sh
                 - -c
-                - celery -b "$REDIS_URL" inspect ping -d celery@$HOSTNAME --timeout={{ .Values.celeryWorker.readinessProbe.commandTimeout | default 60 }}
+                - celery -b "$REDIS_URL" inspect ping -d celery@$HOSTNAME --timeout={{ .Values.celeryWorker.readinessProbe.commandTimeout | default 30 }}
             initialDelaySeconds: {{ .Values.celeryWorker.readinessProbe.initialDelaySeconds | default 30 }}
             periodSeconds: {{ .Values.celeryWorker.readinessProbe.periodSeconds | default 60 }}
-            timeoutSeconds: {{ .Values.celeryWorker.readinessProbe.timeoutSeconds | default 90 }}
+            timeoutSeconds: {{ .Values.celeryWorker.readinessProbe.timeoutSeconds | default 45 }}
             failureThreshold: {{ .Values.celeryWorker.readinessProbe.failureThreshold | default 3 }}
 {{- end }}

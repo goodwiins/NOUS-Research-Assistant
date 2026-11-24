@@ -101,7 +101,7 @@ broker:
   `src/tasks/__init__.py`, which loads the task modules, the SQLAlchemy models
   and the DB engine. Measured locally, one probe process took about 13 s and
   about 750 MB of resident memory.
-- Readiness (`celeryWorker.readinessProbe.*`, default 60 s ping timeout, 90 s
+- Readiness (`celeryWorker.readinessProbe.*`, default 30 s ping timeout, 45 s
   probe timeout, every 60 s, 3 failures) uses `-b "$REDIS_URL"` and imports no
   application code: about 0.7 s and 70 MB for the same ping. It gates rollout
   availability and the worker PDB. `REDIS_URL` is the variable the worker
