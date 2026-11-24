@@ -35,11 +35,12 @@ spec:
       prune: true
       selfHeal: true
       allowEmpty: false
+    # Full release syncs include the wave-1 Job even when a prior attempt
+    # already applied its manifest. Its completion gates the consumers.
     syncOptions:
       - CreateNamespace=true
       - PrunePropagationPolicy=foreground
       - PruneLast=true
-      - ApplyOutOfSyncOnly=true
       - RespectIgnoreDifferences=true
       # EKS does not have KEDA or cert-manager CRDs yet (Task 3 addon gap):
       # without this, their absence invalidates the WHOLE sync (ArgoCD
