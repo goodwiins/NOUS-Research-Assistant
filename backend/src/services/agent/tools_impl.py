@@ -21,6 +21,30 @@ from uuid import UUID
 _ARXIV_VERSION_RE = re.compile(r"v\d+$")
 
 
+def coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
+    """Coerce a model-supplied count argument to an int clamped to [lo, hi].
+
+    Accepts an int, an integral float and a numeric string; anything else
+    (bool, None, a non-integral float, a non-numeric string) yields
+    ``default``. Raw ``min(args.get(...), N)`` raised TypeError on a string,
+    failing an otherwise valid tool call and counting toward MAX_ERRORS.
+    """
+    if isinstance(value, bool):
+        coerced = default
+    elif isinstance(value, int):
+        coerced = value
+    elif isinstance(value, float) and value.is_integer():
+        coerced = int(value)
+    elif isinstance(value, str):
+        try:
+            coerced = int(value.strip())
+        except ValueError:
+            coerced = default
+    else:
+        coerced = default
+    return max(lo, min(coerced, hi))
+
+
 def _arxiv_paper_version(paper_id: str) -> int:
     """Trailing ``vN`` as an int; unversioned IDs sort lowest (0)."""
     match = re.search(r"v(\d+)$", paper_id)
@@ -2963,7 +2987,7 @@ async def _search_arxiv_once(
     # Hard cap at 5 papers + 250-char abstracts. Trace showed 10×500-char
     # results = 8087 chars feeding into the synthesis LLM call and triggering
     # 1536 reasoning tokens (~46s). Smaller payload = faster synthesis.
-    max_results = max(1, min(args.get("max_results", 5), max_results_cap))
+    max_results = coerce_int(args.get("max_results"), 5, 1, max_results_cap)
     categories = args.get("categories")
 
     # Recency window: default to last 12 months so "find recent X" actually
@@ -3426,7 +3450,7 @@ async def _tool_search_documents(
         return {"error": "Authentication required"}
 
     query = args.get("query", "")
-    max_results = max(1, min(args.get("max_results", 10), 50))
+    max_results = coerce_int(args.get("max_results"), 10, 1, 50)
 
     if not query:
         return {"error": "Query is required"}
@@ -5051,7 +5075,7 @@ async def _tool_search_knowledge_graph(
 
     query = args.get("query", "")
     entity_types = args.get("entity_types")
-    limit = min(args.get("limit", 20), 50)
+    limit = coerce_int(args.get("limit"), 20, 1, 50)
 
     if not query:
         return {"error": "query is required"}
@@ -5114,7 +5138,7 @@ async def _tool_explore_entity_neighborhood(
 
     entity_id = args.get("entity_id", "")
     max_depth = max(1, min(args.get("max_depth", 2), 3))
-    limit = max(1, min(args.get("limit", 30), 50))
+    limit = coerce_int(args.get("limit"), 30, 1, 50)
 
     if not entity_id:
         return {"error": "entity_id is required"}
@@ -5789,6 +5813,13 @@ async def _tool_execute_code(
 # ---------------------------------------------------------------------------
 
 
+# GOO-713: bounds for the connector fan-out in search_external_database.
+# The deadline sits under _nodes_tools.TOOL_TIMEOUT_SECONDS (30s) so partial
+# results come back before the outer timeout would discard everything.
+_EXTERNAL_SEARCH_CONCURRENCY = 4
+_EXTERNAL_SEARCH_TIMEOUT_SECONDS = 25.0
+
+
 async def _tool_search_external_database(args: Dict[str, Any]) -> Dict[str, Any]:
     """Search external databases via the connector registry."""
     import asyncio
@@ -5802,7 +5833,7 @@ async def _tool_search_external_database(args: Dict[str, Any]) -> Dict[str, Any]
 
     connector_name = args.get("connector")
     domain_name = args.get("domain")
-    max_results = max(1, min(args.get("max_results", 5), 20))
+    max_results = coerce_int(args.get("max_results"), 5, 1, 20)
     raw_filters = args.get("filters")
     if raw_filters is not None and not isinstance(raw_filters, dict):
         return {
@@ -5856,21 +5887,53 @@ async def _tool_search_external_database(args: Dict[str, Any]) -> Dict[str, Any]
                     "error_category": "unsupported_connector_filter",
                 }
 
+        # GOO-713: an unscoped search fans out to every available connector.
+        # Bound it: at most _EXTERNAL_SEARCH_CONCURRENCY connectors in flight,
+        # and an overall deadline under the 30s tool timeout so a slow
+        # connector cannot cost the whole call. Connectors still running at
+        # the deadline are cancelled and reported, never silently dropped.
+        semaphore = asyncio.Semaphore(_EXTERNAL_SEARCH_CONCURRENCY)
+
+        async def _bounded_search(
+            connector: Any, connector_filters: Dict[str, Any]
+        ) -> Any:
+            async with semaphore:
+                return await connector.search(
+                    query,
+                    max_results=max_results,
+                    filters=connector_filters,
+                )
+
         tasks = [
-            connector.search(
-                query,
-                max_results=max_results,
-                filters=connector_filters,
-            )
+            asyncio.ensure_future(_bounded_search(connector, connector_filters))
             for connector, connector_filters in zip(targets, validated_filters)
         ]
-        all_results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            _done, pending = await asyncio.wait(
+                tasks, timeout=_EXTERNAL_SEARCH_TIMEOUT_SECONDS
+            )
+        finally:
+            # Cancel stragglers at the deadline, and every search if this
+            # call is itself cancelled (asyncio.wait, unlike gather, does not).
+            for task in tasks:
+                task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
         results = []
         connectors_searched = []
+        unfinished_connectors = []
         failures = 0
-        for connector, result in zip(targets, all_results):
+        for connector, task in zip(targets, tasks):
+            if task in pending:
+                unfinished_connectors.append(connector.info.name)
+                continue
             connectors_searched.append(connector.info.name)
+            result: Any = (
+                asyncio.CancelledError()
+                if task.cancelled()
+                else task.exception() or task.result()
+            )
             if isinstance(result, BaseException):
                 logger.warning(
                     "connector_search_failed: connector=%s error=%s",
@@ -5905,13 +5968,29 @@ async def _tool_search_external_database(args: Dict[str, Any]) -> Dict[str, Any]
                 "error": f"All {len(targets)} connector(s) failed",
                 "connectors_searched": connectors_searched,
             }
+        if failures + len(unfinished_connectors) == len(targets):
+            # Nothing succeeded before the deadline: an error, not an empty
+            # (or "partial") result that reads as a completed search.
+            return {
+                "error": "No connector finished the search in time",
+                "connectors_searched": connectors_searched,
+                "unfinished_connectors": unfinished_connectors,
+            }
 
-        return {
+        payload: Dict[str, Any] = {
             "query": query,
             "total_results": len(results),
             "results": results,
             "connectors_searched": connectors_searched,
         }
+        if unfinished_connectors:
+            payload["partial"] = True
+            payload["unfinished_connectors"] = unfinished_connectors
+            payload["note"] = (
+                "Partial results: some connectors did not finish in time and "
+                "were not searched."
+            )
+        return payload
     except Exception as exc:
         logger.exception("external_db_search_failed")
         return tool_error_payload("search_external_database", exc)

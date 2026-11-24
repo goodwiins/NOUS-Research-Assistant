@@ -855,7 +855,18 @@ TOOL_REGISTRY = ToolRegistry(
             intents=frozenset({AgentIntent.GENERAL}),
             subgraphs=frozenset({AgentSubgraph.WRITING}),
             subgraph_positions=((AgentSubgraph.WRITING, 11),),
-            policy_tags=frozenset({ToolPolicyTag.CONTEXT_FREE}),
+            # GOO-713: NO_OUTER_RETRY so an outer timeout does not re-run the
+            # whole connector fan-out; the handler has its own 25s deadline and
+            # returns marked partial results itself. The registry only allows
+            # NO_OUTER_RETRY on SLOW or DESTRUCTIVE tools, so SLOW too; the
+            # handler deadline, not the slow tier, bounds the call.
+            policy_tags=frozenset(
+                {
+                    ToolPolicyTag.CONTEXT_FREE,
+                    ToolPolicyTag.SLOW,
+                    ToolPolicyTag.NO_OUTER_RETRY,
+                }
+            ),
         ),
         ToolDescriptor(
             name="list_external_databases",

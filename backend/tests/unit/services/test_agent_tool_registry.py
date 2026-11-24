@@ -534,6 +534,7 @@ class TestProductionToolRegistryParity:
             "compare_documents",
             "search_arxiv",
             "execute_code",
+            "search_external_database",
         }
         assert {
             descriptor.name
@@ -549,4 +550,5 @@ class TestProductionToolRegistryParity:
             "revise_draft",
             "execute_code",
             "forget_memory",
+            "search_external_database",
         }
