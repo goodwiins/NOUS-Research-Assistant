@@ -1,6 +1,6 @@
 """PostgreSQL index helpers for Alembic migrations."""
 
-from alembic import op
+import alembic.op as op
 
 _USER_MESSAGE_INDEX = "uq_chat_messages_thread_client_msg_user"
 
