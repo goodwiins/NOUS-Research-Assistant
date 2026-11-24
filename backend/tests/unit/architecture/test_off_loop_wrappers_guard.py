@@ -24,11 +24,17 @@ has a planted test, ``_EVASIONS``): aliased imports of the offload helpers,
 ``anyio.to_thread.run_sync`` however imported, ``<executor>.submit``, a
 ``partial(...)`` (or any value) bound to a name and offloaded through it, and
 a Session parameter known only by ``Depends(get_db_sync)``.
+
+GOO-789 follows calls into project functions that forward a parameter to an
+offload helper (``async def _offload(fn, *a): return await
+asyncio.to_thread(fn, *a)``), wrappers of wrappers included, and judges the
+call site ``_offload(db.commit)`` as the offload it wraps. The known limits
+of that resolution are listed above ``_Forwarder`` and pinned by a test.
 """
 
 import ast
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple
 
 import pytest
 
@@ -490,17 +496,34 @@ def _refs_through_names(
     return found
 
 
+def _work_args(call: ast.Call) -> List[ast.expr]:
+    """What an offload call hands its thread: the callable and its arguments,
+    not the guarded helper's own keywords."""
+    return _offload_args(call) + [
+        kw.value for kw in call.keywords if kw.arg not in _HELPER_KWARGS
+    ]
+
+
 def _touched_sessions(
     call: ast.Call,
     fn: ast.AST,
     cls: Optional[ast.ClassDef],
     aliases: Optional[Dict[str, str]] = None,
 ) -> Set[str]:
+    return _touched_by(_work_args(call), fn, cls, aliases)
+
+
+def _touched_by(
+    work: List[ast.expr],
+    fn: ast.AST,
+    cls: Optional[ast.ClassDef],
+    aliases: Optional[Dict[str, str]] = None,
+) -> Set[str]:
+    """Sessions that ``work`` (the callable first, then its arguments) takes
+    into the thread."""
     names = _sync_session_names(fn, aliases)
-    args = _offload_args(call)
-    work = args + [kw.value for kw in call.keywords if kw.arg not in _HELPER_KWARGS]
     touched = _refs_through_names(work, names, _bound_values(fn))
-    target = args[0] if args else None
+    target = work[0] if work else None
     if isinstance(target, ast.Name):  # a nested def closing over the Session
         for node in ast.walk(fn):
             if (
@@ -524,28 +547,295 @@ def _touched_sessions(
     return touched
 
 
+# ---- GOO-789: project wrappers that forward their callable to a thread ----
+#
+# ``async def _offload(fn, *a): return await asyncio.to_thread(fn, *a)`` hid
+# the offload: the call site ``await _offload(db.commit)`` names no offload
+# helper, and inside the wrapper ``fn`` is no Session. As in the GOO-777
+# release-graph test (``_action_forwarders``), a *forwarder* is a function
+# that passes one of its own parameters straight to the primitive, and its
+# call sites are judged instead: the arguments bound to the forwarded
+# parameters are the work handed to the thread. Forwarders compose (a wrapper
+# of a wrapper) through a fixpoint over the module's functions, as GOO-777
+# closes its call graph. A call resolves to a forwarder through a bare name in
+# the same module, ``self.<method>``/``cls.<method>`` of the enclosing class,
+# or a ``src.*`` import (``from src.x import f`` or ``import src.x as m``). A
+# module-level alias of a forwarder (``run_in_subprocess = _run_in_subprocess``
+# in arxiv_fulltext) is a forwarder under its new name too.
+#
+# Known limits (``test_known_limits_of_forwarder_resolution`` pins them):
+# - a forwarder reached through another object (``svc._offload(db.commit)``);
+# - one reached through a variable bound inside a function (``run = _offload``
+#   in the caller's body) or through ``getattr``;
+# - a forwarder defined inside a function (only module-level functions and
+#   class methods are scanned), so a nested ``async def _offload`` is unseen;
+# - one that stores the callable (``self._job = fn``) and offloads it later.
+# None of these exists in src today; a new one needs its call sites listed in
+# SITES above or the resolution extended.
+
+_SELF_NAMES = frozenset({"self", "cls"})
+
+
+class _Forwarder(NamedTuple):
+    positional: Tuple[str, ...]  # positional parameter names, in order
+    keyword_only: Tuple[str, ...]
+    vararg: Optional[str]
+    kwarg: Optional[str]
+    forwarded: FrozenSet[str]  # parameters that reach a thread
+    # ``to_thread_finish_on_cancel(..., guard_session=<param>)``: the caller
+    # must pass the Session it hands over as this parameter. None: the
+    # forwarding paths do not all guard through one parameter (a raw offload,
+    # a guarded one without guard_session=, or two different guards).
+    guard: Optional[str]
+    bound_method: bool  # called as self.<m>: the first parameter is implicit
+
+
+_Resolved = Tuple[str, _Forwarder]
+
+
+def _bind(call: ast.Call, fwd: _Forwarder) -> Tuple[List[ast.expr], Optional[ast.expr]]:
+    """(arguments bound to forwarded parameters, argument bound to the
+    guard parameter) for a call to ``fwd``. A ``*args`` or ``**kwargs`` at
+    the call counts as forwarded when it can reach a forwarded parameter."""
+    positional = fwd.positional[1:] if fwd.bound_method else fwd.positional
+    work: List[ast.expr] = []
+    guard: Optional[ast.expr] = None
+    for i, arg in enumerate(call.args):
+        if isinstance(arg, ast.Starred):
+            rest = set(positional[i:]) | ({fwd.vararg} if fwd.vararg else set())
+            if rest & fwd.forwarded:
+                work.append(arg.value)
+            continue
+        param = positional[i] if i < len(positional) else fwd.vararg
+        if param in fwd.forwarded:
+            work.append(arg)
+        if param is not None and param == fwd.guard:
+            guard = arg
+    named = set(fwd.positional) | set(fwd.keyword_only)
+    for kw in call.keywords:
+        if kw.arg is None:  # **kwargs at the call
+            if (named | {fwd.kwarg}) & fwd.forwarded:
+                work.append(kw.value)
+            continue
+        param = kw.arg if kw.arg in named else fwd.kwarg
+        if param in fwd.forwarded:
+            work.append(kw.value)
+        if param is not None and param == fwd.guard:
+            guard = kw.value
+    return work, guard
+
+
+def _is_staticmethod(fn: ast.AST) -> bool:
+    return any(_tail(d) == "staticmethod" for d in getattr(fn, "decorator_list", []))
+
+
+def _module_functions(
+    tree: ast.Module,
+) -> Dict[str, Tuple[ast.AST, Optional[str]]]:
+    """Top-level functions by name and methods as ``Class.method``, with the
+    class name (None for a module function)."""
+    out: Dict[str, Tuple[ast.AST, Optional[str]]] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out[node.name] = (node, None)
+        elif isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    out[f"{node.name}.{item.name}"] = (item, node.name)
+    return out
+
+
+def _forwarding(
+    fn: ast.AST,
+    cls_name: Optional[str],
+    local: Dict[str, _Forwarder],
+    aliases: Dict[str, str],
+) -> Optional[_Forwarder]:
+    """``fn`` as a forwarder, given the forwarders known so far, or None."""
+    assert isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    a = fn.args
+    positional = tuple(p.arg for p in a.posonlyargs + a.args)
+    keyword_only = tuple(p.arg for p in a.kwonlyargs)
+    vararg = a.vararg.arg if a.vararg else None
+    kwarg = a.kwarg.arg if a.kwarg else None
+    params = (
+        (set(positional) | set(keyword_only) | {vararg, kwarg}) - _SELF_NAMES - {None}
+    )
+    forwarded: Set[str] = set()
+    guards: List[Optional[str]] = []
+    for call in ast.walk(fn):
+        if not isinstance(call, ast.Call):
+            continue
+        guard_node: Optional[ast.expr] = None
+        kind = _offload_kind(call, aliases)
+        if kind is not None:
+            work = _work_args(call)
+            if kind == _GUARDED_OFFLOAD:
+                guard_node = next(
+                    (kw.value for kw in call.keywords if kw.arg == "guard_session"),
+                    None,
+                )
+        else:
+            inner = _resolve_forwarder(call, cls_name, local, aliases)
+            if inner is None:
+                continue
+            # _bind returns no guard for an inner forwarder without one.
+            work, guard_node = _bind(call, inner[1])
+        hit = {
+            n.id
+            for w in work
+            for n in ast.walk(w)
+            if isinstance(n, ast.Name) and n.id in params
+        }
+        if not hit:
+            continue
+        forwarded |= hit
+        # A guard that is not a parameter never matches in _bind, which
+        # compares it with this function's own parameter names.
+        guards.append(guard_node.id if isinstance(guard_node, ast.Name) else None)
+    if not forwarded:
+        return None
+    guard = guards[0] if all(g == guards[0] for g in guards) else None
+    return _Forwarder(
+        positional=positional,
+        keyword_only=keyword_only,
+        vararg=vararg,
+        kwarg=kwarg,
+        forwarded=frozenset(forwarded),
+        guard=guard,
+        bound_method=cls_name is not None and not _is_staticmethod(fn),
+    )
+
+
+def _module_forwarders(
+    tree: ast.Module, aliases: Dict[str, str]
+) -> Dict[str, _Forwarder]:
+    """Every forwarder in ``tree``, wrappers of wrappers and module-level
+    aliases (``name = forwarder``) included (fixpoint)."""
+    functions = _module_functions(tree)
+    assigned = _module_assignments(tree)
+    found: Dict[str, _Forwarder] = {}
+    for _ in range(len(functions) + len(assigned) + 1):
+        changed = False
+        for key, (fn, cls_name) in functions.items():
+            fwd = _forwarding(fn, cls_name, found, aliases)
+            if fwd is not None and found.get(key) != fwd:
+                found[key] = fwd
+                changed = True
+        for name, value in assigned.items():
+            fwd = found.get(value) if isinstance(value, str) else None
+            if fwd is not None and found.get(name) != fwd:
+                found[name] = fwd
+                changed = True
+        if not changed:
+            break
+    return found
+
+
+def _module_assignments(tree: ast.Module) -> Dict[str, Optional[str]]:
+    """``name = other`` at module level: name -> other, or None when the
+    value is not a bare name. The last binding wins, as at import time."""
+    out: Dict[str, Optional[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if isinstance(target, ast.Name):
+            out[target.id] = value.id if isinstance(value, ast.Name) else None
+    return out
+
+
+_IMPORTED_FORWARDERS: Dict[str, Dict[str, _Forwarder]] = {}
+
+
+def _imported_forwarders(module: str) -> Dict[str, _Forwarder]:
+    """Forwarders of the ``src`` module ``module`` (dotted), cached."""
+    if module not in _IMPORTED_FORWARDERS:
+        _IMPORTED_FORWARDERS[module] = {}  # an import cycle sees none
+        base = _SRC.parent / module.replace(".", "/")
+        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+            if candidate.is_file():
+                tree = _tree(candidate.relative_to(_SRC).as_posix())
+                _IMPORTED_FORWARDERS[module] = _module_forwarders(tree, _aliases(tree))
+                break
+    return _IMPORTED_FORWARDERS[module]
+
+
+def _resolve_forwarder(
+    call: ast.Call,
+    cls_name: Optional[str],
+    local: Dict[str, _Forwarder],
+    aliases: Dict[str, str],
+) -> Optional[_Resolved]:
+    """(name, forwarder) that ``call`` lands on, or None."""
+    func = call.func
+    if (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id in _SELF_NAMES
+    ):
+        fwd = local.get(f"{cls_name}.{func.attr}") if cls_name else None
+        return (func.attr, fwd) if fwd is not None else None
+    if isinstance(func, ast.Name) and func.id in local:
+        return (func.id, local[func.id])
+    dotted = _dotted(func, aliases) or ""
+    if dotted.startswith("src."):
+        module, _, name = dotted.rpartition(".")
+        fwd = _imported_forwarders(module).get(name)
+        if fwd is not None:
+            return (name, fwd)
+    return None
+
+
+def _target_label(work: List[ast.expr]) -> str:
+    if not work:
+        return "?"
+    return "lambda" if isinstance(work[0], ast.Lambda) else ast.unparse(work[0])
+
+
 def session_offload_violations(tree: ast.Module, path: str) -> Dict[str, str]:
     """``{exemption key: problem}`` for each offload that takes a Session
-    without the guarded helper and a ``guard_session=`` naming that Session."""
+    without the guarded helper and a ``guard_session=`` naming that Session.
+    A call to a forwarder (GOO-789) is judged as the offload it wraps."""
     scopes = _scopes(tree)
     aliases = _aliases(tree)
+    forwarders = _module_forwarders(tree, aliases)
     found: Dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        fn, cls = scopes.get(id(node), (tree, None))
+        where = f"{path}:{node.lineno}"
         name = _offload_kind(node, aliases)
         if name is None:
+            resolved = _resolve_forwarder(
+                node, cls.name if cls else None, forwarders, aliases
+            )
+            if resolved is None:
+                continue
+            name, fwd = resolved
+            work, guard_arg = _bind(node, fwd)
+            touched = _touched_by(work, fn, cls, aliases)
+            if not touched:
+                continue
+            guard = ast.unparse(guard_arg) if guard_arg is not None else None
+            if fwd.guard is not None and guard in touched:
+                continue
+            key = (
+                f"{path}:{getattr(fn, 'name', '<module>')}:{name}:{_target_label(work)}"
+            )
+            found[key] = (
+                f"{where}: {name} forwards the Session {sorted(touched)} to a "
+                f"thread; pass it to {_GUARDED_OFFLOAD}(..., guard_session=<it>)"
+            )
             continue
-        fn, cls = scopes.get(id(node), (tree, None))
         touched = _touched_sessions(node, fn, cls, aliases)
         if not touched:
             continue
-        args = _offload_args(node)
-        target = "?" if not args else ast.unparse(args[0])
-        if args and isinstance(args[0], ast.Lambda):
-            target = "lambda"
-        key = f"{path}:{getattr(fn, 'name', '<module>')}:{name}:{target}"
-        where = f"{path}:{node.lineno}"
+        key = f"{path}:{getattr(fn, 'name', '<module>')}:{name}:{_target_label(_offload_args(node))}"
         if name in _RAW_OFFLOADS:
             found[key] = (
                 f"{where}: {name} hands the Session {sorted(touched)} to a "
@@ -769,6 +1059,185 @@ from src.core.database import get_db_sync as sync_db_dep
 async def planted(conn=Depends(sync_db_dep)):
     await asyncio.to_thread(lambda: conn.commit())
 """,
+    # GOO-789: project wrappers that forward their callable to a thread.
+    "local_async_wrapper": """
+import asyncio
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+async def planted(db=None):
+    await _offload(db.commit)
+
+async def ok_no_session():
+    await _offload(render, 1)
+
+async def ok_awaited_on_loop(db=None):
+    await _offload(render, await build(db))
+""",
+    "wrapper_vararg": """
+import asyncio
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+async def planted(db=None):
+    await _offload(work, db)
+""",
+    "wrapper_kwargs": """
+import asyncio
+
+async def _offload(fn, **kw):
+    return await asyncio.to_thread(fn, **kw)
+
+async def planted(db=None):
+    await _offload(work, session=db)
+""",
+    "wrapper_star_args_at_the_call": """
+import asyncio
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+async def planted(db=None):
+    await _offload(work, *[db])
+""",
+    "wrapper_star_kwargs_at_the_call": """
+import asyncio
+
+async def _offload(fn, **kw):
+    return await asyncio.to_thread(fn, **kw)
+
+async def planted(db=None):
+    await _offload(work, **{"session": db})
+""",
+    "module_level_alias": """
+import asyncio
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+offload = _offload
+offload_again = offload
+
+async def planted(db=None):
+    await offload(db.commit)
+    await offload_again(db.commit)
+
+async def ok_no_session():
+    await offload(render, 1)
+""",
+    "alias_last_binding_wins": """
+import asyncio
+
+def _onloop(fn):
+    return fn()
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+x = _onloop
+x = _offload
+y = _offload
+y = None
+z = _offload
+z = _onloop
+
+async def planted(db=None):
+    await x(db.commit)
+
+async def ok_rebound_to_none(db=None):
+    y(db.commit)
+
+async def ok_rebound_on_the_loop(db=None):
+    z(db.commit)
+""",
+    "imported_src_alias": """
+from src.services.integrations.arxiv_fulltext import run_in_subprocess
+
+async def planted(db=None):
+    await run_in_subprocess(db.commit)
+""",
+    "wrapper_defined_before_its_wrapped": """
+import asyncio
+
+async def _outer(job):
+    return await _inner(job)
+
+async def _inner(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+async def planted(db=None):
+    await _outer(db.commit)
+""",
+    "wrapper_with_two_different_guards": """
+from src.core.thread_offload import to_thread_finish_on_cancel
+
+async def _two(fn, first, second):
+    await to_thread_finish_on_cancel(fn, guard_session=first)
+    await to_thread_finish_on_cancel(fn, guard_session=second)
+
+async def planted(db=None, other=None):
+    await _two(lambda: db.commit(), db, other)
+""",
+    "wrapper_of_a_wrapper": """
+import asyncio
+
+async def _inner(fn, *a):
+    return await asyncio.get_running_loop().run_in_executor(None, fn, *a)
+
+async def _outer(job):
+    return await _inner(job)
+
+async def planted(db=None):
+    await _outer(lambda: db.commit())
+""",
+    "self_method_wrapper": """
+import asyncio
+
+class Service:
+    async def _offload(self, func, *args, **kwargs):
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+    async def planted(self):
+        await self._offload(self.db.commit)
+
+    async def ok_no_session(self):
+        await self._offload(self.kg.create_entity, 1)
+""",
+    "guarded_wrapper": """
+from src.core.thread_offload import to_thread_finish_on_cancel
+
+async def _guarded(fn, session):
+    return await to_thread_finish_on_cancel(fn, guard_session=session)
+
+async def planted(db=None, other=None):
+    await _guarded(lambda: db.commit(), other)
+
+async def ok_guards_its_session(db=None):
+    await _guarded(lambda: db.commit(), db)
+""",
+    "wrapper_without_its_guard": """
+from src.core.thread_offload import to_thread_finish_on_cancel
+
+async def _half_guarded(fn):
+    return await to_thread_finish_on_cancel(fn)
+
+async def planted(db=None):
+    await _half_guarded(db.commit)
+""",
+    "imported_src_wrapper": """
+from src.services.integrations.arxiv_fulltext import _run_in_subprocess as sub
+
+async def planted(db=None):
+    await sub(db.commit)
+
+async def ok_runs_on_the_loop(db=None):
+    async def run(fn):
+        return fn()
+
+    await run(db.commit)
+""",
 }
 
 
@@ -777,3 +1246,57 @@ def test_an_evasive_session_offload_fails_the_guard(form: str) -> None:
     found = session_offload_violations(ast.parse(_EVASIONS[form]), f"{form}.py")
     functions = sorted({key.split(":")[1] for key in found})
     assert functions == ["planted"], found
+
+
+def test_the_real_forwarders_are_found() -> None:
+    """Guards the GOO-789 resolution itself: the two forwarders in src today
+    must be seen, or a call through them would go unchecked silently."""
+    fulltext = _imported_forwarders("src.services.integrations.arxiv_fulltext")
+    assert "_run_in_subprocess" in fulltext, sorted(fulltext)
+    assert fulltext["_run_in_subprocess"].forwarded == {"fn", "args"}
+    # The public alias arxiv_service imports (``run_in_subprocess =
+    # _run_in_subprocess``) resolves to the same forwarder.
+    assert fulltext.get("run_in_subprocess") == fulltext["_run_in_subprocess"]
+    kg = _imported_forwarders("src.services.arxiv.arxiv_kg_integration")
+    offload = [key for key in kg if key.endswith("._offload")]
+    assert offload, sorted(kg)
+    assert kg[offload[0]].forwarded == {"func", "args", "kwargs"}
+
+
+_KNOWN_LIMITS = """
+import asyncio
+
+async def _offload(fn, *a):
+    return await asyncio.to_thread(fn, *a)
+
+async def through_another_object(svc, db=None):
+    await svc._offload(db.commit)
+
+async def through_a_variable(db=None):
+    run = _offload
+    await run(db.commit)
+
+async def through_a_nested_def(db=None):
+    async def _nested(fn):
+        return await asyncio.to_thread(fn)
+
+    await _nested(db.commit)
+
+class Stored:
+    def __init__(self, fn):
+        self._job = fn
+
+    async def run(self):
+        return await asyncio.to_thread(self._job)
+
+async def through_a_stored_callable(db=None):
+    await Stored(db.commit).run()
+"""
+
+
+def test_known_limits_of_forwarder_resolution() -> None:
+    """Pins what GOO-789 does not resolve (see the comment above
+    ``_Forwarder``). If one of these starts failing the guard, the resolution
+    grew: move the form into ``_EVASIONS`` and update that comment."""
+    found = session_offload_violations(ast.parse(_KNOWN_LIMITS), "limits.py")
+    assert found == {}, found
