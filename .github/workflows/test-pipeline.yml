@@ -199,6 +199,7 @@ jobs:
           # evals/ is excluded: those files are digest-pinned against recorded
           # trial evidence (evals/source-manifests/*.json), so an annotation
           # edit forced by this gate would invalidate a published baseline.
+          # Escape: grep -v exits 1 when every added file is under evals/.
           mapfile -t ADDED < <(python3 scripts/ci/changed_source_files.py "${BASE_FLAG[@]}" --kind python-added | grep -v '^evals/' || true)
           if [ "${#ADDED[@]}" -gt 0 ]; then
             printf 'Type-checking %d added Python file(s)\n' "${#ADDED[@]}"
@@ -220,7 +221,7 @@ jobs:
         run: isort --check-only backend/src
       - name: Advisory full-tree MyPy (type checking)
         run: mypy backend/src --ignore-missing-imports
-        continue-on-error: true # Advisory until full-tree debt reaches zero
+        continue-on-error: true # Advisory: fails today (follow-up: burn down full-tree mypy debt)
   lint-frontend:
     name: Lint Frontend
     runs-on: ubuntu-latest
@@ -270,12 +271,13 @@ jobs:
           else
             BASE="origin/${DEFAULT_BRANCH}"
           fi
+          # Escape: eslint exits non-zero on findings; the blocking check below reads the report.
           pnpm exec eslint app src --format json --output-file /tmp/eslint-report.json || true
           node ../scripts/ci/check_frontend_quality.mjs --report /tmp/eslint-report.json --base "$BASE"
           python3 ../scripts/ci/check_tsconfig_exclusions.py --base "$BASE"
       - name: Advisory full lint (human-readable)
         run: pnpm run lint
-        continue-on-error: true # Advisory until full-tree debt reaches zero
+        continue-on-error: true # Advisory: fails today (follow-up: burn down full-tree ESLint debt)
   # ==========================================================================
   # Alembic Migration Guard (Fast - No DB, No App Deps)
   # ==========================================================================
@@ -353,10 +355,9 @@ jobs:
             ${{ runner.os }}-pip-test-
             ${{ runner.os }}-pip-
       # env.py imports the full model layer at runtime, so `alembic upgrade head`
-      # needs the same dependency set as the app. Advisory: a dependency hiccup
-      # must never fail the blocking static guard that already ran above.
+      # needs the same dependency set as the app. Blocking: the execution probes
+      # below need these dependencies, so an install failure fails the job.
       - name: Install backend requirements (for execution probes)
-        continue-on-error: true
         run: |
           set +e
           pip install --build-constraint backend/constraints-ci.txt -r backend/requirements-cpu-lock.txt -r backend/requirements-ci.txt
@@ -389,7 +390,7 @@ jobs:
           fi
           exit "$rc"
       - name: Advisory — upgrade head from empty DB
-        continue-on-error: true
+        continue-on-error: true # Advisory by design: replays the whole legacy chain, not this PR's delta
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -420,7 +421,7 @@ jobs:
           fi
           exit $rc
       - name: Advisory — downgrade -1 then upgrade head (round-trip smoke)
-        continue-on-error: true
+        continue-on-error: true # Advisory by design: some migrations refuse downgrade on purpose
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -463,6 +464,7 @@ jobs:
             echo "${avail_gb}G free (>= ${min_free_gb}G); skipping cleanup"
             exit 0
           fi
+          # Best-effort cleanup: a missing path or prune error must not fail the job.
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /opt/ghc || true
@@ -563,6 +565,7 @@ jobs:
             echo "${avail_gb}G free (>= ${min_free_gb}G); skipping cleanup"
             exit 0
           fi
+          # Best-effort cleanup: a missing path or prune error must not fail the job.
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /opt/ghc || true
@@ -642,6 +645,7 @@ jobs:
             echo "${avail_gb}G free (>= ${min_free_gb}G); skipping cleanup"
             exit 0
           fi
+          # Best-effort cleanup: a missing path or prune error must not fail the job.
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /opt/ghc || true
@@ -764,7 +768,7 @@ jobs:
       # Informational: full changelog into the job summary, never blocking.
       - name: API changelog (oasdiff, informational)
         if: github.event_name == 'pull_request'
-        continue-on-error: true
+        continue-on-error: true # Informational changelog only; the breaking-change step above blocks
         env:
           BASE_AVAILABLE: ${{ steps.oasdiff.outputs.base_available }}
         run: |
@@ -775,6 +779,7 @@ jobs:
           {
             echo "## API changelog (oasdiff)"
             echo '```'
+            # Escape: keep the closing code fence below even when the changelog errors.
             /tmp/oasdiff changelog /tmp/openapi-base.json backend/openapi.json 2>&1 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -805,7 +810,7 @@ jobs:
         run: bandit -r backend/src -ll -ii -x tests -b backend/.bandit-baseline.json
       - name: Run Safety (dependency vulnerabilities)
         run: safety check -r backend/requirements-cpu-lock.txt
-        continue-on-error: true # Advisory only: flags unmaintained upstream packages we can't fix here
+        continue-on-error: true # Advisory: fails today (follow-up: replace deprecated `safety check`, fix 5 reported vulns)
   # ==========================================================================
   # Frontend Tests
   # ==========================================================================
@@ -973,6 +978,7 @@ jobs:
             echo "${avail_gb}G free (>= ${min_free_gb}G); skipping cleanup"
             exit 0
           fi
+          # Best-effort cleanup: a missing path or prune error must not fail the job.
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /opt/ghc || true
@@ -1220,6 +1226,7 @@ jobs:
             echo "${avail_gb}G free (>= ${min_free_gb}G); skipping cleanup"
             exit 0
           fi
+          # Best-effort cleanup: a missing path or prune error must not fail the job.
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /opt/ghc || true
@@ -1312,6 +1319,7 @@ jobs:
             echo "${avail_gb}G free (>= ${min_free_gb}G); skipping cleanup"
             exit 0
           fi
+          # Best-effort cleanup: a missing path or prune error must not fail the job.
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /opt/ghc || true
@@ -1422,7 +1430,7 @@ jobs:
           SECONDS=0
           healthy_count() {
             docker compose -p rag_system -f docker-compose.ci.yml ps --format json 2>/dev/null \
-              | grep -c '"healthy"' || true
+              | grep -c '"healthy"' || true  # grep -c prints 0 but exits 1 on no match
           }
           while (( $(healthy_count) < 3 )); do
             if (( SECONDS > 300 )); then
@@ -1432,6 +1440,7 @@ jobs:
             fi
             if (( SECONDS % 30 == 0 )); then
               echo "  ${SECONDS}s — $(healthy_count)/3 healthy"
+              # Escape: diagnostic status dump while waiting; must not end the wait loop.
               docker compose -p rag_system -f docker-compose.ci.yml ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || true
             fi
             sleep 5
@@ -1446,6 +1455,7 @@ jobs:
             until curl -sf "$url" >/dev/null 2>&1; do
               if (( t > 120 )); then
                 echo "::error::Timed out after 120s waiting for ${name}"
+                # Escape: diagnostic log dump; the real failure is the exit 124 below.
                 docker compose -p rag_system -f docker-compose.ci.yml logs "$name" --tail=50 || true
                 exit 124
               fi
@@ -1647,21 +1657,26 @@ jobs:
         if: failure()
         run: |
           echo "=== Backend Logs ==="
+          # Escape: diagnostic dump; the job has already failed and the container may be gone.
           docker logs backend-e2e --tail=100 2>&1 || true
           echo ""
           echo "=== Frontend Logs ==="
+          # Escape: diagnostic dump; the job has already failed and the container may be gone.
           docker logs frontend-e2e --tail=100 2>&1 || true
           echo ""
           # GoTrue logs the SQL error behind opaque 500s like "Database error
           # checking email" (seen from the seed-mirror step) only to its own
           # stdout — without this dump those failures are undiagnosable.
           echo "=== GoTrue Logs ==="
+          # Escape: diagnostic dump; the job has already failed and the container may be gone.
           docker logs rag_system-gotrue-1 --tail=100 2>&1 || true
           echo ""
           echo "=== Postgres Logs ==="
+          # Escape: diagnostic dump; the job has already failed and the container may be gone.
           docker logs rag_system-postgres-1 --tail=60 2>&1 || true
           echo ""
           echo "=== auth schema contents ==="
+          # Escape: diagnostic dump; the job has already failed and the container may be gone.
           docker exec rag_system-postgres-1 psql -U test -d test_db -c '\dt auth.*' 2>&1 || true
           echo ""
           echo "=== Docker Compose Status ==="
@@ -1669,6 +1684,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          # Escape: teardown; the containers may not exist if an earlier step failed.
           docker stop backend-e2e frontend-e2e 2>/dev/null || true
           docker rm backend-e2e frontend-e2e 2>/dev/null || true
           docker compose -p rag_system -f docker-compose.ci.yml down -v --remove-orphans
@@ -1678,7 +1694,7 @@ jobs:
   performance-tests:
     name: Performance Tests
     runs-on: ubuntu-latest
-    continue-on-error: true # Non-critical in PR checks; don't block merges
+    continue-on-error: true # Non-blocking, not in Release Gate needs, push-to-main only (follow-up: never runs, no main branch)
     needs: integration-tests
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     services:
@@ -1709,6 +1725,7 @@ jobs:
             echo "${avail_gb}G free (>= ${min_free_gb}G); skipping cleanup"
             exit 0
           fi
+          # Best-effort cleanup: a missing path or prune error must not fail the job.
           sudo rm -rf /usr/local/lib/android || true
           sudo rm -rf /usr/share/dotnet || true
           sudo rm -rf /opt/ghc || true
