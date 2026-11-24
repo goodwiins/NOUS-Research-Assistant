@@ -227,6 +227,7 @@ await complete_document_tracking("doc_123", entities_extracted=25)
 ### Alerting
 
 #### Files
+- `monitoring/alertmanager/alert_rules.yml` - Comprehensive alert rules
 - `docs/operations/on-call-procedures.md` - Runbooks and procedures
 
 #### Alert Categories
