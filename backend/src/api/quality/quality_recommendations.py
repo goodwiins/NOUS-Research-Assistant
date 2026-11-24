@@ -21,6 +21,7 @@ from src.services.quality.quality_recommendations_service import (
     RecommendationCategory,
     RecommendationPriority,
     RecommendationStatus,
+    RecommendationTrackingUnavailable,
     quality_recommendations_service,
 )
 
@@ -124,8 +125,8 @@ async def get_quality_recommendations(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get quality recommendations: {e}")
+    except Exception:
+        logger.exception("Failed to get quality recommendations")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -164,8 +165,8 @@ async def get_quality_insights(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get quality insights: {e}")
+    except Exception:
+        logger.exception("Failed to get quality insights")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -201,8 +202,15 @@ async def update_recommendation_progress(
                 status_code=400, detail="Failed to update recommendation progress"
             )
 
-    except Exception as e:
-        logger.error(f"Failed to update recommendation progress: {e}")
+    except RecommendationTrackingUnavailable:
+        raise HTTPException(
+            status_code=501,
+            detail="Recommendation progress tracking is not available",
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to update recommendation progress")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -225,13 +233,15 @@ async def get_recommendation_effectiveness(
         return {
             "organization_id": effectiveness["organization_id"],
             "period_days": completed_days,
+            "available": effectiveness["available"],
+            "reason": effectiveness.get("reason"),
             "effectiveness": effectiveness["effectiveness"],
             "overall_improvement": effectiveness["overall_improvement"],
             "analyzed_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get recommendation effectiveness: {e}")
+    except Exception:
+        logger.exception("Failed to get recommendation effectiveness")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -317,8 +327,8 @@ async def get_recommendations_summary(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get recommendations summary: {e}")
+    except Exception:
+        logger.exception("Failed to get recommendations summary")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -391,8 +401,8 @@ async def get_recommendation_categories(current_user: User = Depends(get_current
 
         return {"categories": categories, "total_categories": len(categories)}
 
-    except Exception as e:
-        logger.error(f"Failed to get recommendation categories: {e}")
+    except Exception:
+        logger.exception("Failed to get recommendation categories")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -476,8 +486,8 @@ async def get_quality_metrics_for_recommendations(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to get quality metrics for recommendations: {e}")
+    except Exception:
+        logger.exception("Failed to get quality metrics for recommendations")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -534,8 +544,8 @@ async def generate_custom_recommendations(
             "generated_at": datetime.utcnow().isoformat(),
         }
 
-    except Exception as e:
-        logger.error(f"Failed to generate custom recommendations: {e}")
+    except Exception:
+        logger.exception("Failed to generate custom recommendations")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
