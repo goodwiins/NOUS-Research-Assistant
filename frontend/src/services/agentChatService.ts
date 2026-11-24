@@ -1166,7 +1166,9 @@ class AgentChatService {
     signal.throwIfAborted();
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Failed to get run status: ${text}`);
+      throw Object.assign(new Error(`Failed to get run status: ${text}`), {
+        status: res.status,
+      });
     }
     const data = await res.json();
     signal.throwIfAborted();

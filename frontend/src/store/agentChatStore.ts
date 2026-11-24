@@ -69,10 +69,6 @@ export const STREAM_INTERRUPTED_NOTE =
   'Connection lost — this answer stopped partway. Send your message again to retry.';
 
 /**
- * Trigger.dev run statuses that end a run without a successful completion.
- * A run in any of these never changes again, so a durable-run poll must stop.
- */
-/**
  * Consecutive failed status polls a durable loop tolerates before it gives
  * up. One dropped request used to end a ten-minute poll as an error even
  * though the run was still going (GOO-666 FL2D-2).
@@ -82,16 +78,37 @@ export const MAX_DURABLE_POLL_FAILURES = 3;
 /** Thrown inside confirmAction to route a durable confirmation past SSE. */
 class SkipStreamConfirm extends Error {}
 
-/** A durable card was clicked before its run published a wait token. */
+/**
+ * A tokenless durable card was clicked while its run is still awaiting a
+ * confirmation but has not published the wait token yet.
+ */
 class DurableTokenPending extends Error {}
+
+/** The re-read hit a network error or a 5xx, which may clear on retry. */
+class DurableReadUnavailable extends Error {}
+
+/** The user stopped or switched threads while the card's run was re-read. */
+class DurableReadAborted extends Error {}
+
+/** The re-read got a 404 or 403: the run is gone or not this user's. */
+class DurableConfirmationGone extends Error {}
+
+/** The re-read failed in a way that is neither terminal nor transient. */
+class DurableConfirmationCheckFailed extends Error {}
+
+/** completeDurableConfirmation rejected, so the decision was not delivered. */
+class DurableConfirmationSendFailed extends Error {}
 
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === 'string' && value !== '';
 
 /**
- * The run parked a different confirmation than the card shows (GOO-748 F1):
- * an earlier click went through, its response was lost, and the run moved
- * on to a new step. The stale card must not approve that step.
+ * The card no longer matches what its run is asking, so it must not approve
+ * anything. Causes: the run parked a confirmation with a different approval id
+ * (GOO-748 F1: an earlier click went through, its response was lost, and the
+ * run moved on to a new step); the card's or the run's approval id is missing
+ * or empty, so neither identifies the step (GOO-758); or the run has moved on
+ * and is no longer awaiting a confirmation at all (GOO-800).
  */
 class DurableConfirmationChanged extends Error {}
 
@@ -103,6 +120,22 @@ export const DURABLE_CONFIRMATION_CHANGED_NOTICE =
 export const DURABLE_TOKEN_PENDING_NOTICE =
   'Still preparing this step — try again in a moment.';
 
+/** Shown in place of a durable card whose run is gone or not readable. */
+export const DURABLE_CONFIRMATION_GONE_NOTICE =
+  'This confirmation is no longer available.';
+
+/** Shown on a restored durable card whose run could not be checked. */
+export const DURABLE_CONFIRMATION_CHECK_FAILED_NOTICE =
+  "Couldn't check this step. Try again, or reload the chat.";
+
+/** Shown on a restored durable card whose decision could not be sent. */
+export const DURABLE_CONFIRMATION_SEND_FAILED_NOTICE =
+  "Your answer couldn't be sent. Try again.";
+
+/**
+ * Trigger.dev run statuses that end a run without a successful completion.
+ * A run in any of these never changes again, so a durable-run poll must stop.
+ */
 const DURABLE_RUN_FAILURE_STATUSES = new Set([
   'CANCELED',
   'FAILED',
@@ -134,6 +167,23 @@ function durableRunFailureMessage(
   if (typeof run.error === 'string' && run.error) return run.error;
   if (run.status === 'CANCELED') return 'This request was cancelled.';
   return fallback;
+}
+
+/** The message shown on a confirmation card that confirmAction restored. */
+function restoredCardNotice(error: unknown): string {
+  if (
+    error instanceof DurableTokenPending ||
+    error instanceof DurableReadUnavailable
+  ) {
+    return DURABLE_TOKEN_PENDING_NOTICE;
+  }
+  if (error instanceof DurableConfirmationCheckFailed) {
+    return DURABLE_CONFIRMATION_CHECK_FAILED_NOTICE;
+  }
+  if (error instanceof DurableConfirmationSendFailed) {
+    return DURABLE_CONFIRMATION_SEND_FAILED_NOTICE;
+  }
+  return 'Waiting for your confirmation...';
 }
 
 const DEFAULT_PAGE_CONTEXT: PageContext = {
@@ -1360,9 +1410,9 @@ export const useAgentChatStore = create<AgentChatStore>()(
         if (abortController.signal.aborted || confirmEpoch !== transcriptEpoch)
           return;
 
-        // Durable run or legacy polling fallback. waitTokenId was captured
-        // up-front (before pendingConfirmation was nulled) so this branch is
-        // actually reachable for durable runs.
+        // Durable run or legacy polling fallback. A durable card reaches this
+        // branch because SkipStreamConfirm skipped SSE above; waitTokenId was
+        // captured up-front because the card is already gone from state.
         let resumeToken = waitTokenId;
         let staleCard = false;
         if (isDurable && !resumeToken) {
@@ -1370,45 +1420,104 @@ export const useAgentChatStore = create<AgentChatStore>()(
           // stops waiting after a couple of tokenless ticks and never polls
           // again). Read the run once more; without a token the run would
           // sit on its 1-hour timeout, so never let the click fail silently.
+          let run: Awaited<
+            ReturnType<typeof agentChatService.getDurableRunStatus>
+          >;
           try {
-            const run = await agentChatService.getDurableRunStatus(jobId);
-            const meta = run?.metadata ?? {};
-            if (
-              meta.status === 'awaiting_confirmation' &&
-              typeof meta.waitTokenId === 'string'
-            ) {
-              // The token is only this card's if the run is still asking the
-              // question the card shows; otherwise it belongs to a newer
-              // confirmation the user has never seen. Two missing or empty
-              // ids identify nothing, so they never match (GOO-758): the
-              // card's id must be a non-empty string, and strict equality
-              // then requires the same of the run's.
-              const parkedApprovalId = (
-                meta.confirmation as Record<string, unknown> | undefined
-              )?.approval_id;
-              const cardApprovalId = pendingConfirmation.approvalId;
-              if (
-                isNonEmptyString(cardApprovalId) &&
-                parkedApprovalId === cardApprovalId
-              ) {
-                resumeToken = meta.waitTokenId;
-              } else {
-                staleCard = true;
-              }
+            run = await agentChatService.getDurableRunStatus(jobId);
+          } catch (error) {
+            if (abortController.signal.aborted) throw new DurableReadAborted();
+            // Classify by the HTTP status the service attaches; the error
+            // text carries the response body, so it is never shown or logged.
+            const status = (error as { status?: unknown } | null)?.status;
+            const httpStatus = typeof status === 'number' ? status : undefined;
+            if (httpStatus === 404 || httpStatus === 403) {
+              throw new DurableConfirmationGone();
             }
-          } catch {
-            // Treated as "no token yet": the card stays, with the notice.
+            if (
+              error instanceof TypeError ||
+              (httpStatus !== undefined &&
+                httpStatus >= 500 &&
+                httpStatus < 600)
+            ) {
+              throw new DurableReadUnavailable();
+            }
+            console.warn(
+              '[agentChatStore] durable confirmation re-read failed',
+              {
+                threadId,
+                ...(httpStatus !== undefined ? { status: httpStatus } : {}),
+              }
+            );
+            throw new DurableConfirmationCheckFailed();
           }
-          if (abortController.signal.aborted) throw new SkipStreamConfirm();
+          if (abortController.signal.aborted) throw new DurableReadAborted();
+
+          // The run already ended: settle from it, like the confirm poll does.
+          const outcome = durableRunOutcome(run?.status);
+          if (outcome) {
+            const result = (run.output ?? {}) as Record<string, unknown>;
+            const content =
+              outcome === 'completed'
+                ? String(
+                    (result.result as Record<string, unknown> | undefined)
+                      ?.message ??
+                      result.status ??
+                      'Done'
+                  )
+                : durableRunFailureMessage(run, 'Action failed.');
+            set((state) => {
+              const idx = state.messages.findIndex(
+                (m) => m.id === targetMessageId
+              );
+              if (idx !== -1) {
+                state.messages[idx].content = content;
+                state.messages[idx].isStreaming = false;
+              }
+              state.isStreaming = false;
+              state.isConfirming = false;
+              (state as unknown as AgentChatStore)._abortController = null;
+            });
+            return;
+          }
+
+          const meta = run?.metadata ?? {};
+          if (meta.status !== 'awaiting_confirmation') {
+            // The run left the card's step, so no token for it will come.
+            staleCard = true;
+          } else if (typeof meta.waitTokenId === 'string') {
+            // The token is only this card's if the run is still asking the
+            // question the card shows; otherwise it belongs to a newer
+            // confirmation the user has never seen. Two missing or empty
+            // ids identify nothing, so they never match (GOO-758): the
+            // card's id must be a non-empty string, and strict equality
+            // then requires the same of the run's.
+            const parkedApprovalId = (
+              meta.confirmation as Record<string, unknown> | undefined
+            )?.approval_id;
+            const cardApprovalId = pendingConfirmation.approvalId;
+            if (
+              isNonEmptyString(cardApprovalId) &&
+              parkedApprovalId === cardApprovalId
+            ) {
+              resumeToken = meta.waitTokenId;
+            } else {
+              staleCard = true;
+            }
+          }
           if (staleCard) throw new DurableConfirmationChanged();
           if (!resumeToken) throw new DurableTokenPending();
         }
         if (resumeToken) {
-          await agentChatService.completeDurableConfirmation(
-            jobId,
-            resumeToken,
-            confirmed
-          );
+          try {
+            await agentChatService.completeDurableConfirmation(
+              jobId,
+              resumeToken,
+              confirmed
+            );
+          } catch {
+            throw new DurableConfirmationSendFailed();
+          }
 
           const MAX_POLLS = 200;
           const POLL_INTERVAL_MS = 3000;
@@ -1508,7 +1617,7 @@ export const useAgentChatStore = create<AgentChatStore>()(
             if (idx !== -1) {
               settleStreamingMessage(state.messages[idx], {
                 fallbackContent:
-                  'This action is taking longer than expected. It may still be running — please try again shortly.',
+                  'This action is taking longer than expected. It may still be running — reload the chat later to see the result.',
               });
             }
             state.isStreaming = false;
@@ -1657,7 +1766,14 @@ export const useAgentChatStore = create<AgentChatStore>()(
           }
           return;
         }
-        if (error instanceof DurableConfirmationChanged) {
+        if (
+          error instanceof DurableConfirmationChanged ||
+          error instanceof DurableConfirmationGone
+        ) {
+          const notice =
+            error instanceof DurableConfirmationGone
+              ? DURABLE_CONFIRMATION_GONE_NOTICE
+              : DURABLE_CONFIRMATION_CHANGED_NOTICE;
           set((state) => {
             state.isStreaming = false;
             state.isConfirming = false;
@@ -1667,7 +1783,7 @@ export const useAgentChatStore = create<AgentChatStore>()(
             );
             if (idx !== -1) {
               state.messages[idx].isStreaming = false;
-              state.messages[idx].content = DURABLE_CONFIRMATION_CHANGED_NOTICE;
+              state.messages[idx].content = notice;
             }
             (state as unknown as AgentChatStore)._abortController = null;
           });
@@ -1682,10 +1798,7 @@ export const useAgentChatStore = create<AgentChatStore>()(
           );
           if (idx !== -1) {
             state.messages[idx].isStreaming = false;
-            state.messages[idx].content =
-              error instanceof DurableTokenPending
-                ? DURABLE_TOKEN_PENDING_NOTICE
-                : 'Waiting for your confirmation...';
+            state.messages[idx].content = restoredCardNotice(error);
           }
           (state as unknown as AgentChatStore)._abortController = null;
         });
