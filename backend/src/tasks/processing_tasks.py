@@ -1203,6 +1203,16 @@ def index_in_graph(self, job_id: str):
         db.close()
 
 
+# Private ProcessingJob.result key the KG batch dispatcher sets once its
+# per-document group is published. retry_job() -> RETRYING clears it.
+_KG_FANOUT_PUBLISHED_KEY = "_kg_fanout_published"
+_KG_DISPATCHER_LOST_MESSAGE = (
+    "KG batch dispatcher worker was lost before batch fanout was confirmed; "
+    "an explicit retry is required"
+)
+_KG_DISPATCHER_LOST_ERROR_TYPE = "DispatcherWorkerLost"
+
+
 def _skip_if_terminal_under_lock(db: Any, job: Any, job_id: str) -> dict | None:
     """Re-read ``job`` under a row lock; return a skip result if it is terminal.
 
@@ -1259,17 +1269,28 @@ def kg_extract_entities_job(self, job_id: str, document_index: int | None = None
         if skipped is not None:
             return skipped
         if document_index is None:
-            # The dispatcher has already published its document tasks. A late
-            # broker ack must not publish a second copy of the batch.
+            # A RUNNING batch is a redelivered dispatcher. Only the fanout
+            # marker, written after the group publish, proves the document
+            # tasks exist; then a late broker ack must not publish a second
+            # copy. Without it the worker died between start_job and the
+            # publish, possibly mid-publish, so fail honestly under the lock
+            # and require an explicit retry rather than replay or drop it.
             if (
                 job.status == JobStatus.RUNNING
                 and len((job.parameters or {}).get("document_ids", [])) > 1
             ):
-                return {
-                    "status": "running",
-                    "job_id": job_id,
-                    "skipped": "duplicate_delivery",
-                }
+                if (job.result or {}).get(_KG_FANOUT_PUBLISHED_KEY):
+                    return {
+                        "status": "running",
+                        "job_id": job_id,
+                        "skipped": "duplicate_delivery",
+                    }
+                job.fail_job(
+                    _KG_DISPATCHER_LOST_MESSAGE,
+                    error_type=_KG_DISPATCHER_LOST_ERROR_TYPE,
+                )
+                db.commit()
+                return {"status": "failed", "job_id": job_id}
             # retry_job() leaves result intact. Its per-document checkpoints
             # belong to the previous attempt and must not skip this one.
             if job.status == JobStatus.RETRYING:
@@ -1301,6 +1322,14 @@ def kg_extract_entities_job(self, job_id: str, document_index: int | None = None
                     for index in range(batch_total_docs)
                 ]
             ).apply_async()
+            # Record the fanout under the row lock, merged with any child
+            # checkpoint already written. A terminal job keeps its final result.
+            db.refresh(job, with_for_update=True)
+            if job.status not in _TERMINAL_PROCESSING_STATUSES:
+                fanout_state = dict(job.result or {})
+                fanout_state[_KG_FANOUT_PUBLISHED_KEY] = True
+                job.result = fanout_state
+            db.commit()
             return {"status": "running", "job_id": job_id}
 
         if document_index is not None:

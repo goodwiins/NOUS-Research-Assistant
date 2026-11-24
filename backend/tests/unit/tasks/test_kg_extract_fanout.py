@@ -69,12 +69,15 @@ def test_redelivered_single_document_job_restarts(
 def test_redelivered_batch_dispatcher_does_not_publish_twice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mutation check: disable the RUNNING batch guard in
-    processing_tasks.py and run this test; it must attempt a second publish.
+    """Mutation check: make the fanout-marker check in the RUNNING batch guard
+    of processing_tasks.py (``(job.result or {}).get(_KG_FANOUT_PUBLISHED_KEY)``)
+    always false; this RUNNING job with the marker must then fail instead of
+    skipping (``job.fail_job`` called, no ``duplicate_delivery``).
     """
     job = MagicMock()
     job.status = JobStatus.RUNNING
     job.parameters = {"document_ids": ["doc-1", "doc-2"]}
+    job.result = {pt._KG_FANOUT_PUBLISHED_KEY: True}
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = job
     monkeypatch.setattr(pt, "SessionLocal", lambda: db)
@@ -82,33 +85,114 @@ def test_redelivered_batch_dispatcher_does_not_publish_twice(
 
     result = pt.kg_extract_entities_job.apply(args=("job-1",)).result
 
-    assert result["skipped"] == "duplicate_delivery"
+    assert result == {
+        "status": "running",
+        "job_id": "job-1",
+        "skipped": "duplicate_delivery",
+    }
     job.start_job.assert_not_called()
+    job.fail_job.assert_not_called()
 
 
-def test_retry_clears_saved_document_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mutation check: omit the RETRYING result clear in processing_tasks.py;
-    this test must observe the previous attempt's document checkpoint.
+def test_dispatcher_lost_before_fanout_fails_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker loss after the RUNNING commit and before the group publish.
+
+    Mutation check: drop the fanout-marker check from the RUNNING batch guard
+    in processing_tasks.py (RUNNING and ``len(document_ids) > 1`` alone skips);
+    this test must fail because ``fail_job`` is not called.
     """
     job = MagicMock()
-    job.status = JobStatus.RETRYING
+    job.status = JobStatus.RUNNING
     job.parameters = {"document_ids": ["doc-1", "doc-2"]}
-    job.result = {"_kg_document_results": {"0": {"entities_created": 1}}}
+    job.result = None
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = job
     monkeypatch.setattr(pt, "SessionLocal", lambda: db)
     monkeypatch.setattr(
-        pt,
-        "group",
-        lambda tasks: SimpleNamespace(
-            apply_async=lambda: SimpleNamespace(id="group-2")
-        ),
+        pt, "group", lambda tasks: pytest.fail("published an unconfirmed batch")
     )
 
     result = pt.kg_extract_entities_job.apply(args=("job-1",)).result
 
-    assert result["status"] == "running"
-    assert job.result is None
+    assert result == {"status": "failed", "job_id": "job-1"}
+    job.fail_job.assert_called_once_with(
+        "KG batch dispatcher worker was lost before batch fanout was confirmed; "
+        "an explicit retry is required",
+        error_type="DispatcherWorkerLost",
+    )
+    job.start_job.assert_not_called()
+    db.commit.assert_called_once()
+
+
+def test_batch_dispatch_records_fanout_after_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation check: remove the fanout-marker write after ``apply_async()``
+    in processing_tasks.py; this test must find no marker on the job.
+    """
+    job = MagicMock()
+    job.status = JobStatus.QUEUED
+    job.parameters = {"document_ids": ["doc-1", "doc-2"]}
+    job.result = None
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = job
+    monkeypatch.setattr(pt, "SessionLocal", lambda: db)
+    seen_at_publish: list[Any] = []
+
+    def apply_async() -> SimpleNamespace:
+        seen_at_publish.append(job.result)
+        # A child checkpoint written before the marker must survive.
+        job.result = {"_kg_document_results": {"0": {"entities_created": 1}}}
+        return SimpleNamespace(id="group-1")
+
+    monkeypatch.setattr(
+        pt, "group", lambda tasks: SimpleNamespace(apply_async=apply_async)
+    )
+
+    result = pt.kg_extract_entities_job.apply(args=("job-1",)).result
+
+    assert result == {"status": "running", "job_id": "job-1"}
+    assert seen_at_publish == [None]
+    assert job.result == {
+        "_kg_document_results": {"0": {"entities_created": 1}},
+        pt._KG_FANOUT_PUBLISHED_KEY: True,
+    }
+    db.refresh.assert_called_with(job, with_for_update=True)
+
+
+def test_retry_clears_saved_document_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation check: omit the RETRYING result clear in processing_tasks.py;
+    this test must observe the previous attempt's document checkpoint and
+    fanout marker.
+    """
+    job = MagicMock()
+    job.status = JobStatus.RETRYING
+    job.parameters = {"document_ids": ["doc-1", "doc-2"]}
+    job.result = {
+        "_kg_document_results": {"0": {"entities_created": 1}},
+        pt._KG_FANOUT_PUBLISHED_KEY: True,
+    }
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = job
+    monkeypatch.setattr(pt, "SessionLocal", lambda: db)
+    seen_at_publish: list[Any] = []
+
+    def apply_async() -> SimpleNamespace:
+        seen_at_publish.append(job.result)
+        return SimpleNamespace(id="group-2")
+
+    monkeypatch.setattr(
+        pt, "group", lambda tasks: SimpleNamespace(apply_async=apply_async)
+    )
+
+    result = pt.kg_extract_entities_job.apply(args=("job-1",)).result
+
+    assert result == {"status": "running", "job_id": "job-1"}
+    assert seen_at_publish == [None]
+    assert job.result == {pt._KG_FANOUT_PUBLISHED_KEY: True}
+    job.start_job.assert_called_once()
 
 
 def _document_job(
