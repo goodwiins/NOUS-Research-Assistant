@@ -66,30 +66,53 @@ def test_redelivered_single_document_job_restarts(
     job.start_job.assert_called_once()
 
 
+def _redelivered_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    result: dict[str, Any] | None,
+    celery_task_id: str = "task-1",
+) -> tuple[MagicMock, MagicMock, list[str]]:
+    """A RUNNING two-document batch whose dispatcher ran as ``celery_task_id``."""
+    job = MagicMock()
+    job.status = JobStatus.RUNNING
+    job.parameters = {"document_ids": ["doc-1", "doc-2"]}
+    job.result = result
+    job.celery_task_id = celery_task_id
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = job
+    monkeypatch.setattr(pt, "SessionLocal", lambda: db)
+    monkeypatch.setattr(pt, "group", lambda tasks: pytest.fail("published a batch"))
+    calls: list[str] = []
+    db.refresh.side_effect = lambda *args, **kwargs: calls.append(
+        "locked_refresh" if kwargs.get("with_for_update") else "refresh"
+    )
+    db.commit.side_effect = lambda: calls.append("commit")
+    job.fail_job.side_effect = lambda *args, **kwargs: calls.append("fail_job")
+    return job, db, calls
+
+
+_DUPLICATE_SKIP = {
+    "status": "running",
+    "job_id": "job-1",
+    "skipped": "duplicate_delivery",
+}
+
+
 def test_redelivered_batch_dispatcher_does_not_publish_twice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mutation check: make the fanout-marker check in the RUNNING batch guard
-    of processing_tasks.py (``(job.result or {}).get(_KG_FANOUT_PUBLISHED_KEY)``)
-    always false; this RUNNING job with the marker must then fail instead of
-    skipping (``job.fail_job`` called, no ``duplicate_delivery``).
+    of processing_tasks.py (``dispatch_state.get(_KG_FANOUT_PUBLISHED_KEY)``)
+    always false; this redelivered RUNNING job with the marker must then fail
+    instead of skipping (``job.fail_job`` called, no ``duplicate_delivery``).
     """
-    job = MagicMock()
-    job.status = JobStatus.RUNNING
-    job.parameters = {"document_ids": ["doc-1", "doc-2"]}
-    job.result = {pt._KG_FANOUT_PUBLISHED_KEY: True}
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = job
-    monkeypatch.setattr(pt, "SessionLocal", lambda: db)
-    monkeypatch.setattr(pt, "group", lambda tasks: pytest.fail("published batch twice"))
+    job, _, _ = _redelivered_batch(
+        monkeypatch, result={pt._KG_FANOUT_PUBLISHED_KEY: True}
+    )
 
-    result = pt.kg_extract_entities_job.apply(args=("job-1",)).result
+    result = pt.kg_extract_entities_job.apply(args=("job-1",), task_id="task-1").result
 
-    assert result == {
-        "status": "running",
-        "job_id": "job-1",
-        "skipped": "duplicate_delivery",
-    }
+    assert result == _DUPLICATE_SKIP
     job.start_job.assert_not_called()
     job.fail_job.assert_not_called()
 
@@ -99,22 +122,13 @@ def test_dispatcher_lost_before_fanout_fails_job(
 ) -> None:
     """Worker loss after the RUNNING commit and before the group publish.
 
-    Mutation check: drop the fanout-marker check from the RUNNING batch guard
-    in processing_tasks.py (RUNNING and ``len(document_ids) > 1`` alone skips);
+    Mutation check: drop the evidence checks from the RUNNING batch guard in
+    processing_tasks.py (RUNNING and ``len(document_ids) > 1`` alone skips);
     this test must fail because ``fail_job`` is not called.
     """
-    job = MagicMock()
-    job.status = JobStatus.RUNNING
-    job.parameters = {"document_ids": ["doc-1", "doc-2"]}
-    job.result = None
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = job
-    monkeypatch.setattr(pt, "SessionLocal", lambda: db)
-    monkeypatch.setattr(
-        pt, "group", lambda tasks: pytest.fail("published an unconfirmed batch")
-    )
+    job, _, calls = _redelivered_batch(monkeypatch, result=None)
 
-    result = pt.kg_extract_entities_job.apply(args=("job-1",)).result
+    result = pt.kg_extract_entities_job.apply(args=("job-1",), task_id="task-1").result
 
     assert result == {"status": "failed", "job_id": "job-1"}
     job.fail_job.assert_called_once_with(
@@ -123,7 +137,47 @@ def test_dispatcher_lost_before_fanout_fails_job(
         error_type="DispatcherWorkerLost",
     )
     job.start_job.assert_not_called()
-    db.commit.assert_called_once()
+    # The failure is written and committed under the row lock.
+    assert calls == ["locked_refresh", "fail_job", "commit"]
+
+
+def test_other_dispatcher_message_skips_while_owner_publishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second message (another task id) must not fail a live batch.
+
+    Mutation check: make ``job.celery_task_id != self.request.id`` in the
+    RUNNING batch guard of processing_tasks.py always false; this test must
+    fail because the batch is failed instead of skipped.
+    """
+    job, _, _ = _redelivered_batch(monkeypatch, result=None, celery_task_id="task-1")
+
+    result = pt.kg_extract_entities_job.apply(args=("job-1",), task_id="task-2").result
+
+    assert result == _DUPLICATE_SKIP
+    job.start_job.assert_not_called()
+    job.fail_job.assert_not_called()
+
+
+def test_redelivered_dispatcher_with_child_checkpoint_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published before the marker (old code, or lost after the publish).
+
+    Mutation check: make ``dispatch_state.get("_kg_document_results")`` in the
+    RUNNING batch guard of processing_tasks.py always false; this test must
+    fail because the batch is failed instead of skipped.
+    """
+    job, _, _ = _redelivered_batch(
+        monkeypatch,
+        result={"_kg_document_results": {"0": {"entities_created": 1}}},
+    )
+
+    result = pt.kg_extract_entities_job.apply(args=("job-1",), task_id="task-1").result
+
+    assert result == _DUPLICATE_SKIP
+    job.start_job.assert_not_called()
+    job.fail_job.assert_not_called()
 
 
 def test_batch_dispatch_records_fanout_after_publish(
@@ -160,6 +214,37 @@ def test_batch_dispatch_records_fanout_after_publish(
         pt._KG_FANOUT_PUBLISHED_KEY: True,
     }
     db.refresh.assert_called_with(job, with_for_update=True)
+
+
+def test_failed_fanout_record_keeps_published_batch_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation check: re-raise from the ``except`` around the fanout-marker
+    write in processing_tasks.py; this test must fail because the published
+    batch is failed with the DB error.
+    """
+    job = MagicMock()
+    job.status = JobStatus.QUEUED
+    job.parameters = {"document_ids": ["doc-1", "doc-2"]}
+    job.result = None
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = job
+    db.commit.side_effect = [None, RuntimeError("lock timeout")]
+    monkeypatch.setattr(pt, "SessionLocal", lambda: db)
+    published: list[str] = []
+    monkeypatch.setattr(
+        pt,
+        "group",
+        lambda tasks: SimpleNamespace(apply_async=lambda: published.append("group-1")),
+    )
+
+    outcome = pt.kg_extract_entities_job.apply(args=("job-1",))
+
+    assert outcome.successful()
+    assert outcome.result == {"status": "running", "job_id": "job-1"}
+    assert published == ["group-1"]
+    db.rollback.assert_called_once()
+    job.fail_job.assert_not_called()
 
 
 def test_retry_clears_saved_document_results(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1269,17 +1269,25 @@ def kg_extract_entities_job(self, job_id: str, document_index: int | None = None
         if skipped is not None:
             return skipped
         if document_index is None:
-            # A RUNNING batch is a redelivered dispatcher. Only the fanout
-            # marker, written after the group publish, proves the document
-            # tasks exist; then a late broker ack must not publish a second
-            # copy. Without it the worker died between start_job and the
+            # A RUNNING batch is a second dispatcher delivery. A message with
+            # another task id is a separate duplicate (say a reconciler
+            # re-enqueue) while the owner may still be publishing: skip it.
+            # For the owner's own redelivery, the fanout marker written after
+            # the publish, or a child checkpoint, proves the document tasks
+            # exist; then a late broker ack must not publish a second copy.
+            # Without either the worker died between start_job and the
             # publish, possibly mid-publish, so fail honestly under the lock
             # and require an explicit retry rather than replay or drop it.
             if (
                 job.status == JobStatus.RUNNING
                 and len((job.parameters or {}).get("document_ids", [])) > 1
             ):
-                if (job.result or {}).get(_KG_FANOUT_PUBLISHED_KEY):
+                dispatch_state = job.result or {}
+                if (
+                    job.celery_task_id != self.request.id
+                    or dispatch_state.get(_KG_FANOUT_PUBLISHED_KEY)
+                    or dispatch_state.get("_kg_document_results")
+                ):
                     return {
                         "status": "running",
                         "job_id": job_id,
@@ -1324,12 +1332,20 @@ def kg_extract_entities_job(self, job_id: str, document_index: int | None = None
             ).apply_async()
             # Record the fanout under the row lock, merged with any child
             # checkpoint already written. A terminal job keeps its final result.
-            db.refresh(job, with_for_update=True)
-            if job.status not in _TERMINAL_PROCESSING_STATUSES:
-                fanout_state = dict(job.result or {})
-                fanout_state[_KG_FANOUT_PUBLISHED_KEY] = True
-                job.result = fanout_state
-            db.commit()
+            # The group is already published, so a failed write must not fail
+            # the batch; a later redelivery falls back to child checkpoints.
+            try:
+                db.refresh(job, with_for_update=True)
+                if job.status not in _TERMINAL_PROCESSING_STATUSES:
+                    fanout_state = dict(job.result or {})
+                    fanout_state[_KG_FANOUT_PUBLISHED_KEY] = True
+                    job.result = fanout_state
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Job %s: could not record KG batch fanout after publish", job_id
+                )
             return {"status": "running", "job_id": job_id}
 
         if document_index is not None:
