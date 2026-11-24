@@ -29,6 +29,11 @@ This test enforces that rule instead of leaving it in a docstring:
    calls ``lock_active_project`` itself, so passing through it would count a
    ``VIEW`` caller as locked.
 
+Only code that can run counts toward the lock (GOO-795): the scan skips the
+bodies of nested functions, lambdas and classes (judged on their own, if at
+all) and branches a constant condition never takes (``if False:``, the
+``else`` of ``if True:``, ``while 0:``).
+
 Not covered: ORM attribute assignment on a loaded row (``row.x = ...``) is
 not visible to an AST scan. Graph rows are append-only by design (new
 versions supersede old ones), and ``invalidate_dependents`` is the one
@@ -48,6 +53,7 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
@@ -374,13 +380,53 @@ def _action_forwarders() -> frozenset[str]:
     return frozenset(found)
 
 
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _constant_truth(test: ast.expr) -> bool | None:
+    """The truth of a literal condition (``False``, ``0``, ``None``,
+    ``not True``), or None when it depends on anything else."""
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _constant_truth(test.operand)
+        return None if inner is None else not inner
+    return None
+
+
+def _reachable(fn: Function) -> Iterator[ast.AST]:
+    """Like ``ast.walk(fn)``, without the code that never runs as part of
+    ``fn``: nested function, lambda and class bodies, and the branch of an
+    ``if``/``while``/ternary whose condition is a constant that skips it."""
+    todo: list[ast.AST] = list(fn.body)
+    while todo:
+        node = todo.pop()
+        yield node
+        if isinstance(node, _SCOPES):
+            # The decorators and defaults run here; the body does not.
+            if not isinstance(node, ast.Lambda):
+                todo += node.decorator_list
+            if not isinstance(node, ast.ClassDef):
+                todo += node.args.defaults
+                todo += [d for d in node.args.kw_defaults if d is not None]
+            continue
+        if isinstance(node, (ast.If, ast.While, ast.IfExp)):
+            truth = _constant_truth(node.test)
+            if truth is not None:
+                todo.append(node.test)
+                branch = node.body if truth else node.orelse
+                todo += branch if isinstance(branch, list) else [branch]
+                continue
+        todo += ast.iter_child_nodes(node)
+
+
 def _takes_lock(fn: Function) -> bool:
     """Calls ``lock_active_project`` or ``resolve_for_staling``, or calls
     ``resolve_project`` with a literal mutating ``ResearchAction``: directly,
     through a local alias (``resolve = resolve_for_staling if ... else
     resolve_project``) or through an action-forwarding wrapper."""
     resolvers = {RESOLVE} | _action_forwarders()
-    for node in ast.walk(fn):
+    for node in _reachable(fn):
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
@@ -393,7 +439,7 @@ def _takes_lock(fn: Function) -> bool:
             }
             if named & (LOCKS | {RESOLVE}):
                 resolvers.add(node.targets[0].id)
-    for node in ast.walk(fn):
+    for node in _reachable(fn):
         if isinstance(node, ast.Call):
             name = _call_name(node)
             if name in LOCKS or (name in resolvers and _mutating(node)):
@@ -417,7 +463,7 @@ def _lock_graph() -> tuple[dict[Key, set[Key]], frozenset[Key]]:
         for name, fn in local.items():
             edges[(path, name)] = {
                 key
-                for call in ast.walk(fn)
+                for call in _reachable(fn)
                 if isinstance(call, ast.Call)
                 and (key := _resolve(call, path, local))
                 and key[1] not in primitives
@@ -527,3 +573,152 @@ def test_the_scan_finds_the_known_writers() -> None:
         "experiment_service.py:register_figure",
     }
     assert expected <= seen, sorted(expected - seen)
+
+
+def _parsed(source: str) -> Function:
+    fn = ast.parse(source).body[0]
+    assert isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    return fn
+
+
+# GOO-795: a lock call that never runs as part of the function must not count.
+UNREACHABLE_LOCKS = {
+    "inside `if False:`": """
+async def w(db, pid):
+    if False:
+        await lock_active_project(db, pid)
+""",
+    "inside `if 0:` (resolve_project with a mutating action)": """
+async def w(db, pid, uid):
+    if 0:
+        await resolve_project(db, pid, uid, ResearchAction.EDIT)
+""",
+    "in the `else` of `if True:`": """
+async def w(db, pid):
+    if True:
+        pass
+    else:
+        await lock_active_project(db, pid)
+""",
+    "inside `while False:`": """
+async def w(db, pid):
+    while False:
+        await lock_active_project(db, pid)
+""",
+    "in the dead arm of a constant ternary": """
+async def w(db, pid):
+    await (lock_active_project(db, pid) if not True else noop())
+""",
+    "in a nested def that is never called": """
+async def w(db, pid):
+    async def _never():
+        await lock_active_project(db, pid)
+""",
+    "in a lambda that is never called": """
+async def w(db, pid):
+    later = lambda: resolve_for_staling(db, pid)
+""",
+    "in a nested class body": """
+async def w(db, pid):
+    class _Unused:
+        async def go(self):
+            await lock_active_project(db, pid)
+""",
+    "alias assigned only in a nested def": """
+async def w(db, pid, uid):
+    def _never():
+        resolve = resolve_for_staling
+    await resolve(db, pid, uid, ResearchAction.EDIT)
+""",
+}
+
+# The forms next to each plant that do take the lock.
+REACHABLE_LOCKS = {
+    "plain call": """
+async def w(db, pid):
+    await lock_active_project(db, pid)
+""",
+    "inside `if True:`": """
+async def w(db, pid):
+    if True:
+        await lock_active_project(db, pid)
+""",
+    "in the `else` of `if False:`": """
+async def w(db, pid):
+    if False:
+        pass
+    else:
+        await lock_active_project(db, pid)
+""",
+    "under a runtime condition": """
+async def w(db, pid, flag):
+    if flag:
+        await lock_active_project(db, pid)
+""",
+    "in the live arm of a constant ternary": """
+async def w(db, pid):
+    await (lock_active_project(db, pid) if True else noop())
+""",
+    "inside `while True:`": """
+async def w(db, pid):
+    while True:
+        await lock_active_project(db, pid)
+        break
+""",
+    "mutating resolve_project through a local alias": """
+async def w(db, pid, uid, staling):
+    resolve = resolve_for_staling if staling else resolve_project
+    await resolve(db, pid, uid, ResearchAction.EDIT)
+""",
+    "in a nested def's default argument": """
+async def w(db, pid):
+    def _later(lock=lock_active_project(db, pid)):
+        return lock
+""",
+    "in a nested def's decorator": """
+async def w(db, pid):
+    @lock_active_project(db, pid)
+    def _later():
+        return None
+""",
+}
+
+
+@pytest.mark.parametrize("name", sorted(UNREACHABLE_LOCKS))
+def test_a_lock_that_never_runs_is_not_counted(name: str) -> None:
+    assert not _takes_lock(_parsed(UNREACHABLE_LOCKS[name])), name
+
+
+@pytest.mark.parametrize("name", sorted(REACHABLE_LOCKS))
+def test_a_lock_that_runs_is_counted(name: str) -> None:
+    assert _takes_lock(_parsed(REACHABLE_LOCKS[name])), name
+
+
+def test_the_lock_graph_ignores_a_call_in_a_nested_def(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A helper that locks, called only from a nested def that never runs,
+    does not make the parent reach the lock through the call graph."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "__init__.py").write_text("")
+    module = src / "planted.py"
+    module.write_text(
+        "async def _locks(db, pid):\n"
+        "    await lock_active_project(db, pid)\n"
+        "async def parked(db, pid):\n"
+        "    async def _never():\n"
+        "        await _locks(db, pid)\n"
+        "async def live(db, pid):\n"
+        "    await _locks(db, pid)\n"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "SRC", src)
+    for cached in (_lock_graph, _action_forwarders, _imports):
+        cached.cache_clear()
+    try:
+        _, reaches = _lock_graph()
+    finally:
+        for cached in (_lock_graph, _action_forwarders, _imports):
+            cached.cache_clear()
+    assert (module, "live") in reaches
+    assert (module, "parked") not in reaches

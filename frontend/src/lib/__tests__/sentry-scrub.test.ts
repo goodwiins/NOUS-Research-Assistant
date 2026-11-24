@@ -181,6 +181,50 @@ describe('strings', () => {
     expect(long.length).toBeLessThan(MAX_STRING_LENGTH + 40);
     expect(long).toContain('[truncated');
   });
+
+  // GOO-795: pin the exact marker and the trailing trim at the scan cut.
+  it('marks a cut string with how many characters it dropped', () => {
+    const input = 'x '.repeat(MAX_STRING_LENGTH);
+    expect(scrubString(input)).toBe(
+      `${input.slice(0, MAX_STRING_LENGTH)}…[truncated ${MAX_STRING_LENGTH} chars]`
+    );
+  });
+
+  it('leaves a string at the limit unmarked', () => {
+    const input = 'x'.repeat(MAX_STRING_LENGTH);
+    expect(scrubString(input)).toBe(input);
+  });
+
+  it('drops the partial token cut at the scan limit, and marks the cut', () => {
+    // The cut at MAX_SCAN_LENGTH lands 16 characters into an unknown token,
+    // which no pattern would recognise as a secret once split.
+    const prefix = 'a '.repeat((MAX_SCAN_LENGTH - 16) / 2);
+    const input = `${prefix}Zq9${'k'.repeat(100)} tail`;
+    const out = scrubString(input, MAX_SCAN_LENGTH * 2);
+
+    expect(out).toBe(
+      `${prefix}…[truncated ${input.length - prefix.length} chars]`
+    );
+    expect(out).not.toContain('Zq9');
+  });
+
+  it('trims at most 256 characters of a token cut at the scan limit', () => {
+    const input = 'k'.repeat(MAX_SCAN_LENGTH + 1000);
+    const kept = MAX_SCAN_LENGTH - 256;
+
+    expect(scrubString(input, MAX_SCAN_LENGTH * 2)).toBe(
+      `${'k'.repeat(kept)}…[truncated ${input.length - kept} chars]`
+    );
+  });
+
+  it('marks a string cut at the scan limit even when it then fits', () => {
+    const input = `${'a '.repeat(MAX_SCAN_LENGTH / 2)}b`;
+    const out = scrubString(input, MAX_SCAN_LENGTH * 2);
+
+    expect(out).toBe(
+      `${'a '.repeat(MAX_SCAN_LENGTH / 2)}…[truncated 1 chars]`
+    );
+  });
 });
 
 describe('cost is bounded (no quadratic patterns)', () => {
