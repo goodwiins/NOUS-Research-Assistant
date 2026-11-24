@@ -54,19 +54,29 @@ instead of merging them, so `values-aws.yaml`'s `backend.env` replaces the one i
 AWS enables `backend.migrations.enabled` and disables
 `backend.initContainers.runMigrations`. The chart rejects enabling both.
 One ordinary, digest-pinned Job runs `alembic upgrade heads` with the backend's
-shared secret references and environment. Argo applies shared resources in
+shared secret references (`envFrom`) and only the DB entries of `backend.env`
+(`DATABASE_URL`, `SUPABASE_DB_URL`). Argo applies shared resources in
 wave 0, waits for the migration Job in wave 1 to complete, then updates the
 API, worker, beat and synthetic CronJob in wave 2. A failure or the ten-minute
 deadline blocks new consumers; old pods may continue serving during migration.
 Migrations must remain compatible with those old pods during rollout.
 
-The Job name hashes its image and pod configuration, so a new image/configuration
-creates a new Job rather than modifying an immutable completed pod template.
-Completed Jobs have no TTL: deleting them automatically would make Argo
-self-heal rerun migrations. The next successful rollout prunes the previous
-Job. The Job has no automatic retries; diagnose a failed migration before an
-explicitly authorized retry. Provider-side secret content changes alone do not
-change Job identity; a new image/configuration or an authorized retry is needed.
+The Job name hashes the image and the DB settings (plus static pod settings
+and secret reference names), not feature flags: the pod omits every non-DB
+`backend.env` entry, so flipping a flag neither reruns Alembic nor changes the
+Job. A new image or DB setting creates a new Job rather than modifying an
+immutable completed pod template. Completed Jobs have no TTL: deleting them
+automatically would make Argo self-heal rerun migrations. The next successful
+rollout prunes the previous Job. The Job retries up to 2 times inside the
+ten-minute deadline, which rides out a transient connection failure; diagnose
+a Job that still fails before an explicitly authorized retry. Provider-side
+secret content changes alone do not change Job identity; a new image/DB setting
+or an authorized retry is needed.
+
+There is no in-cluster alert for a failed Job. A failed Job keeps dev on the
+old build, so it surfaces as a failed scheduled `verify-dev-health.yml` run:
+the build mismatch after the 20 min grace, with an error line naming the
+migration Job.
 
 Use a full application Argo sync. Resource-selective sync and standalone Helm
 upgrade do not enforce this wave barrier and must not be used to promote AWS

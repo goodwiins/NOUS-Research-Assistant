@@ -158,6 +158,10 @@ def check_build(
         )
         return True
     log(f"::error::{detail} after the {grace_seconds / 60:.0f} min rollout grace")
+    log(
+        "::error::likely cause: the wave-1 migration Job (nous-dev-aws-migrate-*) "
+        "failed or is still running, so Argo CD did not start wave 2"
+    )
     return False
 
 
