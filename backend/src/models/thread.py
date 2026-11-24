@@ -98,6 +98,7 @@ class Thread(BaseModel):
             "documents.id", name="fk_threads_branch_document_id", ondelete="SET NULL"
         ),
         nullable=True,
+        index=True,
     )
     selected_message_id = Column(
         GUID(),

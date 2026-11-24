@@ -117,4 +117,6 @@ class ResearchFulltextAttempt(Base):
             sqlite_where=text(_FIRST_ATTEMPT),
         ),
         Index("idx_research_fulltext_attempt_request", "request_id"),
+        # Serves the document delete's RESTRICT check (GOO-737).
+        Index("ix_research_fulltext_attempts_document_id", "document_id"),
     )

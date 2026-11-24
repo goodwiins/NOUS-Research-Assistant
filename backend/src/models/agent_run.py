@@ -91,10 +91,16 @@ class AgentRun(Base):
         index=True,
     )
     conversation_id = Column(
-        GUID(), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     project_id = Column(
-        GUID(), ForeignKey("collections.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("collections.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     # Transcript linkage — the committed user turn that started the run and

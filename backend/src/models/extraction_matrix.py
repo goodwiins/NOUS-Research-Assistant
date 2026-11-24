@@ -291,4 +291,7 @@ class ExtractionAcceptedValue(Base):
             postgresql_where=text(_INITIAL_ACCEPTED),
             sqlite_where=text(_INITIAL_ACCEPTED),
         ),
+        # The partial index above cannot serve the document delete's
+        # RESTRICT check for every row (GOO-737).
+        Index("ix_extraction_accepted_values_document_id", "document_id"),
     )
