@@ -171,10 +171,17 @@ function EntityManagementContent() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const [relationshipDialogOpen, setRelationshipDialogOpen] = useState(false);
+  // Bumped after a saved relationship so the open detail dialog refetches its
+  // list (GOO-794). A failed save leaves it alone.
+  const [relationshipsVersion, setRelationshipsVersion] = useState(0);
   const [sourceEntityId, setSourceEntityId] = useState<string | null>(null);
   const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const entitiesRequestToken = useRef(0);
+  // The relationship dialog has no Radix trigger, so on close Radix would drop
+  // focus to <body> (WCAG 2.4.3). It opens over the detail dialog, which stays
+  // mounted, so focus goes back to this button instead (GOO-767).
+  const addRelationshipTriggerRef = useRef<HTMLButtonElement>(null);
   const relationshipsRequestToken = useRef(0);
 
   // Dynamic types from API
@@ -632,6 +639,7 @@ function EntityManagementContent() {
     try {
       await entityService.createRelationship(data);
       toast.success('Relationship created successfully');
+      setRelationshipsVersion((version) => version + 1);
       setRelationshipDialogOpen(false);
       setSourceEntityId(null);
       // Refresh relationships if on graph tab
@@ -1230,6 +1238,7 @@ function EntityManagementContent() {
               <div className="py-4">
                 <EntityDetail
                   entity={selectedEntity}
+                  relationshipsVersion={relationshipsVersion}
                   onEdit={() => {
                     setDetailDialogOpen(false);
                     setEditDialogOpen(true);
@@ -1240,6 +1249,43 @@ function EntityManagementContent() {
                     setSelectedEntity(entity);
                   }}
                 />
+                {/* The only entry point to the relationship dialog (GOO-767).
+                    Disabled until the graph's own relationship types load:
+                    the form has nothing to offer without them (GOO-756).
+                    This dialog stays open underneath, so closing the
+                    relationship dialog returns the user here. */}
+                <div className="mt-4 flex items-center justify-end gap-3 border-t border-border pt-4">
+                  {relationshipTypeList.status !== 'loaded' && (
+                    <span
+                      id="add-relationship-status"
+                      className="text-xs text-muted-foreground"
+                    >
+                      {relationshipTypeList.status === 'loading'
+                        ? 'Loading relationship types…'
+                        : "Couldn't load relationship types"}
+                    </span>
+                  )}
+                  <Button
+                    ref={addRelationshipTriggerRef}
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      !canCreate || relationshipTypeList.status !== 'loaded'
+                    }
+                    aria-describedby={
+                      relationshipTypeList.status !== 'loaded'
+                        ? 'add-relationship-status'
+                        : undefined
+                    }
+                    onClick={() => handleAddRelationship(selectedEntity.id)}
+                  >
+                    <Plus aria-hidden="true" className="h-4 w-4 mr-1.5" />
+                    Add relationship
+                    {!canCreate && (
+                      <span className="ml-1 text-xs opacity-80">(admin)</span>
+                    )}
+                  </Button>
+                </div>
               </div>
             )}
           </DialogContent>
@@ -1253,7 +1299,16 @@ function EntityManagementContent() {
             if (!open) setSourceEntityId(null);
           }}
         >
-          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto bg-card border-border text-foreground">
+          <DialogContent
+            className="max-w-2xl max-h-[90vh] overflow-y-auto bg-card border-border text-foreground"
+            onCloseAutoFocus={(event) => {
+              const trigger = addRelationshipTriggerRef.current;
+              if (trigger?.isConnected) {
+                event.preventDefault();
+                trigger.focus();
+              }
+            }}
+          >
             <DialogHeader className="border-b border-border pb-4">
               <DialogTitle className="text-lg font-semibold">
                 New relationship

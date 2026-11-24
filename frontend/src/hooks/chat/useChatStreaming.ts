@@ -30,7 +30,11 @@ import {
   markChatAuthRecoveryReady,
   stageChatAuthRecovery,
 } from '@/hooks/chat/chatAuthRecovery';
-import { agentChatService } from '@/services/agentChatService';
+import { loadChatDraft, saveChatDraft } from '@/hooks/chat/unsentChatStorage';
+import {
+  AgentStreamRequestFailed,
+  agentChatService,
+} from '@/services/agentChatService';
 import type { AgentStreamCallbacks } from '@/services/agentChatService';
 import { useHarnessConnection } from '@/hooks/chat/useHarnessConnection';
 import type { HarnessConnectionController } from '@/hooks/chat/useHarnessConnection';
@@ -427,6 +431,21 @@ export function replacePreservingApproval(
   };
 }
 
+/** Toast and bubble text for a send the server never accepted (GOO-772).
+ * 0 means the request got no response at all. */
+export function sendRejectedMessage(status: number): string {
+  if (status === 409) {
+    return 'This chat is busy, so your message wasn’t sent. Retry when the current reply finishes.';
+  }
+  if (status === 0) {
+    return 'Couldn’t reach the server, so your message wasn’t sent. Check your connection and retry.';
+  }
+  if (status >= 500) {
+    return 'The server couldn’t take your message, so it wasn’t sent. Retry in a moment.';
+  }
+  return 'The server rejected your message, so it wasn’t sent. Edit it or retry.';
+}
+
 function withoutReplacementMarkers(
   messages: ChatPageMessage[]
 ): ChatPageMessage[] {
@@ -745,18 +764,25 @@ export function useChatStreaming(
       // this hook again (for example when a preflight is superseded). Resolve
       // the owner from the live stores so a draft entered in the new context
       // cannot be written under the old callback's key.
-      const contextKey = chatDraftContextKey(
-        useAuthStore.getState().user?.id,
+      const ownerUserId = useAuthStore.getState().user?.id;
+      const workspaceId =
         workspace?.id ??
-          dbConversation?.workspace_id ??
-          draftWorkspaceIdRef.current,
-        liveDraftThreadId()
+        dbConversation?.workspace_id ??
+        draftWorkspaceIdRef.current;
+      const threadId = liveDraftThreadId();
+      const contextKey = chatDraftContextKey(
+        ownerUserId,
+        workspaceId,
+        threadId
       );
       inputContextKeyRef.current = contextKey;
       if (contextKey) {
         if (next) draftValuesRef.current.set(contextKey, next);
         else draftValuesRef.current.delete(contextKey);
       }
+      // Survives a reload (GOO-788). A send clears the composer through here
+      // first, so a sent draft never comes back.
+      if (ownerUserId) saveChatDraft(ownerUserId, workspaceId, threadId, next);
       setInputState(next);
     },
     [dbConversation?.workspace_id, liveDraftThreadId, workspace?.id]
@@ -797,6 +823,9 @@ export function useChatStreaming(
       draftValuesRef.current.get(draftContextKey) ??
       pendingPreflightDraftsRef.current.get(draftContextKey) ??
       carriedDraft ??
+      (authenticatedUserId
+        ? loadChatDraft(authenticatedUserId, draftWorkspaceId, draftThreadId)
+        : undefined) ??
       '';
     if (pendingPreflightDraftsRef.current.has(draftContextKey)) {
       pendingPreflightDraftsRef.current.delete(draftContextKey);
@@ -2376,7 +2405,10 @@ export function useChatStreaming(
         const newMessages = [
           ...messages.filter(
             (message) =>
-              message.source === 'optimistic' &&
+              // A send the server rejected stays until the user retries or
+              // edits it (GOO-772); it is local-only, so never sent as history.
+              (message.source === 'optimistic' ||
+                message.sendFailed !== undefined) &&
               (!retainedRuntimeIds || retainedRuntimeIds.has(message.runtimeId))
           ),
           userMessage,
@@ -2543,6 +2575,9 @@ export function useChatStreaming(
         let accepted = false;
         let completed = false;
         let failed = false;
+        // Set only when the server never accepted the turn: the HTTP status
+        // of a rejection, or 0 when the request got no response (GOO-772).
+        let rejectedStatus: number | undefined;
         try {
           await runStreamTurn({
             currentThreadId,
@@ -2631,6 +2666,11 @@ export function useChatStreaming(
                     },
                     onError: (...args) => {
                       failed = true;
+                      // The service sets args[3] only for an HTTP-level
+                      // failure, before any frame. 401 belongs to sign-in
+                      // recovery, which keeps the text itself and sends the
+                      // user to /login.
+                      if (args[3] !== 401) rejectedStatus = args[3];
                       streamCallbacks.onError?.(...args);
                     },
                   },
@@ -2638,10 +2678,43 @@ export function useChatStreaming(
                 );
               } catch (error) {
                 failed = true;
+                // Thrown only when the request got no response at all.
+                if (error instanceof AgentStreamRequestFailed) {
+                  rejectedStatus = 0;
+                }
                 throw error;
               }
             },
           });
+          if (rejectedStatus !== undefined && ownsPreflight()) {
+            // The server never accepted this turn: keep it as a failed bubble
+            // with Retry and Edit instead of the "response failed" bubble, and
+            // never lose the text (GOO-772). The composer gets it back only
+            // when empty, so a newer draft is never overwritten.
+            const notSent = sendRejectedMessage(rejectedStatus);
+            toast.error(notSent);
+            // No response means no run: there is nothing for the resume
+            // effect to recover, and its replay would overwrite the bubble.
+            transportFailureRef.current.delete(currentThreadId);
+            const {
+              clientMessageId: _neverStored,
+              replacesClientMessageId: _noLongerReplacing,
+              ...unsent
+            } = userMessage;
+            const failedBubble: ChatPageMessage = {
+              ...unsent,
+              source: 'local-only',
+              sendFailed: { message: notSent },
+            };
+            setMessages(
+              withoutReplacementMarkers(newMessages).map((message) =>
+                message.runtimeId === userMessage.runtimeId
+                  ? failedBubble
+                  : message
+              )
+            );
+            if (ownsDraft && !inputValueRef.current) setInput(originalDraft);
+          }
           if (quoteContext && ownsPreflight()) {
             // Durable acceptance means the canonical user turn already owns
             // this quote, including when generation subsequently stops/fails.

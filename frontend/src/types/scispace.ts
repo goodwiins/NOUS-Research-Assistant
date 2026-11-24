@@ -15,8 +15,10 @@ export interface ExtractionColumn {
 }
 
 /**
- * GET /matrices/{id} is an untyped dict, so a cell value is typed as any
- * JSON value. Turn it into text with `extractionCellText` (GOO-763).
+ * The backend sends a cell value as `str | None` (`display()` in
+ * `extraction_rules.py`). GET /matrices/{id} is an untyped dict, though, so
+ * the wider JSON type here is defensive: nothing in the schema stops another
+ * shape. Turn a value into text with `extractionCellText` (GOO-763, GOO-779).
  */
 export type ExtractionCellValue =
   | string

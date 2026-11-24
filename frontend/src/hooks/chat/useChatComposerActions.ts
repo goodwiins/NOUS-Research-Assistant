@@ -221,14 +221,22 @@ export function useChatComposerActions({
       if (!content) return;
       const edited = displayedMessages[userMessageIndex];
       if (!edited || edited.role !== 'user') return;
-      const editedHistory = displayedMessages.slice(0, userMessageIndex);
+      // A turn the server never accepted (GOO-772) left nothing to truncate:
+      // resend it with every other row on screen, so later turns, including
+      // later unsent ones, stay where they are. Otherwise the history stops
+      // just before the edited turn.
+      const editedHistory = edited.sendFailed
+        ? displayedMessages.filter((_, index) => index !== userMessageIndex)
+        : displayedMessages.slice(0, userMessageIndex);
       // Durable edit: name the turn being replaced so the server tombstones it
       // (and everything after it) instead of only truncating the request
       // context. Omitted when the edited turn has no persisted
       // client_message_id — a legacy row or one that never reached the server;
       // the FE-only truncation is then the same behaviour as before.
       const supersedes = edited.clientMessageId;
-      const branch = branchIntentFor(edited);
+      // It also has no row to branch from: it was a new turn, so it goes out
+      // again as one, on the current head.
+      const branch = edited.sendFailed ? undefined : branchIntentFor(edited);
       if (branch === null) {
         toast.error('Wait for this branch to load before editing.');
         return;

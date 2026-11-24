@@ -9,7 +9,6 @@ import {
   Clock,
   CheckCircle,
   FileText,
-  Plus,
   Trash2,
   Info,
   Network,
@@ -50,6 +49,12 @@ interface EntityDetailProps {
   onEdit?: () => void;
   onClose?: () => void;
   onEntityClick?: (entity: Entity) => void;
+  /**
+   * Bumped by the parent after it saves a relationship for this entity. The
+   * dialog stays open while the relationship dialog is used (GOO-767), so a
+   * change here refetches the list (GOO-794).
+   */
+  relationshipsVersion?: number;
 }
 
 const formatField = (key: string): string => {
@@ -62,31 +67,39 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
   onEdit,
   onClose,
   onEntityClick,
+  relationshipsVersion = 0,
 }) => {
-  const { canCreate, canEdit, canDelete } = useEntityPermissions();
+  const { canEdit, canDelete } = useEntityPermissions();
   const [relationships, setRelationships] = useState<GraphEdge[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Which request's result is on screen. Loading is derived from it, so the
+  // effect never sets state synchronously; relationshipsVersion is bumped by
+  // the parent after a saved relationship (GOO-794).
+  const requestKey = `${entity?.id}:${relationshipsVersion}`;
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const loading = settledKey !== requestKey;
   const [relationshipToDelete, setRelationshipToDelete] =
     useState<GraphEdge | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    if (entity?.id) {
-      fetchRelationships();
-    }
-  }, [entity?.id]);
-
-  const fetchRelationships = async () => {
-    try {
-      setLoading(true);
-      const response = await entityService.getEntityRelationships(entity.id);
-      setRelationships(response);
-    } catch (error) {
-      console.error('Error fetching relationships:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    if (!entity?.id) return;
+    let current = true;
+    entityService
+      .getEntityRelationships(entity.id)
+      .then((response) => {
+        if (current) setRelationships(response);
+      })
+      .catch((error: unknown) => {
+        console.error('Error fetching relationships:', error);
+      })
+      .finally(() => {
+        if (current) setSettledKey(requestKey);
+      });
+    // A response for an entity or version no longer shown is dropped.
+    return () => {
+      current = false;
+    };
+  }, [entity?.id, requestKey]);
 
   const handleConfirmDeleteRelationship = async () => {
     if (!relationshipToDelete) return;
@@ -94,7 +107,7 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
     try {
       setDeleting(true);
       await entityService.deleteRelationship(relationshipToDelete.id);
-      await fetchRelationships();
+      setRelationships(await entityService.getEntityRelationships(entity.id));
       setRelationshipToDelete(null);
     } catch (error) {
       console.error('Error deleting relationship:', error);
@@ -373,19 +386,6 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
                 />
                 Relationships
               </CardTitle>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!canCreate}
-                className="h-7 text-xs hover:text-primary hover:bg-primary/10 disabled:opacity-30 disabled:cursor-not-allowed"
-                title={
-                  !canCreate ? 'Admin access required' : 'Add relationship'
-                }
-              >
-                <Plus aria-hidden="true" className="h-3.5 w-3.5 mr-1.5" />
-                Add relationship
-                {!canCreate && <span className="ml-1 opacity-80">(admin)</span>}
-              </Button>
             </CardHeader>
             <CardContent className="p-0">
               {loading ? (

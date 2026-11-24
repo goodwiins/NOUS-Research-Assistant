@@ -215,36 +215,95 @@ def check() -> None:
                     except OSError:
                         break
 
-        def wait_for(text: str, start: int = 0) -> None:
-            end = time.monotonic() + 12
+        # GOO-781: the waits below key on what the UI draws, not on fixed
+        # sleeps. The bounds are backstops only: generous, because a cold
+        # start compiles the app with tsx (over 12 s on a loaded runner),
+        # and each failure names what it was waiting for.
+        STARTUP_BOUND = 90.0
+        STEP_BOUND = 30.0
+        # Ink redraws the whole frame. While a command runs, the line under
+        # the composer footer reads "... · Esc to cancel"; typed input is not
+        # sent then (isSendDisabled) and a second command is dropped
+        # (runOperation returns early).
+        FOOTER = b"stop/exit"
+        BUSY = "· Esc to cancel".encode()
+
+        def screen() -> str:
+            return output.decode(errors="replace")[-3500:]
+
+        def settle(bound: float = 5.0) -> None:
+            """Drain until the app has stopped drawing for a moment, i.e. it
+            has handled the keys sent so far."""
+            end = time.monotonic() + bound
+            while time.monotonic() < end:
+                before = len(output)
+                drain(0.25)
+                if len(output) == before:
+                    return
+
+        def wait_for(text: str, start: int = 0, bound: float = STEP_BOUND) -> None:
+            end = time.monotonic() + bound
             while text.encode() not in output[start:] and time.monotonic() < end:
                 drain()
-            assert text.encode() in output[start:], output.decode(errors="replace")[
-                -3500:
-            ]
+            assert (
+                text.encode() in output[start:]
+            ), f"Timed out after {bound:.0f}s waiting for {text!r}.\n{screen()}"
+
+        def wait_idle() -> None:
+            """Wait for a settled frame drawn after the previous command
+            finished: its busy line is gone from under the footer."""
+            end = time.monotonic() + STEP_BOUND
+            while time.monotonic() < end:
+                settle()
+                busy_at = output.rfind(BUSY)
+                if busy_at == -1 or busy_at < output.rfind(FOOTER):
+                    return
+                drain()
+            raise AssertionError(
+                f"The previous command was still running after {STEP_BOUND:.0f}s.\n"
+                f"{screen()}"
+            )
 
         def send(text: str) -> None:
             os.write(master, text.encode())
-            drain()
+            settle()
 
         def command(text: str, expected: str) -> None:
+            wait_idle()
             start = len(output)
             send(text)
             send("\r")
             wait_for(expected, start)
 
         def wait_saved(key: str, value: Any) -> None:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + STEP_BOUND
             while saved().get(key) != value and time.monotonic() < deadline:
                 drain()
-            assert saved().get(key) == value, output.decode(errors="replace")[-3500:]
+            assert saved().get(key) == value, (
+                f"Timed out after {STEP_BOUND:.0f}s waiting for config "
+                f"{key}={value!r} (have {saved().get(key)!r}).\n{screen()}"
+            )
+
+        def wait_request(content: str) -> None:
+            """Wait until the fake server has the chat request for `content`.
+            The reply text alone is not enough: a redraw can repeat the
+            previous reply before the new request is sent."""
+            end = time.monotonic() + STEP_BOUND
+            while time.monotonic() < end and not any(
+                r["messages"][-1]["content"] == content for r in requests
+            ):
+                drain()
+            assert any(r["messages"][-1]["content"] == content for r in requests), (
+                f"Timed out after {STEP_BOUND:.0f}s waiting for the chat request "
+                f"{content!r}; got {[r['messages'][-1]['content'] for r in requests]}."
+            )
 
         def saved() -> dict[str, Any]:
             data: dict[str, Any] = json.loads(Path(config, "config.json").read_text())
             return data
 
         try:
-            wait_for("Ask NOUS")
+            wait_for("Ask NOUS", bound=STARTUP_BOUND)
             wait_for("Locally saved question")
             wait_for("Could not refresh")
             assert b"Wrong sibling question" not in output
@@ -280,6 +339,7 @@ def check() -> None:
             command("/help", "Edits and retries create")
             send("\x1b")
             command("hi", "Handoff succeeded")
+            wait_request("hi")
             assert len(requests) == 1, requests
             assert requests[0]["messages"][-1]["content"] == "hi", requests
             assert requests[0]["thread_id"] == "thread-2", requests
@@ -304,6 +364,7 @@ def check() -> None:
             command("/edit 1", "Edit message")
             send("\x1b")
             command("after cancelling edit", "Handoff succeeded")
+            wait_request("after cancelling edit")
             assert (
                 requests[-1]["messages"][-1]["content"] == "after cancelling edit"
             ), requests
@@ -318,11 +379,13 @@ def check() -> None:
                 }
             ], confirmations
             Handler.project_gate = threading.Event()
+            wait_idle()  # The approval reply's command must have finished.
             send("/projects")
             send("\r")
-            assert Handler.project_started.wait(timeout=5), output.decode(
-                errors="replace"
-            )[-5000:]
+            assert Handler.project_started.wait(timeout=STEP_BOUND), (
+                f"/projects did not request the project list within "
+                f"{STEP_BOUND:.0f}s.\n{screen()}"
+            )
             send("\x1b")
             command("/help", "Edits and retries create")
             start = len(output)
@@ -331,6 +394,7 @@ def check() -> None:
             drain(0.3)
             assert b"Pick a project" not in output[start:], "Dismissed menu reopened"
             send("\x1b")
+            wait_idle()
             send("line one")
             send("\x0a")
             command("line two", "Handoff succeeded")
@@ -346,6 +410,8 @@ def check() -> None:
             assert (
                 requests[-1]["messages"][-1]["content"] == "line one\nline two"
             ), requests
+            # Ctrl+C cancels a reply that is still streaming instead of exiting.
+            wait_idle()
             send("unsent draft")
             send("\x03")
             proc.wait(timeout=5)

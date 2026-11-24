@@ -191,4 +191,34 @@ describe('pipelineStore id mismatch (GOO-778)', () => {
       );
     }
   );
+
+  // M7. Mutation check: delete the `if (pipelineRequestToken !== requestToken)
+  // return;` line in the catch of `mutate` (pipelineStore.ts) and this test
+  // fails, because the stale failure overwrites the newer fetch's state.
+  it('a mutation that fails after a newer fetch started reports nothing', async () => {
+    getPipeline.mockResolvedValueOnce(makePipeline(LOWER, 1));
+    await state().fetchPipeline(LOWER);
+    consoleError.mockClear();
+
+    let rejectUpdate: (err: Error) => void = () => {};
+    updatePipeline.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectUpdate = reject;
+      })
+    );
+    const mutation = state().advanceStep(LOWER);
+
+    // A newer fetch (the project changed) takes the slot.
+    getPipeline.mockResolvedValueOnce(makePipeline(OTHER, 3));
+    const refetch = state().fetchPipeline(OTHER);
+
+    rejectUpdate(new Error('HTTP 500: stale'));
+    await Promise.all([mutation, refetch]);
+
+    expect(state().error).toBeNull();
+    expect(state().loading).toBe(false);
+    expect(state().pipeline?.project_id).toBe(OTHER);
+    expect(state().pipeline?.current_step).toBe(3);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
 });

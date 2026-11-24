@@ -24,14 +24,22 @@ const SOURCE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
 const SKIPPED_DIRS = new Set(['node_modules', '.next', '__tests__', '__mocks__']);
 const TEST_FILE = /\.(test|spec)\.[jt]sx?$/;
 
-/** Packages that record the DOM or the session. */
-const RECORDER_PACKAGE =
-  /^(@statsig\/session-replay|rrweb|rrweb-snapshot|@rrweb\/.+|posthog-js|logrocket|@fullstory\/.+|@hotjar\/.+|@openreplay\/.+|@microsoft\/clarity|smartlook-client|mouseflow.*|@sentry-internal\/replay.*)$/;
+/**
+ * Packages that record the DOM or the session, or auto-capture page URLs,
+ * query params, the referrer and element text (Statsig AutoCapture, GOO-784).
+ * Shared by the package.json check and the import scan; any subpath counts
+ * (`@statsig/session-replay/build/index`).
+ */
+const RECORDER_PACKAGE_NAMES =
+  '@statsig\\/session-replay|@statsig\\/web-analytics|rrweb|rrweb-snapshot|@rrweb\\/[^/\'"]+|posthog-js|logrocket|@fullstory\\/[^/\'"]+|@hotjar\\/[^/\'"]+|@openreplay\\/[^/\'"]+|@microsoft\\/clarity|smartlook-client|mouseflow[^/\'"]*|@sentry-internal\\/replay[^/\'"]*';
 
-/** Ways source code can start a recorder. */
+const RECORDER_PACKAGE = new RegExp(`^(${RECORDER_PACKAGE_NAMES})(\\/.*)?$`);
+
+/** Ways source code can start a recorder or auto-capture. */
 const RECORDER_PATTERNS: readonly RegExp[] = [
-  /['"](@statsig\/session-replay|rrweb|rrweb-snapshot|@rrweb\/[^'"]+|posthog-js|logrocket|@fullstory\/[^'"]+|@hotjar\/[^'"]+|@openreplay\/[^'"]+|@microsoft\/clarity|smartlook-client|mouseflow[^'"]*|@sentry-internal\/replay[^'"]*)['"]/g,
+  new RegExp(`['"](${RECORDER_PACKAGE_NAMES})(\\/[^'"]*)?['"]`, 'g'),
   /\b\w*SessionReplay\w*\s*\(/g,
+  /\b\w*AutoCapture\w*\s*\(/g,
   /\breplay(Canvas)?Integration\s*\([^)]*\)/g,
 ];
 
@@ -134,7 +142,49 @@ describe('session replay registration (GOO-774)', () => {
     ).toBe(false);
   });
 
-  it('depends on no session-recording package besides Sentry', () => {
+  it('catches deep imports and auto-capture as well as package roots', () => {
+    const source = stripComments(
+      [
+        "import { X } from '@statsig/session-replay/build/index';",
+        "import { Y } from '@statsig/web-analytics';",
+        "import { record } from 'rrweb/typings/record';",
+        "import { Z } from '@fullstory/browser/dist/index.js';",
+        'const plugin = new StatsigAutoCapturePlugin();',
+        'runStatsigAutoCapture(client);',
+        "import { other } from '@statsig/react-bindings';",
+      ].join('\n')
+    );
+    const matches = RECORDER_PATTERNS.flatMap((pattern) =>
+      Array.from(source.matchAll(pattern), (m) => m[0].replace(/\s+/g, ''))
+    );
+
+    expect(matches).toEqual([
+      "'@statsig/session-replay/build/index'",
+      "'@statsig/web-analytics'",
+      "'rrweb/typings/record'",
+      "'@fullstory/browser/dist/index.js'",
+      'StatsigAutoCapturePlugin(',
+      'runStatsigAutoCapture(',
+    ]);
+    for (const name of [
+      '@statsig/session-replay',
+      '@statsig/session-replay/build/index',
+      '@statsig/web-analytics',
+      'rrweb/typings',
+    ]) {
+      expect(RECORDER_PACKAGE.test(name)).toBe(true);
+    }
+    for (const name of [
+      '@statsig/react-bindings',
+      '@statsig/js-client',
+      '@sentry/nextjs',
+      'rrweb-like',
+    ]) {
+      expect(RECORDER_PACKAGE.test(name)).toBe(false);
+    }
+  });
+
+  it('depends on no session-recording or auto-capture package besides Sentry', () => {
     const pkg = JSON.parse(
       readFileSync(path.join(ROOT, 'package.json'), 'utf8')
     ) as Record<string, Record<string, string> | undefined>;

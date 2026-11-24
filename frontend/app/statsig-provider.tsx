@@ -6,7 +6,6 @@ import {
   StatsigProvider,
   useClientAsyncInit,
 } from '@statsig/react-bindings';
-import { StatsigAutoCapturePlugin } from '@statsig/web-analytics';
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 
 interface StatsigClientProviderProps {
@@ -41,12 +40,15 @@ function StatsigInitializedProvider({ children }: StatsigClientProviderProps) {
   const { client } = useClientAsyncInit(SDK_KEY ?? '', statsigUser, {
     logLevel:
       process.env.NODE_ENV === 'production' ? LogLevel.Warn : LogLevel.Debug,
-    // No session replay (GOO-774): Statsig's recorder ran with no privacy
-    // options, outside Sentry's masking, iframe block list and URL scrubbing.
-    // Re-enabling it needs a config at least as strict as
-    // REPLAY_PRIVACY_OPTIONS, proven in a real browser, and an entry in
-    // src/lib/__tests__/sessionReplayRegistration.test.ts.
-    plugins: [new StatsigAutoCapturePlugin()],
+    // No plugins. Gates, experiments and explicit logEvent calls need none.
+    // - No session replay (GOO-774): Statsig's recorder ran with no privacy
+    //   options, outside Sentry's masking, iframe block list and URL scrubbing.
+    // - No AutoCapture (GOO-784): it sent the full page URL with every query
+    //   param (search text, auth token hashes), the referrer, and clicked
+    //   elements' text, and wrote first-touch referrer data onto the user
+    //   object, past any event filter.
+    // Re-enabling either needs a scrubbing config proven in a real browser and
+    // an update to src/lib/__tests__/sessionReplayRegistration.test.ts.
   });
 
   useEffect(() => {
