@@ -1,6 +1,6 @@
 # Observability
 
-Telemetry package for the NOUS backend. Three pillars — metrics, tracing, structured logging — wired together via `integration.py` and mounted on the FastAPI app at startup.
+Telemetry package for the NOUS backend. Three pillars — metrics, tracing, structured logging. At startup `main.py` calls `configure_logging`, `configure_tracing` and `configure_metrics`, and mounts `ObservabilityMiddleware` via `instrumentation.instrument_app`. `integration.setup_observability` would mount extra endpoints (`/metrics`, `/health/observability`) but is never called.
 
 ## What is instrumented
 
