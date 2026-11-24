@@ -20,46 +20,16 @@ if this migration's own concurrent build is interrupted, re-running it drops
 the invalid leftover and tries again.
 """
 
-from alembic import op
+from src.core.migration_indexes import ensure_user_message_index
 
 revision = "repair_invalid_chat_msg_idx"
 down_revision = "ensure_upsert_uq_constraints"
 branch_labels = None
 depends_on = None
 
-INDEX = "uq_chat_messages_thread_client_msg_user"
-
 
 def upgrade() -> None:
-    # Drop only an INVALID leftover; never touch a healthy index.
-    op.execute(
-        f"""
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1
-                FROM pg_index i
-                JOIN pg_class c ON c.oid = i.indexrelid
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE c.relname = '{INDEX}'
-                  AND n.nspname = 'public'
-                  AND NOT i.indisvalid
-            ) THEN
-                EXECUTE 'DROP INDEX public.{INDEX}';
-            END IF;
-        END
-        $$;
-        """
-    )
-    # (Re)create outside the transaction; IF NOT EXISTS makes this a no-op when
-    # the valid index survived the guard above.
-    with op.get_context().autocommit_block():
-        op.execute(
-            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "
-            f"{INDEX} "
-            "ON chat_messages (thread_id, client_message_id) "
-            "WHERE client_message_id IS NOT NULL AND role = 'user'"
-        )
+    ensure_user_message_index()
 
 
 def downgrade() -> None:
