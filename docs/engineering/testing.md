@@ -100,7 +100,7 @@ over the others.
 | `integration-tests` | Integration Tests (sharded) | Backend integration tests. |
 | `resilience-tests` | Resilience Tests | Retry, circuit-breaker and bulkhead tests. |
 | `frontend-tests` | Frontend Tests | Vitest suite. |
-| `security-scan` | Security Scan | Bandit on `backend/src` and `safety` on `backend/requirements.txt`. |
+| `security-scan` | Security Scan | Bandit on `backend/src` and `safety` on `backend/requirements-cpu-lock.txt`. |
 | `e2e-tests` | E2E Tests | Playwright browser tests. |
 | `performance-tests` | Performance Tests | Performance benchmarks; not listed in the Release Gate `needs`. |
 | `test-summary` | Release Gate | Requires the selected jobs to pass and validates every skip. |

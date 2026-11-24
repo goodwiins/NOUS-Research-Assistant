@@ -95,7 +95,7 @@ jobs:
             python3 -m venv .venv
           fi
           .venv/bin/pip install -q -r requirements.txt -r requirements-ci.txt
-          # Same pins as requirements-test.txt (not installed here).
+          # These pins are installed only here.
           # rerunfailures: the sweep reruns live cases once. timeout: enforces
           # pytest.ini's `timeout = 300`, which is inert without the plugin, so
           # a hung live call (possibly hung twice now) cannot eat the 30m budget.
