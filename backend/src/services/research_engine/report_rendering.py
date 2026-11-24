@@ -12,6 +12,7 @@ from src.services.research_engine.contracts import (
     canonical_stage_output_hash,
     normalize_evidence_level,
 )
+from src.utils.csv_safety import is_real_number, needs_formula_quote
 
 
 def _plain(value: Any) -> str:
@@ -625,7 +626,7 @@ def _csv_cell(value: Any) -> str:
         text = ""
     else:
         text = str(value)
-    dangerous = bool(text) and text[0] in "=+-@\t"
+    dangerous = needs_formula_quote(value if is_real_number(value) else text)
     limit = _MAX_CSV_CELL_CHARS - (1 if dangerous else 0)
     text = text[:limit]
     return f"'{text}" if dangerous else text
