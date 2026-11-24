@@ -117,6 +117,8 @@ async def get_performance_dashboard(
             "timestamp": dashboard.get("timestamp", datetime.utcnow().isoformat()),
         }
 
+    except MetricsUnavailable:
+        raise HTTPException(status_code=503, detail=_METRICS_UNAVAILABLE)
     except Exception as e:
         logger.error(f"Failed to get performance dashboard: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -141,6 +143,8 @@ async def get_dashboard_overview(
 
         return overview
 
+    except MetricsUnavailable:
+        raise HTTPException(status_code=503, detail=_METRICS_UNAVAILABLE)
     except Exception as e:
         logger.error(f"Failed to get dashboard overview: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -642,12 +646,6 @@ async def get_available_metrics(current_user: User = Depends(get_current_user)):
                     "description": "Network traffic",
                 },
                 {
-                    "name": "error_rate",
-                    "label": "Error Rate",
-                    "unit": "percentage",
-                    "description": "System error rate",
-                },
-                {
                     "name": "active_connections",
                     "label": "Active Connections",
                     "unit": "count",
@@ -760,6 +758,8 @@ async def export_dashboard_data(
                 content={"error": "Excel export not implemented"}, status_code=501
             )
 
+    except MetricsUnavailable:
+        raise HTTPException(status_code=503, detail=_METRICS_UNAVAILABLE)
     except Exception as e:
         logger.error(f"Failed to export dashboard data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
