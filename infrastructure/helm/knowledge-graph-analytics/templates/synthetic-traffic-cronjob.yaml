@@ -65,6 +65,8 @@ spec:
             - name: synthetic-traffic
               image: {{ include "knowledge-graph-analytics.backendImage" . | quote }}
               imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+              securityContext:
+                {{- include "knowledge-graph-analytics.containerSecurityContext" . | nindent 16 }}
               workingDir: /app
               command: ["python", "-m", "scripts.synthetic_traffic"]
               args: {{ .Values.syntheticTraffic.args | default (list "--rotate") | toJson }}

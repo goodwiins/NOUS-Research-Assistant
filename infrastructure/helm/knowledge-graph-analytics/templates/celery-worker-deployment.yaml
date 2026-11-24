@@ -48,6 +48,8 @@ spec:
         - name: celery-worker
           image: {{ include "knowledge-graph-analytics.backendImage" . | quote }}
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          securityContext:
+            {{- include "knowledge-graph-analytics.containerSecurityContext" . | nindent 12 }}
           command:
             - celery
             - -A
@@ -114,4 +116,17 @@ spec:
             periodSeconds: {{ .Values.celeryWorker.livenessProbe.periodSeconds | default 180 }}
             timeoutSeconds: {{ .Values.celeryWorker.livenessProbe.timeoutSeconds | default 90 }}
             failureThreshold: {{ .Values.celeryWorker.livenessProbe.failureThreshold | default 10 }}
+          # Same local-node ping as liveness: it asks only this pod's worker, imports
+          # only celery_app (not the task graph), and a stuck consumer stops answering.
+          # Gates rollout availability and the worker PDB; the worker has no Service.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - celery -A src.tasks.celery_app inspect ping -d celery@$HOSTNAME --timeout={{ .Values.celeryWorker.readinessProbe.commandTimeout | default 30 }}
+            initialDelaySeconds: {{ .Values.celeryWorker.readinessProbe.initialDelaySeconds | default 30 }}
+            periodSeconds: {{ .Values.celeryWorker.readinessProbe.periodSeconds | default 60 }}
+            timeoutSeconds: {{ .Values.celeryWorker.readinessProbe.timeoutSeconds | default 45 }}
+            failureThreshold: {{ .Values.celeryWorker.readinessProbe.failureThreshold | default 3 }}
 {{- end }}

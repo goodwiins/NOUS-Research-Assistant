@@ -80,3 +80,26 @@ Read-only rollout and environment checks (Helm 3.13.0, Python 3 + PyYAML):
 ```sh
 python3 infrastructure/helm/knowledge-graph-analytics/tests/deployment_consistency_render_test.py
 ```
+
+## Container hardening and Celery probes
+
+Every backend-image container (API `backend`, `celery-worker`, `celery-beat`,
+the migration Job's `run-migrations` and `synthetic-traffic`) renders its
+container `securityContext` from the `knowledge-graph-analytics.containerSecurityContext`
+helper: `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]`. The
+pod-level `securityContext` (non-root UID/GID 1001) still comes from
+`.Values.securityContext`. The helper adds no filesystem restriction; these
+processes write only under `/app`, which the image's UID 1001 owns.
+
+The worker's liveness and readiness probes both run
+`celery -A src.tasks.celery_app inspect ping -d celery@$HOSTNAME`. The ping asks
+only the pod's own node and imports only `celery_app`, not the task graph. A
+stuck consumer stops answering. Readiness (`celeryWorker.readinessProbe.*`,
+default 30 s ping timeout, every 60 s) gates rollout availability and the worker
+PDB; liveness (`celeryWorker.livenessProbe.*`) restarts the container.
+
+Beat runs with `--schedule=/app/celerybeat-schedule`, the same path as Celery's
+implicit default. Its liveness probe fails when no `celerybeat-schedule*` file in
+`/app` was modified in the last 10 minutes. The PersistentScheduler rewrites the
+file about every 180 s while it ticks, so a stalled scheduler loop gets
+restarted. Beat is PID 1, so a process check (`pgrep`) could never fail.

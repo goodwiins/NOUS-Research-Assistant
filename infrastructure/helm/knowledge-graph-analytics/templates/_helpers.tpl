@@ -116,6 +116,18 @@ nous-platform.dev/source-sha: {{ $sourceSha | quote }}
 {{- end }}
 
 {{/*
+Container securityContext shared by every backend-image container (API, Celery
+worker, beat, migration Job, synthetic CronJob). Pod-level runAsNonRoot/UID 1001
+comes from .Values.securityContext.
+*/}}
+{{- define "knowledge-graph-analytics.containerSecurityContext" -}}
+allowPrivilegeEscalation: false
+capabilities:
+  drop:
+    - ALL
+{{- end }}
+
+{{/*
 Create the database URL
 */}}
 {{- define "knowledge-graph-analytics.databaseUrl" -}}
@@ -379,6 +391,8 @@ spec:
     - name: run-migrations
       image: {{ include "knowledge-graph-analytics.backendImage" . | quote }}
       imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+      securityContext:
+        {{- include "knowledge-graph-analytics.containerSecurityContext" . | nindent 8 }}
       workingDir: /app
       command: ["alembic", "upgrade", "heads"]
       envFrom:

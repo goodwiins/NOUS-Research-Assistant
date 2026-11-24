@@ -44,12 +44,17 @@ spec:
         - name: celery-beat
           image: {{ include "knowledge-graph-analytics.backendImage" . | quote }}
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          securityContext:
+            {{- include "knowledge-graph-analytics.containerSecurityContext" . | nindent 12 }}
           command:
             - celery
             - -A
             - src.tasks.celery_app
             - beat
             - --loglevel=info
+            # Explicit form of the implicit default (WORKDIR /app); the liveness
+            # probe below watches this file.
+            - --schedule=/app/celerybeat-schedule
           envFrom:
             {{- if .Values.backend.envFrom }}
             {{- toYaml .Values.backend.envFrom | nindent 12 }}
@@ -73,13 +78,16 @@ spec:
               cpu: 50m
               memory: 128Mi
             {{- end }}
+          # Beat is PID 1, so a process check can never fail while the container
+          # exists. PersistentScheduler rewrites the schedule file about every 180s
+          # (sync_every) while it ticks; no write for 10 minutes means a stalled loop.
           livenessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - "pgrep -f 'celery.*beat' > /dev/null"
-            initialDelaySeconds: 60
+                - "find /app -maxdepth 1 -name 'celerybeat-schedule*' -mmin -10 | grep -q ."
+            initialDelaySeconds: 120
             periodSeconds: 60
             timeoutSeconds: 10
             failureThreshold: 3
