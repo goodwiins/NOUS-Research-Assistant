@@ -53,6 +53,7 @@ import {
 import { useProjectStore } from '@/store/projectStore';
 import { useAgentChatStore } from '@/store/agentChatStore';
 import { useAuthStore } from '@/stores/authStore';
+import { normalizeProjectId } from '@/utils/projectId';
 import { useShallow } from 'zustand/react/shallow';
 import toast from 'react-hot-toast';
 import { useProjectSkillCatalog } from '@/hooks/useProjectSkills';
@@ -114,7 +115,8 @@ export default function ProjectDetailPage() {
     searchParams?.get('tab') === 'drafts'
       ? (searchParams.get('draftId') ?? '')
       : null;
-  const projectId = params.id as string;
+  // GOO-778: canonical (lowercase UUID) form, the form the backend returns.
+  const projectId = normalizeProjectId(params.id as string);
   const { isAuthenticated } = useAuthStore(
     useShallow((s) => ({ isAuthenticated: s.isAuthenticated }))
   );

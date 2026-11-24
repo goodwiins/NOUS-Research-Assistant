@@ -6,9 +6,9 @@
  */
 
 import { Entity, EntityResponse, EntityType, GraphEdge } from '@/types/entity';
-import { EntityDetails, GraphNode } from '@/types/graph-api';
 import { api } from '@/services/api-client';
 import { APIErrorClass } from '@/types/api';
+import { buildSearchParams } from '@/lib/typeGuards';
 
 /**
  * Retry wrapper utility for API calls
@@ -90,16 +90,6 @@ export interface RelationshipUpdateRequest {
   metadata?: Record<string, any>;
 }
 
-export interface EntityTimeline {
-  entityId: string;
-  events: Array<{
-    timestamp: string;
-    type: 'created' | 'updated' | 'relationship_added' | 'relationship_removed';
-    description: string;
-    metadata?: Record<string, any>;
-  }>;
-}
-
 export interface ProcessingJobStatus {
   id: string;
   job_type: string;
@@ -134,16 +124,14 @@ class EntityService {
     connectedOnly?: boolean
   ): Promise<PaginatedEntitiesResponse> {
     return withRetry(async () => {
-      const params: Record<string, any> = { limit, offset };
-      if (entityTypes && entityTypes.length > 0) {
-        params.entity_types = entityTypes;
-      }
-      if (connectedOnly) {
-        params.connected_only = true;
-      }
-      const qs = new URLSearchParams(
-        Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])
-      ).toString();
+      // FastAPI's `List[EntityType]` query wants repeated keys
+      // (`entity_types=A&entity_types=B`), not one comma-joined value (GOO-651).
+      const qs = buildSearchParams({
+        limit,
+        offset,
+        entity_types: entityTypes && entityTypes.length > 0 ? entityTypes : undefined,
+        connected_only: connectedOnly ? true : undefined,
+      }).toString();
       const response = await api.get(`${this.baseUrl}/entities${qs ? `?${qs}` : ''}`);
       return response as PaginatedEntitiesResponse;
     });
@@ -156,25 +144,22 @@ class EntityService {
     limit: number = 200,
     offset: number = 0
   ): Promise<GraphEdge[]> {
-    try {
-      const response = await api.get(`${this.baseUrl}/relationships?limit=${limit}&offset=${offset}`);
-      // Transform backend response to GraphEdge format
-      const relationships = (response as any[]) || [];
-      return relationships.map((rel) => ({
-        id: rel.id,
-        source: rel.source_entity_id,
-        target: rel.target_entity_id,
-        type: rel.relationship_type,
-        weight: rel.strength,
-        strength: rel.strength,
-        confidence: rel.confidence_score,
-        context: rel.context,
-        metadata: rel.metadata,
-      }));
-    } catch (error) {
-      logEntityServiceError('Error in getAllRelationships', error);
-      return [];
-    }
+    // A failure propagates (GOO-749): an outage or a 401/403 must reach the
+    // caller as an error, never read as "no relationships".
+    const response = await api.get(`${this.baseUrl}/relationships?limit=${limit}&offset=${offset}`);
+    // Transform backend response to GraphEdge format
+    const relationships = (response as any[]) || [];
+    return relationships.map((rel) => ({
+      id: rel.id,
+      source: rel.source_entity_id,
+      target: rel.target_entity_id,
+      type: rel.relationship_type,
+      weight: rel.strength,
+      strength: rel.strength,
+      confidence: rel.confidence_score,
+      context: rel.context,
+      metadata: rel.metadata,
+    }));
   }
 
   /**
@@ -227,10 +212,12 @@ class EntityService {
     entityTypes?: string[],
     limit: number = 50
   ): Promise<Entity[]> {
-    const qs = new URLSearchParams(
-      Object.entries({ query, entity_types: entityTypes?.join(','), limit: String(limit) })
-        .filter(([, v]) => v !== undefined) as [string, string][]
-    ).toString();
+    // Repeated `entity_types` keys, as FastAPI's list query expects (GOO-651).
+    const qs = buildSearchParams({
+      query,
+      entity_types: entityTypes && entityTypes.length > 0 ? entityTypes : undefined,
+      limit,
+    }).toString();
     const response = await api.get<Entity[]>(
       `${this.baseUrl}/entities/search${qs ? `?${qs}` : ''}`
     );
@@ -283,16 +270,6 @@ class EntityService {
     await api.delete(`${this.baseUrl}/relationships/${relationshipId}`);
   }
 
-  /**
-   * Get entity details with extended metadata, relationships, and documents
-   */
-  async getEntityDetails(entityId: string): Promise<EntityDetails> {
-    const response = await api.get<EntityDetails>(
-      `${this.baseUrl}/entities/${entityId}/details`
-    );
-    return response;
-  }
-
   async createMergeJob(
     groups: Array<{
       entities: Array<{ id: string; name: string }>;
@@ -334,92 +311,20 @@ class EntityService {
   }
 
   /**
-   * Find similar entities based on embedding similarity
-   */
-  async findSimilarEntities(
-    entityId: string,
-    limit: number = 10,
-    minSimilarity: number = 0.5
-  ): Promise<Array<{ entity: GraphNode; similarity: number }>> {
-    const response = await api.get<
-      Array<{ entity: GraphNode; similarity: number }>
-    >(`${this.baseUrl}/entities/${entityId}/similar?limit=${limit}&min_similarity=${minSimilarity}`);
-    return response;
-  }
-
-  /**
-   * Get entity timeline events
-   */
-  async getEntityTimeline(entityId: string): Promise<EntityTimeline> {
-    const response = await api.get<EntityTimeline>(
-      `${this.baseUrl}/entities/${entityId}/timeline`
-    );
-    return response;
-  }
-
-  /**
-   * Get all available entity types from the backend (with retry)
+   * Get all available entity types from the backend (with retry).
+   * A failure propagates (GOO-749): there is no built-in list to fall back
+   * to, because a made-up list would look like the user's real graph.
    */
   async getEntityTypes(): Promise<string[]> {
-    try {
-      return await withRetry(async () => {
-        const response = await api.get<string[]>(
-          `${this.baseUrl}/entity-types`
-        );
-        return response;
-      });
-    } catch (error) {
-      logEntityServiceError('Error fetching entity types', error);
-      // Return fallback hardcoded types if API fails after retry
-      return [
-        'PERSON',
-        'ORGANIZATION',
-        'LOCATION',
-        'CONCEPT',
-        'EVENT',
-        'PRODUCT',
-        'DATE',
-        'TECHNOLOGY',
-        'DOCUMENT',
-        'OTHER',
-      ];
-    }
+    return withRetry(() => api.get<string[]>(`${this.baseUrl}/entity-types`));
   }
 
   /**
-   * Get all available relationship types from the backend
+   * Get all available relationship types from the backend.
+   * A failure propagates, for the same reason as getEntityTypes.
    */
   async getRelationshipTypes(): Promise<string[]> {
-    try {
-      const response = await api.get<string[]>(
-        `${this.baseUrl}/relationship-types`
-      );
-      return response;
-    } catch (error) {
-      logEntityServiceError('Error fetching relationship types', error);
-      // Return fallback types matching backend RelationshipType enum
-      return [
-        'WORKS_FOR',
-        'KNOWS',
-        'RELATED_TO',
-        'LOCATED_IN',
-        'PART_OF',
-        'MENTIONED_IN',
-        'APPEARS_WITH',
-        'CREATED_BY',
-        'OWNS',
-        'MANAGES',
-        'COLLABORATES_WITH',
-        'REPORTS_TO',
-        'MEMBER_OF',
-        'ATTENDED',
-        'SPOKE_AT',
-        'PUBLISHED_BY',
-        'CITED',
-        'REFERENCES',
-        'CUSTOM',
-      ];
-    }
+    return api.get<string[]>(`${this.baseUrl}/relationship-types`);
   }
 
   /**

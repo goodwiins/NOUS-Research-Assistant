@@ -1,6 +1,6 @@
 'use client';
 
-import type { CitationItem } from '@/hooks';
+import type { CitationItem } from '@/hooks/useCitationsForThread';
 import { Folder } from 'lucide-react';
 import { CollapsibleCard } from './CollapsibleCard';
 import { FolderTree, type Node } from './folder-tree';

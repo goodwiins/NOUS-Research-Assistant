@@ -33,6 +33,8 @@ import {
 } from 'lucide-react';
 import { ProcessingStatus } from '@/components/documents/ProcessingStatus';
 import { IntegrityBadge } from '@/components/documents/IntegrityBadge';
+import { ProcessedWithWarnings } from '@/components/documents/ProcessedWithWarnings';
+import { getProcessingWarnings } from '@/utils/documentProcessingWarnings';
 import { IntegrityDetail } from '@/components/documents/IntegrityDetail';
 import { citationService } from '@/services/citationService';
 import { getIntegrityScore, extractTables } from '@/services/scispaceService';
@@ -54,6 +56,21 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
+/**
+ * What the user sees when a retry is refused (GOO-744 review): the route's
+ * 409 (a run is already active) and 403 (only the uploader or an admin may
+ * reprocess) get their own stable message; anything else a generic one.
+ */
+function retryErrorMessage(err: unknown): string {
+  const status =
+    err instanceof APIErrorClass ? err.error.status_code : undefined;
+  if (status === 409) return 'Processing is already running for this document.';
+  if (status === 403) {
+    return 'Only the uploader or an admin can reprocess this document.';
+  }
+  return "Couldn't start processing. Try again in a moment.";
+}
+
 export default function DocumentDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -62,6 +79,9 @@ export default function DocumentDetailPage() {
   const [document, setDocument] = useState<Document | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const retryInFlight = useRef(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<
     'overview' | 'metadata' | 'preview' | 'tables'
   >('overview');
@@ -120,6 +140,10 @@ export default function DocumentDetailPage() {
 
   useEffect(() => {
     if (isAuthenticated) {
+      // Fetch on mount: the state it sets tracks the request (loading, then
+      // the document or an error). Pre-existing; disabled with a reason
+      // because the changed-file ratchet requires touched files to be clean.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       fetchDocument();
     }
   }, [isAuthenticated, fetchDocument]);
@@ -141,13 +165,23 @@ export default function DocumentDetailPage() {
   };
 
   const handleRetry = async () => {
-    if (!document) return;
+    // One request at a time: a second click while the first is in flight
+    // would only earn a 409. A ref, because two clicks in one tick both see
+    // the same `retrying` state; `disabled` covers the clicks after that.
+    if (!document || retryInFlight.current) return;
 
+    retryInFlight.current = true;
+    setRetrying(true);
+    setRetryError(null);
     try {
       await api.post(`/documents/${document.id}/reprocess`);
       fetchDocument();
     } catch (err) {
       console.error('Failed to retry processing:', err);
+      setRetryError(retryErrorMessage(err));
+    } finally {
+      retryInFlight.current = false;
+      setRetrying(false);
     }
   };
 
@@ -305,6 +339,8 @@ export default function DocumentDetailPage() {
   }
 
   const isIndexed = document.processing_status === 'indexed';
+  // A completed run that skipped optional steps must not read as clean.
+  const processing = getProcessingWarnings(document.metadata);
   const isPdf =
     document.document_type === 'pdf' || document.file_type === 'pdf';
 
@@ -371,7 +407,16 @@ export default function DocumentDetailPage() {
           <div className="lg:col-span-2 space-y-6">
             {/* Processing status: a slim confirmation once indexed (info the
                 user already has), the full card only while it still matters. */}
-            {isIndexed ? (
+            {isIndexed && processing.partial ? (
+              <ProcessedWithWarnings
+                warnings={processing.warnings}
+                completedAt={
+                  document.processing_completed_at
+                    ? formatDate(document.processing_completed_at)
+                    : null
+                }
+              />
+            ) : isIndexed ? (
               <section className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-5 py-3 shadow-xs">
                 <div className="flex min-w-0 items-center gap-2.5">
                   <CheckCircle2
@@ -405,7 +450,8 @@ export default function DocumentDetailPage() {
                     <button
                       type="button"
                       onClick={handleRetry}
-                      className="text-xs font-medium text-primary hover:underline underline-offset-4 inline-flex items-center gap-1.5 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
+                      disabled={retrying}
+                      className="text-xs font-medium text-primary hover:underline underline-offset-4 inline-flex items-center gap-1.5 disabled:opacity-60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
                     >
                       <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
                       Retry processing
@@ -413,6 +459,11 @@ export default function DocumentDetailPage() {
                   )}
                 </div>
                 <div className="p-6">
+                  {retryError && (
+                    <p role="alert" className="mb-4 text-sm text-destructive">
+                      {retryError}
+                    </p>
+                  )}
                   <ProcessingStatus
                     document={document}
                     enableRealtime={true}

@@ -113,18 +113,21 @@ kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser
 # running any of it: a paste that is cut short or lands in another shell runs
 # nothing. `fail` leaves only the subshell, not your terminal. set -e stops at
 # the first failed step and leaves the writers scaled down; finish by hand.
-# Run it from the repo root after turning off Argo CD auto-sync for the app
-# (Argo CD UI, or `argocd app set <app> --sync-policy none`); otherwise
-# self-heal scales everything back and re-runs the migrate Job.
+# Run in bash (default zsh disables interactivecomments) from the repo root
+# after turning off Argo CD auto-sync for the app (Argo CD UI, or
+# `argocd app set <app> --sync-policy none`); otherwise self-heal scales
+# everything back and re-runs the migrate Job.
 (
   set -eu
-  NS=multimodal-rag-system   # the live namespace; the script's NAMESPACE default
+  NS=multimodal-rag-system   # the live namespace (default NAMESPACE in backup-and-restore.sh)
   BACKUP_ID=                 # REQUIRED: the backup to restore, e.g. 20261121_120000
   fail() { echo "STOPPED, nothing changed: $*" >&2; exit 1; }
+  writers_stopped=0
+  trap 'rc=$?; if [ "$rc" -ne 0 ] && [ "$writers_stopped" = 1 ]; then echo "STOPPED partway: writers are still scaled down (and KEDA paused if installed); finish recovery by hand." >&2; fi' EXIT
 
   # 0. Preconditions. Any kubectl error (context, credentials, RBAC) stops
   #    here too. On AWS the database is RDS: there is no deployment/postgres
-  #    and the chart's aws-database-credentials ExternalSecret exists, so
+  #    and the chart aws-database-credentials ExternalSecret exists, so
   #    restore RDS from a snapshot or point-in-time restore instead.
   [ -n "$NS" ] || fail "NS is empty"
   [ -n "$BACKUP_ID" ] || fail "set BACKUP_ID"
@@ -138,12 +141,15 @@ kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser
       --ignore-not-found -o name) || fail "kubectl failed"
     [ -z "$rds" ] || fail "PostgreSQL in $NS is RDS: use an RDS snapshot or PITR"
   fi
+  keda_crd=$(kubectl get crd scaledobjects.keda.sh \
+    --ignore-not-found -o name) || fail "kubectl failed"
 
   # 1. Stop every writer, or the boot migrations (the migrate Job and the
-  #    backend's run-migrations init container) repopulate ragdb before the
+  #    backend run-migrations init container) repopulate ragdb before the
   #    restore. If KEDA is installed (it is off on AWS), pause it so it does
   #    not scale the workers back up.
-  if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+  writers_stopped=1
+  if [ -n "$keda_crd" ]; then
     kubectl annotate scaledobject --all -n "$NS" \
       autoscaling.keda.sh/paused-replicas="0" --overwrite
   fi
@@ -166,7 +172,9 @@ kubectl exec -n knowledge-graph-analytics deployment/postgres -- psql -U raguser
   # 4. Bring the writers back: remove the KEDA pause (if KEDA is installed),
   #    then re-enable auto-sync. Argo CD restores the replicas and re-runs the
   #    migrate Job, which applies only the revisions newer than the backup.
-  if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+  keda_crd=$(kubectl get crd scaledobjects.keda.sh \
+    --ignore-not-found -o name)
+  if [ -n "$keda_crd" ]; then
     kubectl annotate scaledobject --all -n "$NS" autoscaling.keda.sh/paused-replicas-
   fi
 )

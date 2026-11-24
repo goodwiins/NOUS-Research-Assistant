@@ -70,15 +70,18 @@ async def _warm_quality_metrics() -> None:
         logger.info(
             f"Cache warm-up: pre-warming quality metrics for {len(org_ids)} organisation(s)"
         )
-        # Touching the cache key ensures the analytics layer is primed; the
-        # actual heavy computation happens on the first real hit (cache miss),
-        # but this confirms Redis connectivity and warms any L1 in-memory layer.
-        from src.cache.analytics_cache import AnalyticsCache
+        # Touching the cache key connects the shared analytics cache to Redis
+        # (it connects lazily) and warms any L1 in-memory layer; the heavy
+        # computation still happens on the first real hit (cache miss). Use
+        # the process singleton, not a second instance.
+        from src.cache.analytics_cache import analytics_key, get_analytics_cache
 
-        cache = AnalyticsCache()
+        cache = get_analytics_cache()
+        if not await cache.connect():
+            logger.info("Cache warm-up: analytics cache is using in-memory fallback")
         for org_id in org_ids:
             try:
-                await cache.get(f"quality_overview:{org_id}")
+                await cache.get(analytics_key("quality", "overview", org_id))
             except Exception as exc:
                 logger.debug(f"Cache warm-up: quality metrics skip for {org_id}: {exc}")
 

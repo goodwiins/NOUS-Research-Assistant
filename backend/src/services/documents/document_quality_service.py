@@ -62,6 +62,13 @@ from src.models.document import Document, DocumentType
 QualityMetrics = None  # Placeholder until model is properly implemented
 
 
+# Fixed messages for failures (GOO-743): assessments land in
+# processing_results and job.result, which the API returns. The exception
+# detail goes to the log with exc_info, never into a stored field.
+QUALITY_FAILED = "Quality assessment failed"
+ASSESSMENT_FAILED = "Assessment failed"
+
+
 class QualityIssue:
     """Represents a quality issue found in a document"""
 
@@ -79,6 +86,20 @@ class QualityIssue:
         self.location = location
         self.suggestion = suggestion
         self.detected_at = datetime.utcnow()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The stored form: plain JSON, as the document and job columns need."""
+        return {
+            "dimension": self.dimension,
+            "severity": self.severity,
+            "description": self.description,
+            "location": self.location,
+            "suggestion": self.suggestion,
+        }
+
+
+def _failed_issue(dimension: str) -> QualityIssue:
+    return QualityIssue(dimension, "high", ASSESSMENT_FAILED)
 
 
 class DocumentQualityService:
@@ -160,11 +181,11 @@ class DocumentQualityService:
 
             return assessment
 
-        except Exception as e:
-            logger.error(f"Quick quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Quick quality assessment failed", exc_info=True)
             return {
                 "overall_score": 0.0,
-                "error": str(e),
+                "error": QUALITY_FAILED,
                 "processing_time_ms": (
                     (time.time() - start_time) * 1000 if "start_time" in locals() else 0
                 ),
@@ -238,15 +259,19 @@ class DocumentQualityService:
 
                     dimension_scores[dimension_name] = result["score"]
                     assessment[f"{dimension_name}_score"] = result["score"]
-                    assessment["dimension_scores"][dimension_name] = result
+                    issues = list(result.get("issues") or [])
+                    all_issues.extend(issues)
+                    # Issues are objects; the stored assessment holds dicts.
+                    assessment["dimension_scores"][dimension_name] = {
+                        **result,
+                        "issues": [issue.to_dict() for issue in issues],
+                    }
 
-                    # Collect issues
-                    if "issues" in result:
-                        all_issues.extend(result["issues"])
-
-                except Exception as e:
+                except Exception:
                     logger.error(
-                        f"Dimension {dimension_name} assessment failed: {str(e)}"
+                        "Dimension %s assessment failed",
+                        dimension_name,
+                        exc_info=True,
                     )
                     dimension_scores[dimension_name] = 0.0
                     assessment[f"{dimension_name}_score"] = 0.0
@@ -269,16 +294,7 @@ class DocumentQualityService:
             )
 
             assessment["overall_score"] = overall_score
-            assessment["issues"] = [
-                {
-                    "dimension": issue.dimension,
-                    "severity": issue.severity,
-                    "description": issue.description,
-                    "location": issue.location,
-                    "suggestion": issue.suggestion,
-                }
-                for issue in all_issues
-            ]
+            assessment["issues"] = [issue.to_dict() for issue in all_issues]
 
             # Generate comprehensive recommendations
             assessment["recommendations"] = self.generate_comprehensive_recommendations(
@@ -292,11 +308,11 @@ class DocumentQualityService:
 
             return assessment
 
-        except Exception as e:
-            logger.error(f"Comprehensive quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Comprehensive quality assessment failed", exc_info=True)
             return {
                 "overall_score": 0.0,
-                "error": str(e),
+                "error": QUALITY_FAILED,
                 "processing_time_ms": (
                     (time.time() - start_time) * 1000 if "start_time" in locals() else 0
                 ),
@@ -494,11 +510,11 @@ class DocumentQualityService:
 
             return result
 
-        except Exception as e:
-            logger.error(f"Readability assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Readability assessment failed", exc_info=True)
             return {
                 "score": 0.0,
-                "issues": [QualityIssue("readability", "high", str(e))],
+                "issues": [_failed_issue("readability")],
                 "metrics": {},
             }
 
@@ -605,11 +621,11 @@ class DocumentQualityService:
 
             return result
 
-        except Exception as e:
-            logger.error(f"Coherence assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Coherence assessment failed", exc_info=True)
             return {
                 "score": 0.0,
-                "issues": [QualityIssue("coherence", "high", str(e))],
+                "issues": [_failed_issue("coherence")],
                 "metrics": {},
             }
 
@@ -683,11 +699,11 @@ class DocumentQualityService:
 
             return result
 
-        except Exception as e:
-            logger.error(f"Completeness assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Completeness assessment failed", exc_info=True)
             return {
                 "score": 0.0,
-                "issues": [QualityIssue("completeness", "high", str(e))],
+                "issues": [_failed_issue("completeness")],
                 "metrics": {},
             }
 
@@ -748,11 +764,11 @@ class DocumentQualityService:
 
             return result
 
-        except Exception as e:
-            logger.error(f"Accuracy assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Accuracy assessment failed", exc_info=True)
             return {
                 "score": 0.0,
-                "issues": [QualityIssue("accuracy", "high", str(e))],
+                "issues": [_failed_issue("accuracy")],
                 "metrics": {},
             }
 
@@ -812,11 +828,11 @@ class DocumentQualityService:
 
             return result
 
-        except Exception as e:
-            logger.error(f"Technical quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Technical quality assessment failed", exc_info=True)
             return {
                 "score": 0.0,
-                "issues": [QualityIssue("technical_quality", "high", str(e))],
+                "issues": [_failed_issue("technical_quality")],
                 "metrics": {},
             }
 
@@ -886,11 +902,11 @@ class DocumentQualityService:
 
             return result
 
-        except Exception as e:
-            logger.error(f"Content quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Content quality assessment failed", exc_info=True)
             return {
                 "score": 0.0,
-                "issues": [QualityIssue("content_quality", "high", str(e))],
+                "issues": [_failed_issue("content_quality")],
                 "metrics": {},
             }
 
@@ -957,11 +973,11 @@ class DocumentQualityService:
 
             return result
 
-        except Exception as e:
-            logger.error(f"Metadata quality assessment failed: {str(e)}")
+        except Exception:
+            logger.error("Metadata quality assessment failed", exc_info=True)
             return {
                 "score": 0.0,
-                "issues": [QualityIssue("metadata_quality", "high", str(e))],
+                "issues": [_failed_issue("metadata_quality")],
                 "metrics": {},
             }
 

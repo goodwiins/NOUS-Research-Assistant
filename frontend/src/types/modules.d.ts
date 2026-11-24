@@ -2,19 +2,6 @@
  * Type declarations for third-party modules without TypeScript definitions
  */
 
-// Cytoscape extensions
-declare module 'cytoscape-cose-bilkent' {
-  import cytoscape from 'cytoscape';
-  const coseBilkent: cytoscape.Ext;
-  export default coseBilkent;
-}
-
-declare module 'cytoscape-popper' {
-  import cytoscape from 'cytoscape';
-  const popper: cytoscape.Ext;
-  export default popper;
-}
-
 // KaTeX (optional dependency for math rendering)
 declare module 'katex' {
   interface KatexOptions {

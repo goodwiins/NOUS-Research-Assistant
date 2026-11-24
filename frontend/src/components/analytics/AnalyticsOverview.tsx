@@ -5,13 +5,17 @@ import { useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
+  NOT_MEASURED,
+  NOT_MEASURED_NOTE,
+  UNAVAILABLE_NOTE,
+  type NotMeasured,
+} from '@/utils/analyticsFigure';
+import {
   Users,
   FileText,
   Search,
-  MessageSquare,
   Clock,
   Activity,
-  AlertTriangle,
   BarChart3,
 } from 'lucide-react';
 
@@ -34,19 +38,12 @@ function MetricCard({
 }: MetricCardProps) {
   const reduceMotion = useReducedMotion();
   const targetValue = typeof value === 'number' ? value : 0;
-  const [displayValue, setDisplayValue] = useState(() =>
-    reduceMotion ? targetValue : 0
-  );
+  const [animatedValue, setAnimatedValue] = useState(0);
 
-  // Count up to the real value. When the user prefers reduced motion we snap
-  // straight to the final number instead of animating it.
+  // Count up to the real value. When the user prefers reduced motion the final
+  // number is shown directly and nothing animates.
   useEffect(() => {
-    if (loading || typeof value !== 'number') return;
-
-    if (reduceMotion) {
-      setDisplayValue(targetValue);
-      return;
-    }
+    if (loading || typeof value !== 'number' || reduceMotion) return;
 
     const duration = 1200;
     const steps = 40;
@@ -57,16 +54,18 @@ function MetricCard({
       step++;
       const progress = step / steps;
       const easeOut = 1 - Math.pow(1 - progress, 3);
-      setDisplayValue(Math.round(targetValue * easeOut));
+      setAnimatedValue(Math.round(targetValue * easeOut));
 
       if (step >= steps) {
-        setDisplayValue(targetValue);
+        setAnimatedValue(targetValue);
         clearInterval(timer);
       }
     }, stepDuration);
 
     return () => clearInterval(timer);
   }, [value, loading, reduceMotion, targetValue]);
+
+  const displayValue = reduceMotion ? targetValue : animatedValue;
 
   const isInteractive = Boolean(onClick);
 
@@ -120,101 +119,87 @@ function MetricCard({
   );
 }
 
+/**
+ * A figure the backend reported, `null` when its source failed to load, or
+ * `undefined` when the viewer may not see it (the metric is then hidden).
+ */
+type Figure = number | null | undefined;
+
+export interface AnalyticsOverviewData {
+  documentsIndexed: Figure;
+  searches24h: Figure;
+  /** `NOT_MEASURED` when no search in the window was timed (GOO-768). */
+  avgSearchTimeMs24h: Figure | NotMeasured;
+  /** Admin only. */
+  activeUsers24h?: Figure;
+  /** Admin only. */
+  searchSessions24h?: Figure;
+}
+
 interface AnalyticsOverviewProps {
-  data?: {
-    totalUsers: number;
-    activeUsers: number;
-    totalSessions: number;
-    totalPageViews: number;
-    averageSessionDuration: number;
-    bounceRate: number;
-    documentsUploaded: number;
-    searchesPerformed: number;
-    chatsInitiated: number;
-    errorRate: number;
-  };
+  data?: AnalyticsOverviewData | null;
   loading?: boolean;
   onRefresh?: () => void;
   onExport?: () => void;
   onMetricClick?: (metric: string) => void;
 }
 
+const UNAVAILABLE = '—';
+
 export function AnalyticsOverview({
   data,
   loading = false,
   onMetricClick,
 }: AnalyticsOverviewProps) {
-  const hasAnyData =
-    Boolean(data) &&
-    [
-      data?.totalUsers,
-      data?.activeUsers,
-      data?.totalSessions,
-      data?.documentsUploaded,
-      data?.searchesPerformed,
-      data?.chatsInitiated,
-    ].some((n) => (n ?? 0) > 0);
-
-  // Real measured values only. We do not invent period-over-period deltas;
-  // until a comparison period exists in the data, no trend is shown.
+  // Only figures the backend reports. Registered users, page views, chat
+  // conversations and error rate have no organization-level source, so they
+  // are not shown rather than shown as zero (GOO-649).
   const overviewMetrics = [
-    {
-      key: 'totalUsers',
-      title: 'Registered users',
-      value: data?.totalUsers || 0,
-      icon: Users,
-      description: 'People with workspace access',
-    },
-    {
-      key: 'activeUsers',
-      title: 'Active users',
-      value: data?.activeUsers || 0,
-      icon: Activity,
-      description: 'Active in the last 24 hours',
-    },
-    {
-      key: 'pageViews',
-      title: 'Page views',
-      value: data?.totalPageViews || 0,
-      icon: BarChart3,
-      description: 'Views across the workspace',
-    },
-    {
-      key: 'sessions',
-      title: 'Sessions',
-      value: data?.totalSessions || 0,
-      icon: Clock,
-      description: 'Recorded user sessions',
-    },
     {
       key: 'documents',
       title: 'Documents',
-      value: data?.documentsUploaded || 0,
+      figure: data?.documentsIndexed,
       icon: FileText,
       description: 'Indexed in your knowledge base',
     },
     {
       key: 'searches',
       title: 'Searches',
-      value: data?.searchesPerformed || 0,
+      figure: data?.searches24h,
       icon: Search,
-      description: 'Queries run against the corpus',
+      description: 'In the last 24 hours',
     },
     {
-      key: 'chats',
-      title: 'Conversations',
-      value: data?.chatsInitiated || 0,
-      icon: MessageSquare,
-      description: 'Sessions with the agent',
+      key: 'searchTime',
+      title: 'Avg search time',
+      figure: data?.avgSearchTimeMs24h,
+      icon: Clock,
+      description: 'Milliseconds, last 24 hours',
     },
     {
-      key: 'errors',
-      title: 'Error rate',
-      value: `${(data?.errorRate ?? 0).toFixed(1)}%`,
-      icon: AlertTriangle,
-      description: 'Requests that returned an error',
+      key: 'activeUsers',
+      title: 'Active users',
+      figure: data?.activeUsers24h,
+      icon: Users,
+      description: 'Searched in the last 24 hours',
     },
-  ];
+    {
+      key: 'sessions',
+      title: 'Search sessions',
+      figure: data?.searchSessions24h,
+      icon: Activity,
+      description: 'In the last 24 hours',
+    },
+  ].filter((metric) => metric.figure !== undefined);
+
+  // A failed source keeps the cards (with "—"), so an outage never looks
+  // like a new org. A zero count or an unmeasured average is no activity
+  // (GOO-768).
+  const hasAnyData = overviewMetrics.some(
+    (metric) =>
+      metric.figure === null ||
+      (typeof metric.figure === 'number' && metric.figure > 0)
+  );
 
   if (!loading && !hasAnyData) {
     return (
@@ -239,9 +224,21 @@ export function AnalyticsOverview({
         <MetricCard
           key={metric.key}
           title={metric.title}
-          value={metric.value}
+          value={
+            typeof metric.figure !== 'number'
+              ? UNAVAILABLE
+              : metric.key === 'searchTime'
+                ? Math.round(metric.figure)
+                : metric.figure
+          }
           icon={metric.icon}
-          description={metric.description}
+          description={
+            metric.figure === NOT_MEASURED
+              ? NOT_MEASURED_NOTE
+              : metric.figure == null
+                ? UNAVAILABLE_NOTE
+                : metric.description
+          }
           loading={loading}
           onClick={onMetricClick ? () => onMetricClick(metric.key) : undefined}
         />

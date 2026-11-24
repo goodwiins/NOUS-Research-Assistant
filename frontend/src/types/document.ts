@@ -30,6 +30,9 @@ export interface Document {
   // ProcessingStatusSchema in types/schemas.ts and backend ApiDocumentStatus.
   processing_status: 'queued' | 'processing' | 'indexed' | 'failed';
   processing_error?: string;
+  // Indexed, but some optional processing steps failed (GOO-765). The backend
+  // sets it only on an indexed document; absent means false.
+  processing_partial?: boolean;
   // Support both frontend naming (upload_timestamp) and backend naming (created_at)
   upload_timestamp?: string; // Legacy frontend field
   created_at?: string; // Backend field name
@@ -74,9 +77,11 @@ export interface DocumentListResponse {
   };
 }
 
+// One value per filter: GET /api/v1/documents takes one document_type and
+// one processing_status (GOO-666 FL2C-3), so a list cannot be expressed.
 export interface DocumentFilters {
-  file_types?: Document['file_type'][];
-  status?: Document['processing_status'][];
+  file_type?: NonNullable<Document['file_type']>;
+  status?: Document['processing_status'];
   date_range?: {
     start: string;
     end: string;

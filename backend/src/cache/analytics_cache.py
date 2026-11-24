@@ -8,10 +8,12 @@ import hashlib
 import json
 import logging
 import random
+import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 try:
     import redis
@@ -23,9 +25,49 @@ except ImportError:
     redis = None
 
 from src.config.analytics_config import get_analytics_config
+from src.core.background_tasks import spawn
+from src.core.config import settings
 from src.exceptions.analytics_exceptions import CacheError, CacheMissError
 
 logger = logging.getLogger(__name__)
+
+# Every key this cache stores starts with ``analytics:``, so one SCAN (or a
+# flush of ``analytics:*``) covers the whole cache and nothing else in the
+# shared Redis, which is also the Celery broker.
+KEY_PREFIX = "analytics"
+_KEY_PREFIX_SEP = f"{KEY_PREFIX}:"
+_NAMESPACE_PATTERN = f"{KEY_PREFIX}:*"
+
+
+def _org_segment(organization_id: Any) -> str:
+    """``organization_id`` as a key segment: its canonical UUID string.
+
+    Ids are UUIDs. Anything else is rejected, because a ``:`` (or glob
+    syntax) in the id would shift the segments that key patterns rely on,
+    and ``str(None)`` would put every org-less caller in one shared entry.
+    """
+    try:
+        return str(uuid.UUID(str(organization_id)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("analytics cache keys need a UUID organization_id") from exc
+
+
+def analytics_key(scope: str, kind: str, organization_id: Any, *rest: str) -> str:
+    """``analytics:{scope}:{kind}:{org uuid}[:{rest}...]``, validated.
+
+    The one way to build an org-scoped key: the org id must be a UUID and no
+    other segment may be empty or contain the ``:`` separator.
+    """
+    segments = [scope, kind, _org_segment(organization_id), *rest]
+    for segment in segments:
+        if not segment or ":" in segment:
+            raise ValueError(f"invalid analytics cache key segment: {segment!r}")
+    return ":".join([KEY_PREFIX, *segments])
+
+
+def _require_namespaced(key: str) -> None:
+    if not isinstance(key, str) or not key.startswith(_KEY_PREFIX_SEP):
+        raise ValueError(f"analytics cache keys must start with {_KEY_PREFIX_SEP!r}")
 
 
 @dataclass
@@ -48,7 +90,9 @@ class CacheKey:
         # Use MD5 for non-security cache key generation (usedforsecurity=False)
         hash_key = hashlib.md5(hash_input.encode(), usedforsecurity=False).hexdigest()
 
-        return f"analytics:{self.prefix}:{self.data_type}:{self.organization_id}:{hash_key}"
+        return analytics_key(
+            self.prefix, self.data_type, self.organization_id, hash_key
+        )
 
 
 class CacheTTL:
@@ -71,6 +115,53 @@ class CacheTTL:
     EXPORTS = 7200  # 2 hours
 
 
+# After any Redis failure the cache serves from memory for this long, then
+# makes ONE background reconnect attempt: a Redis outage costs one attempt
+# per window, never one per request (circuit breaker, fail open).
+_RECONNECT_INTERVAL_SECONDS = 30.0
+# Analytics caching is an optimisation: a slow or black-holed Redis must cost
+# well under a second, after which the call falls back to memory.
+_REDIS_CONNECT_TIMEOUT_S = 0.5
+_REDIS_OP_TIMEOUT_S = 0.5
+_SCAN_BATCH = 500
+# Keys and patterns deleted (or written) while Redis was unreachable are
+# replayed as deletes on reconnect, so Redis does not serve the old value
+# until its TTL. Past this many the queue collapses into one flush of the
+# analytics namespace: bounded memory, and still correct.
+_MAX_PENDING_INVALIDATIONS = 1000
+
+
+def _redis_url(config: Any) -> Optional[str]:
+    """``ANALYTICS_redis_analytics_url`` if set, else an explicit ``REDIS_URL``.
+
+    No deployment sets the analytics-specific variable; the live pods get
+    Redis only as ``REDIS_URL`` from the ``redis-credentials`` Secret. The
+    settings default (``redis://localhost:6379``) does not count: without an
+    explicit URL the cache stays in memory and never tries to connect, so a
+    local run without Redis does not retry a connect every window.
+    """
+    if config.redis_analytics_url:
+        return config.redis_analytics_url
+    if "REDIS_URL" not in getattr(settings, "model_fields_set", ()):
+        return None
+    return getattr(settings, "REDIS_URL", None) or None
+
+
+def _glob_regex(pattern: str) -> "re.Pattern[str]":
+    """Redis glob (``*``, ``?``, backslash escapes) as an anchored regex."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\" and i + 1 < len(pattern):
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        out.append(".*" if char == "*" else "." if char == "?" else re.escape(char))
+        i += 1
+    return re.compile("".join(out) + r"\Z", re.DOTALL)
+
+
 class AnalyticsCache:
     """Redis-based analytics cache with fallback to in-memory cache"""
 
@@ -80,34 +171,190 @@ class AnalyticsCache:
         self.fallback_cache = {}  # Simple in-memory fallback
         self.fallback_cache_expiry = {}
         self._connected = False
+        # Connecting needs an event loop, which __init__ (module import) does
+        # not have. The old code called the async _init_redis() without
+        # awaiting it, so Redis never connected and every pod silently used
+        # its own in-memory cache. Connect lazily on first use instead.
+        self._redis_url = _redis_url(self.config)
+        self._redis_enabled = bool(REDIS_AVAILABLE and self._redis_url)
+        self._next_connect_attempt = 0.0
+        self._connect_task: Optional[asyncio.Task] = None
+        self._connect_task_loop: Optional[asyncio.AbstractEventLoop] = None
+        # Invalidations Redis has not seen yet (see _MAX_PENDING_INVALIDATIONS).
+        self._pending_keys: Set[str] = set()
+        self._pending_patterns: Set[str] = set()
+        self._pending_flush = False
 
-        if REDIS_AVAILABLE and self.config.redis_analytics_url:
-            self._init_redis()
-        else:
+        if not self._redis_enabled:
             logger.warning("Redis not available, using in-memory fallback cache")
 
-    async def _init_redis(self):
-        """Initialize Redis connection"""
+    def _ensure_connecting(self) -> None:
+        """Start a background connect if one is due. Never waits for it.
+
+        Request paths call this, so a cold or black-holed Redis never adds
+        a connect to a request: the call is served from memory and Redis is
+        used from the next call once the background attempt succeeds.
+        """
+        if self._connected or not self._redis_enabled:
+            return
+        loop = asyncio.get_running_loop()
+        task = self._connect_task
+        if task is not None and not task.done() and self._connect_task_loop is loop:
+            return  # one attempt in flight
+        if loop.time() < self._next_connect_attempt:
+            return  # breaker open
+        self._next_connect_attempt = loop.time() + _RECONNECT_INTERVAL_SECONDS
+        self._connect_task = loop.create_task(self._init_redis())
+        self._connect_task_loop = loop
+
+    async def connect(self) -> bool:
+        """Connect now and wait for the result (startup, warm-up, health).
+
+        Bounded by ``_REDIS_CONNECT_TIMEOUT_S``. Request paths use
+        ``_ensure_connecting`` instead and never wait.
+        """
+        self._ensure_connecting()
+        task = self._connect_task
+        if (
+            task is not None
+            and not task.done()
+            and self._connect_task_loop is asyncio.get_running_loop()
+        ):
+            await asyncio.shield(task)
+        return self._connected
+
+    def _trip(self, operation: str, exc: BaseException) -> None:
+        """Open the breaker after a Redis failure: memory only for a window."""
+        logger.warning(
+            "Analytics Redis %s failed (%s); serving from memory for %.0fs",
+            operation,
+            type(exc).__name__,
+            _RECONNECT_INTERVAL_SECONDS,
+        )
+        self._connected = False
+        client, self.redis_client = self.redis_client, None
         try:
-            self.redis_client = redis.from_url(
-                self.config.redis_analytics_url,
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._next_connect_attempt = loop.time() + _RECONNECT_INTERVAL_SECONDS
+        if client is not None:
+            spawn(self._close_quietly(client), name="analytics-redis-close")
+
+    @staticmethod
+    async def _close_quietly(client: Any) -> None:
+        try:
+            close = getattr(client, "aclose", None) or client.close
+            await close()
+        except Exception:
+            pass
+
+    async def _init_redis(self) -> None:
+        """Open and ping a client; on failure leave the cache in memory mode."""
+        client = None
+        try:
+            client = redis.from_url(
+                self._redis_url,
                 encoding="utf-8",
                 decode_responses=True,  # Use string responses for JSON serialization
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
+                socket_connect_timeout=_REDIS_CONNECT_TIMEOUT_S,
+                socket_timeout=_REDIS_OP_TIMEOUT_S,
+                retry_on_timeout=False,  # a retry would double every bounded wait
                 health_check_interval=30,
             )
-
-            # Test connection
-            await self.redis_client.ping()
+            await client.ping()
+            # Replay before serving from Redis, and mark connected with no
+            # await in between, so no read sees a value deleted in the outage.
+            await self._replay_invalidations(client)
+            self.redis_client = client
             self._connected = True
             logger.info("Analytics cache connected to Redis")
-
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            logger.warning(
+                "Analytics cache could not connect to Redis (%s); using memory",
+                type(e).__name__,
+            )
             self.redis_client = None
             self._connected = False
+            if client is not None:
+                await self._close_quietly(client)
+
+    def _remember_invalidation(
+        self, key: Optional[str] = None, pattern: Optional[str] = None
+    ) -> None:
+        """Queue a delete Redis missed, to replay on reconnect (bounded)."""
+        if not self._redis_enabled or self._pending_flush:
+            return
+        if key is not None:
+            self._pending_keys.add(key)
+        if pattern is not None:
+            self._pending_patterns.add(pattern)
+        if (
+            len(self._pending_keys) + len(self._pending_patterns)
+            > _MAX_PENDING_INVALIDATIONS
+        ):
+            self._pending_keys.clear()
+            self._pending_patterns.clear()
+            self._pending_flush = True
+
+    async def _replay_invalidations(self, client: Any) -> None:
+        """Apply queued invalidations to Redis; on failure keep them queued.
+
+        Loops until the queue is empty: a delete made while the replay awaits
+        Redis is still memory-only, so it joins the queue and is replayed too.
+        """
+        while self._pending_flush or self._pending_keys or self._pending_patterns:
+            flush = self._pending_flush
+            keys, patterns = self._pending_keys, self._pending_patterns
+            self._pending_flush = False
+            self._pending_keys, self._pending_patterns = set(), set()
+            try:
+                if flush:
+                    await self._delete_matching(client, _NAMESPACE_PATTERN)
+                else:
+                    pending = sorted(keys)
+                    for i in range(0, len(pending), _SCAN_BATCH):
+                        await client.delete(*pending[i : i + _SCAN_BATCH])
+                    for pattern in sorted(patterns):
+                        await self._delete_matching(client, pattern)
+            except BaseException:
+                if flush:
+                    self._pending_flush = True
+                    self._pending_keys.clear()
+                    self._pending_patterns.clear()
+                else:
+                    for key in keys:
+                        self._remember_invalidation(key=key)
+                    for pattern in patterns:
+                        self._remember_invalidation(pattern=pattern)
+                raise
+            if flush:
+                logger.info("Analytics cache flushed its namespace after reconnect")
+            else:
+                logger.info(
+                    "Analytics cache replayed %d key and %d pattern deletes "
+                    "after reconnect",
+                    len(keys),
+                    len(patterns),
+                )
+
+    @staticmethod
+    async def _delete_matching(client: Any, pattern: str) -> int:
+        """Delete every Redis key matching ``pattern`` with SCAN, never KEYS.
+
+        KEYS walks the whole keyspace in one blocking call, and this Redis
+        is shared with the Celery broker.
+        """
+        deleted = 0
+        batch: List[str] = []
+        async for key in client.scan_iter(match=pattern, count=_SCAN_BATCH):
+            batch.append(key)
+            if len(batch) >= _SCAN_BATCH:
+                deleted += await client.delete(*batch)
+                batch = []
+        if batch:
+            deleted += await client.delete(*batch)
+        return deleted
 
     def _get_fallback_key(self, key: str) -> str:
         """Get fallback cache key"""
@@ -133,25 +380,34 @@ class AnalyticsCache:
             self.fallback_cache_expiry.pop(key, None)
 
     async def get(self, key: str, use_fallback: bool = True) -> Any:
-        """Get value from cache"""
+        """Get value from cache.
+
+        While Redis answers it is the only source: a Redis miss is a miss,
+        because this pod's local copy may be older than a delete or expiry
+        another pod saw. The local copy serves only while Redis is down.
+        """
+        _require_namespaced(key)
         try:
             # Try Redis first
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
                     value = await self.redis_client.get(key)
-                    if value is not None:
-                        # Deserialize using JSON (secure, no arbitrary code execution)
-                        try:
-                            return json.loads(value)
-                        except (json.JSONDecodeError, TypeError) as e:
-                            logger.warning(
-                                f"Failed to deserialize cached value for key {key}: {e}"
-                            )
-                            return None
                 except Exception as e:
-                    logger.warning(f"Redis get failed for key {key}: {e}")
+                    self._trip("get", e)
+                else:
+                    if value is None:
+                        return None
+                    # Deserialize using JSON (secure, no arbitrary code execution)
+                    try:
+                        return json.loads(value)
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.warning(
+                            f"Failed to deserialize cached value for key {key}: {e}"
+                        )
+                        return None
 
-            # Fallback to in-memory cache
+            # Redis unavailable: fall back to the in-memory cache
             if use_fallback:
                 fallback_key = self._get_fallback_key(key)
                 if not self._is_fallback_expired(fallback_key):
@@ -167,8 +423,10 @@ class AnalyticsCache:
         self, key: str, value: Any, ttl: int = 300, use_fallback: bool = True
     ) -> bool:
         """Set value in cache"""
+        _require_namespaced(key)
         try:
             # Try Redis first
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
                     # Serialize value using JSON (secure, prevents arbitrary code execution)
@@ -193,7 +451,10 @@ class AnalyticsCache:
                     return True
 
                 except Exception as e:
-                    logger.warning(f"Redis set failed for key {key}: {e}")
+                    self._trip("set", e)
+
+            # Redis did not take the write: drop its older value on reconnect.
+            self._remember_invalidation(key=key)
 
             # Fallback to in-memory cache
             if use_fallback:
@@ -215,17 +476,23 @@ class AnalyticsCache:
             return False
 
     async def delete(self, key: str) -> bool:
-        """Delete value from cache"""
+        """Delete value from cache; replayed on reconnect if Redis missed it."""
+        _require_namespaced(key)
         try:
             success = True
+            redis_done = False
 
             # Delete from Redis
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
                     await self.redis_client.delete(key)
+                    redis_done = True
                 except Exception as e:
-                    logger.warning(f"Redis delete failed for key {key}: {e}")
+                    self._trip("delete", e)
                     success = False
+            if not redis_done:
+                self._remember_invalidation(key=key)
 
             # Delete from fallback cache
             fallback_key = self._get_fallback_key(key)
@@ -239,29 +506,32 @@ class AnalyticsCache:
             return False
 
     async def invalidate_pattern(self, pattern: str) -> int:
-        """Invalidate all cache keys matching pattern"""
+        """Invalidate all cache keys matching a Redis glob ``pattern``.
+
+        ``pattern`` must lie inside the ``analytics:`` namespace. Uses SCAN,
+        never KEYS (see ``_delete_matching``). If Redis misses it, the
+        pattern is replayed on reconnect.
+        """
+        _require_namespaced(pattern)
         try:
             deleted_count = 0
+            redis_done = False
 
-            # Delete from Redis
+            self._ensure_connecting()
             if self.redis_client and self._connected:
                 try:
-                    keys = await self.redis_client.keys(pattern)
-                    if keys:
-                        deleted_count = await self.redis_client.delete(*keys)
+                    deleted_count += await self._delete_matching(
+                        self.redis_client, pattern
+                    )
+                    redis_done = True
                 except Exception as e:
-                    logger.warning(f"Redis pattern delete failed: {e}")
+                    self._trip("invalidate", e)
+            if not redis_done:
+                self._remember_invalidation(pattern=pattern)
 
-            # Delete from fallback cache
-            pattern = pattern.replace("*", ".*")
-            fallback_pattern = f"fallback:{pattern}"
-
-            keys_to_delete = [
-                key
-                for key in self.fallback_cache.keys()
-                if fallback_pattern.replace(".*", "") in key
-            ]
-
+            # The in-memory fallback honours the same glob.
+            matcher = _glob_regex(self._get_fallback_key(pattern))
+            keys_to_delete = [key for key in self.fallback_cache if matcher.match(key)]
             for key in keys_to_delete:
                 self.fallback_cache.pop(key, None)
                 self.fallback_cache_expiry.pop(key, None)
@@ -325,16 +595,6 @@ class AnalyticsCache:
 
         return await self.set(key, data, ttl)
 
-    async def invalidate_organization_data(self, organization_id: str) -> int:
-        """Invalidate all cache data for an organization"""
-        pattern = f"analytics:*:*{organization_id}:*"
-        return await self.invalidate_pattern(pattern)
-
-    async def invalidate_data_type(self, data_type: str) -> int:
-        """Invalidate all cache data for a specific data type"""
-        pattern = f"analytics:*:{data_type}:*"
-        return await self.invalidate_pattern(pattern)
-
     def _get_default_ttl(self, data_type: str) -> int:
         """Get default TTL for data type"""
         ttl_mapping = {
@@ -352,6 +612,7 @@ class AnalyticsCache:
 
     async def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics"""
+        await self.connect()
         stats = {
             "redis_connected": self._connected,
             "fallback_cache_size": len(self.fallback_cache),
@@ -384,6 +645,7 @@ class AnalyticsCache:
 
     async def health_check(self) -> Dict[str, Any]:
         """Perform cache health check"""
+        await self.connect()
         health = {
             "status": "healthy",
             "redis_connected": self._connected,
@@ -410,7 +672,8 @@ class AnalyticsCache:
 
         # Check fallback cache health
         try:
-            test_key = "health_check_test"
+            # Per call: pods share Redis, so a fixed key races another pod's probe.
+            test_key = f"{KEY_PREFIX}:health_check:{uuid.uuid4().hex}"
             test_value = {"timestamp": datetime.utcnow().isoformat()}
 
             await self.set(test_key, test_value, ttl=10)
@@ -489,26 +752,6 @@ def cached_analytics(data_type: str, ttl: Optional[int] = None):
         return wrapper
 
     return decorator
-
-
-async def invalidate_analytics_cache(
-    organization_id: Optional[str] = None, data_type: Optional[str] = None
-):
-    """Invalidate analytics cache entries"""
-    cache = get_analytics_cache()
-
-    if organization_id and data_type:
-        # Invalidate specific organization and data type
-        await cache.invalidate_organization_data(organization_id)
-    elif organization_id:
-        # Invalidate all data for organization
-        await cache.invalidate_organization_data(organization_id)
-    elif data_type:
-        # Invalidate all data of specific type
-        await cache.invalidate_data_type(data_type)
-    else:
-        # Invalidate all analytics cache
-        await cache.invalidate_pattern("analytics:*")
 
 
 # Cache warming functions

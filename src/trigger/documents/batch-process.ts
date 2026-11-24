@@ -27,9 +27,11 @@ export const batchProcessDocuments = task({
 
     for (const documentId of documentIds) {
       try {
+        // POST /api/v1/processing/documents/{document_id}/process takes no
+        // body (and no priority); it returns the new job's id.
         const result = await backendClient.post<{ job_id: string }>(
-          "/api/v1/processing/documents/process",
-          { document_id: documentId, priority },
+          `/api/v1/processing/documents/${encodeURIComponent(documentId)}/process`,
+          undefined,
         );
         jobs.push({ jobId: result.job_id, documentId });
       } catch (err) {

@@ -5,6 +5,7 @@ import {
 import { useChatSessionGuard } from './useChatSessionGuard';
 import { onChatSessionReset } from '@/store/chat-store';
 import { useCallback, useState, useEffect } from 'react';
+import toast from 'react-hot-toast';
 import { useRouter } from 'next/navigation';
 
 import {
@@ -53,6 +54,10 @@ export interface UseSlashCommandsParams {
   /** Regenerate-most-recent-assistant-turn (useChatComposerActions) — the
    * /retry command dispatches to it rather than re-implementing regenerate. */
   retryLast: () => void;
+  /** useChatStreaming's `isBusy`: loading, streaming, a pending confirmation
+   * or an active harness run. Synthesis commands are refused (with a toast)
+   * while it is set, instead of being queued and then dropped. */
+  isBusy: boolean;
   conversations: ChatConversation[];
   activeThreadId: string | null;
   setCurrentThread: (threadId: string | null) => void;
@@ -87,6 +92,7 @@ export function useSlashCommands({
   setInput,
   handleSubmit,
   retryLast,
+  isBusy,
   conversations,
   activeThreadId,
   setCurrentThread,
@@ -321,11 +327,16 @@ export function useSlashCommands({
           // Synthesis commands SEND a real, citation-asking research query over
           // the current project sources (unlike /threads, which only prints
           // in-chat output). Mirror submitMessage by clearing ephemeral command
-          // output first, then dispatch the templated prompt through the same
-          // send path useChatComposerActions.retryLast/handleRegenerate use:
-          // setInput so the composer reflects what was sent, then a deferred
-          // handleSubmit(template) so it doesn't read the stale pre-setInput
-          // value from its closure.
+          // output first, then send the templated prompt with a deferred,
+          // account-fenced handleSubmit(template). The composer draft is not
+          // replaced first: if handleSubmit rejects the send it puts the
+          // template back itself, and only when the composer is empty.
+          if (isBusy) {
+            toast.error(
+              'Wait for the current reply to finish before running a command.'
+            );
+            return;
+          }
           const SYNTHESIS_TEMPLATES: Record<
             'summarize' | 'keypoints' | 'gaps' | 'timeline',
             string
@@ -340,8 +351,9 @@ export function useSlashCommands({
           };
           const template = SYNTHESIS_TEMPLATES[id];
           setCommandOutputs([]);
-          setInput(template);
-          setTimeout(() => handleSubmit(template), 0);
+          setTimeout(() => {
+            if (isCurrentSession()) void handleSubmit(template);
+          }, 0);
           return;
         }
         case 'help':
@@ -467,6 +479,7 @@ export function useSlashCommands({
       retryLast,
       setInput,
       handleSubmit,
+      isBusy,
       conversations,
       activeThreadId,
       appendOutput,

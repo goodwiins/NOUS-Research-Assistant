@@ -54,9 +54,11 @@ export const shouldUseLocalProxyForConfiguredOrigin = (
   );
 };
 
-const shouldIgnoreConfiguredOrigin = (value: string): boolean => {
+const shouldIgnoreConfiguredOrigin = (
+  value: string,
+  browserLocation: URL | null
+): boolean => {
   const configured = parseUrl(value);
-  const browserLocation = getBrowserLocation();
 
   if (!configured || !browserLocation) {
     return false;
@@ -89,11 +91,12 @@ const mapFrontendHostToApiHost = (hostname: string): string => {
 
 const getConfiguredOrigin = (
   values: Array<string | undefined>,
-  protocols: readonly string[] = ['http:', 'https:']
+  protocols: readonly string[] = ['http:', 'https:'],
+  browserLocation: URL | null = getBrowserLocation()
 ): string => {
   for (const value of values) {
     const trimmed = value?.trim();
-    if (!trimmed || shouldIgnoreConfiguredOrigin(trimmed)) {
+    if (!trimmed || shouldIgnoreConfiguredOrigin(trimmed, browserLocation)) {
       continue;
     }
 
@@ -111,16 +114,51 @@ const getConfiguredOrigin = (
   return '';
 };
 
-export const getPublicApiOrigin = (): string => {
-  const configured = getConfiguredOrigin([
-    process.env.NEXT_PUBLIC_API_URL,
-    process.env.NEXT_PUBLIC_API_BASE_URL,
-  ]);
+/**
+ * Local backend origins the development CSP's connect-src must allow, since
+ * getPublicApiOrigin falls back to http://localhost:8000 in dev (used by
+ * src/lib/csp.ts; never emitted outside NODE_ENV=development).
+ */
+export const DEV_BACKEND_CSP_ORIGINS = [
+  'http://localhost:8000',
+  'ws://localhost:8000',
+  'http://127.0.0.1:8000',
+  'ws://127.0.0.1:8000',
+] as const;
+
+/** The public endpoint env vars, injectable so the CSP can resolve them. */
+export interface PublicEndpointEnv {
+  NEXT_PUBLIC_API_URL?: string;
+  NEXT_PUBLIC_API_BASE_URL?: string;
+  NEXT_PUBLIC_WS_URL?: string;
+  NEXT_PUBLIC_WEBSOCKET_URL?: string;
+}
+
+const processEndpointEnv = (): PublicEndpointEnv => ({
+  NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+  NEXT_PUBLIC_API_BASE_URL: process.env.NEXT_PUBLIC_API_BASE_URL,
+  NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL,
+  NEXT_PUBLIC_WEBSOCKET_URL: process.env.NEXT_PUBLIC_WEBSOCKET_URL,
+});
+
+/**
+ * The backend API origin a page at `browserLocation` talks to. The browser
+ * passes its own location; the CSP (src/lib/csp.ts) passes the request URL,
+ * so both resolve the same origin from the same config (GOO-729).
+ */
+export const resolveApiOrigin = (
+  env: PublicEndpointEnv,
+  browserLocation: URL | null
+): string => {
+  const configured = getConfiguredOrigin(
+    [env.NEXT_PUBLIC_API_URL, env.NEXT_PUBLIC_API_BASE_URL],
+    ['http:', 'https:'],
+    browserLocation
+  );
   if (configured && !configured.startsWith('/')) {
     return configured.replace(API_VERSION_PATH_RE, '');
   }
 
-  const browserLocation = getBrowserLocation();
   if (!browserLocation) {
     return '';
   }
@@ -136,6 +174,9 @@ export const getPublicApiOrigin = (): string => {
 
   return browserLocation.origin;
 };
+
+export const getPublicApiOrigin = (): string =>
+  resolveApiOrigin(processEndpointEnv(), getBrowserLocation());
 
 export const getPublicApiBaseUrl = (
   defaultPath: string = '/api/v1',
@@ -174,19 +215,27 @@ export const getPublicApiBaseUrl = (
   return origin ? `${origin}${defaultPath}` : defaultPath;
 };
 
-export const getPublicWebSocketOrigin = (): string => {
+/** The WebSocket origin a page at `browserLocation` connects to. */
+export const resolveWebSocketOrigin = (
+  env: PublicEndpointEnv,
+  browserLocation: URL | null
+): string => {
   const configured = getConfiguredOrigin(
-    [process.env.NEXT_PUBLIC_WS_URL, process.env.NEXT_PUBLIC_WEBSOCKET_URL],
-    ['ws:', 'wss:', 'http:', 'https:']
+    [env.NEXT_PUBLIC_WS_URL, env.NEXT_PUBLIC_WEBSOCKET_URL],
+    ['ws:', 'wss:', 'http:', 'https:'],
+    browserLocation
   );
   if (configured) {
     return configured.replace(/^http/, 'ws');
   }
 
-  const apiOrigin = getPublicApiOrigin();
+  const apiOrigin = resolveApiOrigin(env, browserLocation);
   if (apiOrigin) {
     return apiOrigin.replace(/^http/, 'ws');
   }
 
   return '';
 };
+
+export const getPublicWebSocketOrigin = (): string =>
+  resolveWebSocketOrigin(processEndpointEnv(), getBrowserLocation());

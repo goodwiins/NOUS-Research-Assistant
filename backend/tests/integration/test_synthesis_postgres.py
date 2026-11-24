@@ -252,6 +252,7 @@ def _execute(
     expected: str,
     key: str,
     supersedes: UUID | None = None,
+    staling: bool = False,
 ) -> Awaitable[Any]:
     body = SynthesisExecute(
         table_version_id=table,
@@ -260,12 +261,37 @@ def _execute(
         supersedes_result_id=supersedes,
         idempotency_key=key,
     )
+    if staling:  # the route's resolve (GOO-721)
+
+        async def routed() -> Any:
+            async with w.factory() as db:
+                context = await draft_release_service.resolve_for_staling(
+                    db, w.p1, w.ids[user], REVIEW
+                )
+                w.staling_context = context
+                return await svc.execute(db, context, w.ids[user], body)
+
+        return routed()
     return _as(
         w,
         user,
         REVIEW,
         lambda db, ctx: svc.execute(db, ctx, w.ids[user], body),
     )
+
+
+def _count_edge_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """GOO-721: ``load_edges`` runs for the pre-lock snapshot and again only
+    if a staling writer rebuilds the edges under the Collection lock."""
+    reads: list[int] = []
+    original = draft_release_service.load_edges
+
+    async def counted(db: AsyncSession, collection_id: UUID) -> Any:
+        reads.append(1)
+        return await original(db, collection_id)
+
+    monkeypatch.setattr(draft_release_service, "load_edges", counted)
+    return reads
 
 
 async def _counts(factory: Factory) -> tuple[int, int]:
@@ -332,6 +358,7 @@ def _migration(connection: Connection, direction: str) -> None:
 
 async def test_synthesis_gold_duplicates_validation_successor_and_stale_release(
     screening_factory: Factory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factory = screening_factory
     # 1. Seed: A (two reports, one study), B-D from the gold fixture, E with
@@ -434,10 +461,13 @@ async def test_synthesis_gold_duplicates_validation_successor_and_stale_release(
         409,
         svc.RESULT_STALE,
     )
+    reads = _count_edge_reads(monkeypatch)
     r2, replayed = await _execute(
-        w, "R", t2.id, roles, preview2.input_hash, "r2", supersedes=r1.id
+        w, "R", t2.id, roles, preview2.input_hash, "r2", supersedes=r1.id, staling=True
     )
     assert not replayed and r2.supersedes_result_id == r1.id
+    # GOO-721: the edges read before the lock were used under it.
+    assert w.staling_context.release_edges and reads == [1]
     assert len(r2.included) == 5
     assert await _release_cause(factory, release1.id) == "research_synthesis"
     assert await _release_cause(factory, release2.id) is None

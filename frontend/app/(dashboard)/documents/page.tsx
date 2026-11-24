@@ -8,6 +8,7 @@ import { useEffect, useState, useMemo, useSyncExternalStore } from 'react';
 import { Pagination } from '../../components/Pagination';
 import { DocumentStats } from './components/DocumentStats';
 import { DocumentFilters } from './components/DocumentFilters';
+import type { DocumentFilters as DocumentFilterValues } from '@/types/document';
 import { DocumentList } from './components/DocumentList';
 import { Button } from '@/components/ui/button';
 import {
@@ -70,7 +71,9 @@ export default function DocumentsPage() {
   // Update backend filters when local state changes
   useEffect(() => {
     const backendStatus =
-      statusFilter === 'all' ? undefined : [statusFilter as any];
+      statusFilter === 'all'
+        ? undefined
+        : (statusFilter as NonNullable<DocumentFilterValues['status']>);
     const timeoutId = setTimeout(() => {
       updateFilters({
         search_term: searchQuery || undefined,

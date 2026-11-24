@@ -44,7 +44,10 @@ export interface DocumentUploadWizardProps {
 
 type WizardStep = 'upload' | 'review' | 'processing' | 'complete';
 
-interface FileWithPreview extends File {
+// Wrap the File rather than spreading it: name/size/type are prototype
+// getters on File, so `{...file}` silently drops them (FR-1).
+interface FileWithPreview {
+  file: File;
   preview?: string;
   id: string;
 }
@@ -117,7 +120,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
 
       // Create files with preview
       const filesWithPreview: FileWithPreview[] = acceptedFiles.map(file => ({
-        ...file,
+        file,
         id: Math.random().toString(36).substr(2, 9),
         preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
       }));
@@ -140,10 +143,13 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
       }
 
       // Only add valid files
-      const validFiles = filesWithPreview.filter(file => {
+      const validFiles = filesWithPreview.filter(entry => {
         const fileValidation = validation.errors.find(error =>
-          error.details?.fileName === file.name
+          error.details?.fileName === entry.file.name
         );
+        if (fileValidation && entry.preview) {
+          URL.revokeObjectURL(entry.preview);
+        }
         return !fileValidation;
       });
 
@@ -201,11 +207,17 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
     performClose();
   }, [hasActiveUploads, performClose]);
 
-  const handleStartUpload = useCallback(() => {
-    const result = addToQueue(selectedFiles);
+  // Returns whether the queue accepted the files. The wizard only advances to
+  // "processing" on success, so a rejected batch keeps the user on the review
+  // step where the errors are rendered (FR-2).
+  const handleStartUpload = useCallback((): boolean => {
+    const result = addToQueue(selectedFiles.map(entry => entry.file));
     if (result.errors.length > 0) {
       setValidationErrors(result.errors);
+      return false;
     }
+    setValidationErrors([]);
+    return result.success.length > 0;
   }, [selectedFiles, addToQueue]);
 
   const handleNext = useCallback(() => {
@@ -216,8 +228,9 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
         }
         break;
       case 'review':
-        setCurrentStep('processing');
-        handleStartUpload();
+        if (handleStartUpload()) {
+          setCurrentStep('processing');
+        }
         break;
       case 'processing':
         if (allCompleted) {
@@ -336,6 +349,37 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
 
   if (!isOpen) return null;
 
+  // Rendered on both the upload and review steps so queue rejections raised
+  // from the review step are visible where the user is (FR-2).
+  const validationErrorBanner = validationErrors.length > 0 ? (
+        <div role="alert" className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
+          <div className="flex items-start space-x-3">
+            <ExclamationTriangleIcon className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <h4 className="text-sm font-medium text-destructive">
+                Upload Validation Errors
+              </h4>
+              <ul className="mt-2 text-sm text-destructive/80 space-y-1">
+                {validationErrors.map((error, index) => (
+                  <li key={index} className="flex items-start space-x-2">
+                    <span className="text-destructive/60 mt-1">•</span>
+                    <span>{getErrorMessage(error)}</span>
+                  </li>
+                ))}
+              </ul>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setValidationErrors([])}
+                className="mt-3 text-destructive/70 hover:text-destructive"
+              >
+                Dismiss errors
+              </Button>
+            </div>
+          </div>
+        </div>
+  ) : null;
+
   return (
     <>
     <Dialog open={isOpen} onOpenChange={handleClose}>
@@ -387,35 +431,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
         <div className="flex-1 overflow-y-auto">
           {currentStep === 'upload' && (
             <div className="space-y-6">
-              {/* Validation Errors */}
-              {validationErrors.length > 0 && (
-                <div role="alert" className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
-                  <div className="flex items-start space-x-3">
-                    <ExclamationTriangleIcon className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-                    <div className="flex-1 min-w-0">
-                      <h4 className="text-sm font-medium text-destructive">
-                        Upload Validation Errors
-                      </h4>
-                      <ul className="mt-2 text-sm text-destructive/80 space-y-1">
-                        {validationErrors.map((error, index) => (
-                          <li key={index} className="flex items-start space-x-2">
-                            <span className="text-destructive/60 mt-1">•</span>
-                            <span>{getErrorMessage(error)}</span>
-                          </li>
-                        ))}
-                      </ul>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setValidationErrors([])}
-                        className="mt-3 text-destructive/70 hover:text-destructive"
-                      >
-                        Dismiss errors
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              )}
+              {validationErrorBanner}
 
               {/* Drop Zone */}
               <div
@@ -471,42 +487,42 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                   </h3>
 
                   <div className="space-y-2 max-h-60 overflow-y-auto">
-                    {selectedFiles.map((file) => (
+                    {selectedFiles.map((entry) => (
                       <div
-                        key={file.id}
+                        key={entry.id}
                         className="flex items-center justify-between p-4 bg-card border rounded-lg hover:bg-accent/50 transition-colors"
                       >
                         <div className="flex items-center space-x-3 flex-1 min-w-0">
-                          {file.preview ? (
+                          {entry.preview ? (
                             <img
-                              src={file.preview}
-                              alt={file.name}
+                              src={entry.preview}
+                              alt={entry.file.name}
                               className="h-10 w-10 object-cover rounded cursor-pointer"
-                              onClick={() => setShowPreview(file.preview!)}
+                              onClick={() => setShowPreview(entry.preview!)}
                             />
                           ) : (
                             <div className="h-10 w-10 bg-muted rounded flex items-center justify-center text-lg">
-                              {getFileIcon(file)}
+                              {getFileIcon(entry.file)}
                             </div>
                           )}
 
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-foreground truncate">
-                              {file.name}
+                              {entry.file.name}
                             </p>
                             <p className="text-xs text-muted-foreground">
-                              {formatFileSize(file.size)} • {file.type || 'Unknown type'}
+                              {formatFileSize(entry.file.size)} • {entry.file.type || 'Unknown type'}
                             </p>
                           </div>
                         </div>
 
                         <div className="flex items-center space-x-2">
-                          {file.preview && (
+                          {entry.preview && (
                             <Button
                               variant="ghost"
                               size="sm"
                               aria-label="Preview file"
-                              onClick={() => setShowPreview(file.preview!)}
+                              onClick={() => setShowPreview(entry.preview!)}
                             >
                               <EyeIcon className="h-4 w-4" />
                             </Button>
@@ -515,7 +531,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                             variant="ghost"
                             size="sm"
                             aria-label="Remove file"
-                            onClick={() => removeFile(file.id)}
+                            onClick={() => removeFile(entry.id)}
                             className="text-muted-foreground hover:text-destructive"
                           >
                             <XMarkIcon className="h-4 w-4" />
@@ -531,48 +547,50 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
 
           {currentStep === 'review' && (
             <div className="space-y-6">
+              {validationErrorBanner}
+
               <div className="grid gap-4">
-                {selectedFiles.map((file) => (
+                {selectedFiles.map((entry) => (
                   <div
-                    key={file.id}
+                    key={entry.id}
                     className="flex items-center justify-between p-4 bg-card border rounded-lg"
                   >
                     <div className="flex items-center space-x-3 flex-1 min-w-0">
-                      {file.preview ? (
+                      {entry.preview ? (
                         <img
-                          src={file.preview}
-                          alt={file.name}
+                          src={entry.preview}
+                          alt={entry.file.name}
                           className="h-12 w-12 object-cover rounded cursor-pointer"
-                          onClick={() => setShowPreview(file.preview!)}
+                          onClick={() => setShowPreview(entry.preview!)}
                         />
                       ) : (
                         <div className="h-12 w-12 bg-muted rounded flex items-center justify-center text-xl">
-                          {getFileIcon(file)}
+                          {getFileIcon(entry.file)}
                         </div>
                       )}
 
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-foreground truncate">
-                          {file.name}
+                          {entry.file.name}
                         </p>
                         <div className="flex items-center space-x-2 mt-1">
                           <Badge variant="secondary" className="text-xs">
-                            {getFileTypeCategory(file)}
+                            {getFileTypeCategory(entry.file)}
                           </Badge>
                           <span className="text-xs text-muted-foreground">
-                            {formatFileSize(file.size)}
+                            {formatFileSize(entry.file.size)}
                           </span>
                         </div>
                       </div>
                     </div>
 
                     <div className="flex items-center space-x-2">
-                      {file.preview && (
+                      {entry.preview && (
                         <Button
                           variant="ghost"
                           size="sm"
                           aria-label="Preview file"
-                          onClick={() => setShowPreview(file.preview!)}
+                          onClick={() => setShowPreview(entry.preview!)}
                         >
                           <EyeIcon className="h-4 w-4" />
                         </Button>
@@ -581,7 +599,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                         variant="ghost"
                         size="sm"
                         aria-label="Remove file"
-                        onClick={() => removeFile(file.id)}
+                        onClick={() => removeFile(entry.id)}
                         className="text-muted-foreground hover:text-destructive"
                       >
                         <XMarkIcon className="h-4 w-4" />
@@ -602,7 +620,7 @@ export const DocumentUploadWizard: React.FC<DocumentUploadWizardProps> = ({
                   <div>
                     <span className="text-muted-foreground">Total Size:</span>
                     <span className="ml-2 font-medium">
-                      {formatFileSize(selectedFiles.reduce((sum, file) => sum + file.size, 0))}
+                      {formatFileSize(selectedFiles.reduce((sum, entry) => sum + entry.file.size, 0))}
                     </span>
                   </div>
                 </div>

@@ -1,9 +1,6 @@
-import { logger, task, wait } from "@trigger.dev/sdk";
-import { backendClient, BackendApiError } from "../_lib/backend-client";
+import { logger, task } from "@trigger.dev/sdk";
+import { backendClient } from "../_lib/backend-client";
 import type { ArxivIngestPaperPayload } from "../_lib/schemas";
-
-const MAX_POLL_ATTEMPTS = 60;
-const POLL_INTERVAL_SECONDS = 10;
 
 export const ingestPaper = task({
   id: "arxiv-ingest-paper",
@@ -22,48 +19,17 @@ export const ingestPaper = task({
     // POSTed once per attempt (the client does not retry writes). The task
     // retry is the only retry layer; it is safe because the backend reuses an
     // existing document for the same (organization, arXiv id).
-    const result = await backendClient.post<Record<string, unknown>>(
-      "/api/v1/arxiv/ingest",
-      { paper_ids: [paperId] },
-    );
-
-    const documentIds = Array.isArray(result.document_ids)
-      ? (result.document_ids as string[])
-      : [];
-    if (documentIds.length === 0) {
-      // The endpoint queues a background job and does not report document
-      // ids, so the outcome is not observable here. Report it as accepted,
-      // never as ingested.
-      logger.info("Paper ingest accepted; outcome not observable", { paperId });
-      return { status: "accepted", paperId };
-    }
-
-    logger.info("Paper ingested, polling for processing", {
-      paperId,
-      documentIds,
+    await backendClient.post<Record<string, unknown>>("/api/v1/arxiv/ingest", {
+      paper_ids: [paperId],
     });
 
-    for (let i = 0; i < MAX_POLL_ATTEMPTS; i++) {
-      await wait.for({ seconds: POLL_INTERVAL_SECONDS });
-
-      try {
-        const job = await backendClient.get<Record<string, unknown>>(
-          `/api/v1/processing/jobs/${documentIds[0]}`,
-        );
-        if (job.status === "completed") {
-          return { status: "completed", paperId, documentIds };
-        }
-        if (job.status === "failed") {
-          return { status: "failed", paperId, error: job.error_message };
-        }
-      } catch (err) {
-        if (err instanceof BackendApiError && err.status === 404) {
-          return { status: "completed", paperId, documentIds };
-        }
-        throw err;
-      }
-    }
-
-    return { status: "timeout", paperId };
+    // The endpoint queues a FastAPI background task and answers
+    // {message, paper_count, status}: no job id and no document id, so there
+    // is nothing to poll and the outcome is not observable here. Report the
+    // paper as accepted, never as ingested. (GOO-718: a poll of
+    // /processing/jobs/{job_id} with a document id used to follow, behind a
+    // `document_ids` check the response never satisfied.)
+    logger.info("Paper ingest accepted; outcome not observable", { paperId });
+    return { status: "accepted" as const, paperId };
   },
 });

@@ -4,6 +4,7 @@ import dynamic from 'next/dynamic';
 import { SidebarLayout } from '@/components/layout/SidebarLayout';
 import { usePathname } from 'next/navigation';
 import { useNotificationBridge } from '@/hooks/useNotificationBridge';
+import { ProfileUnavailableBanner } from '@/components/auth/ProfileUnavailableBanner';
 
 const GlobalAgentChat = dynamic(
   () =>
@@ -34,6 +35,7 @@ export default function DashboardLayoutClient({
       showHeader={shouldShowHeader}
       rightPanel={<GlobalAgentChat />}
     >
+      <ProfileUnavailableBanner />
       {children}
     </SidebarLayout>
   );

@@ -892,6 +892,112 @@ describe('AuiUserMessage inline edit-and-resend', () => {
   });
 });
 
+describe('AuiUserMessage for a send the server rejected (GOO-772)', () => {
+  const NOT_SENT =
+    'The server couldn’t take your message, so it wasn’t sent. Retry in a moment.';
+
+  function renderFailedRow(
+    opts: { onEdit?: (content: string) => void; editDisabled?: boolean } = {}
+  ): RenderResult {
+    const message = {
+      ...makeChatPageMessage({
+        role: 'user',
+        content: 'unsent question',
+        timestamp: 1,
+      }),
+      source: 'local-only' as const,
+      sendFailed: { message: NOT_SENT },
+    };
+    return render(
+      <ChatRuntimeProvider
+        messages={[message]}
+        isRunning={false}
+        onSend={noop}
+        onCancel={noop}
+      >
+        <AuiMessageByIndex
+          index={0}
+          message={message}
+          onEdit={opts.onEdit ?? noop}
+          editDisabled={opts.editDisabled}
+        />
+      </ChatRuntimeProvider>
+    );
+  }
+
+  it('says the message was not sent, without hovering', () => {
+    renderFailedRow();
+
+    const note = screen.getByTestId('send-failed');
+    expect(note).toHaveTextContent('Not sent');
+    expect(note).toHaveTextContent(NOT_SENT);
+    expect(
+      screen.getByRole('button', { name: /retry sending/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /edit unsent message/i })
+    ).toBeInTheDocument();
+  });
+
+  it('Retry resends the same text', () => {
+    const onEdit = vi.fn();
+    renderFailedRow({ onEdit });
+
+    fireEvent.click(screen.getByRole('button', { name: /retry sending/i }));
+
+    expect(onEdit).toHaveBeenCalledWith('unsent question');
+  });
+
+  it('Edit opens the editor seeded with the unsent text', () => {
+    const onEdit = vi.fn();
+    renderFailedRow({ onEdit });
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /edit unsent message/i })
+    );
+    const textarea = screen.getByLabelText(
+      'Edit your message'
+    ) as HTMLTextAreaElement;
+    expect(textarea.value).toBe('unsent question');
+    fireEvent.change(textarea, { target: { value: 'fixed question' } });
+    fireEvent.click(screen.getByRole('button', { name: /save & resend/i }));
+
+    expect(onEdit).toHaveBeenCalledWith('fixed question');
+  });
+
+  it('disables Retry while a turn is in flight, and says why', () => {
+    const onEdit = vi.fn();
+    renderFailedRow({ onEdit, editDisabled: true });
+
+    const retry = screen.getByRole('button', { name: /retry sending/i });
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute('title', RETRY_UNAVAILABLE_REASON);
+    fireEvent.click(retry);
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it('shows no failure note on a sent message', () => {
+    const message = makeChatPageMessage({
+      id: 'u1',
+      role: 'user',
+      content: 'sent question',
+      timestamp: 1,
+    });
+    render(
+      <ChatRuntimeProvider
+        messages={[message]}
+        isRunning={false}
+        onSend={noop}
+        onCancel={noop}
+      >
+        <AuiMessageByIndex index={0} message={message} onEdit={noop} />
+      </ChatRuntimeProvider>
+    );
+
+    expect(screen.queryByTestId('send-failed')).toBeNull();
+  });
+});
+
 describe('AuiAssistantMessage retry', () => {
   // AuiAssistantMessage reads the message scope off the row's message
   // provider (mounting it directly throws "does not have a 'message'
