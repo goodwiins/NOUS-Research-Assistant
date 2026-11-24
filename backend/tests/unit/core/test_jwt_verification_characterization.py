@@ -378,56 +378,6 @@ async def test_ws_invalid_token_closes_4003(token: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# src/websocket/auth.py: legacy authenticator's own Supabase decode
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def legacy_ws() -> Any:
-    from src.websocket.auth import WebSocketAuthenticator as LegacyAuthenticator
-
-    return LegacyAuthenticator()
-
-
-async def test_legacy_ws_valid_token_maps_role(legacy_ws: Any) -> None:
-    payload = await legacy_ws._validate_jwt_token(
-        _hs(_supabase_claims(app_metadata={"role": "ADMIN"}))
-    )
-    assert payload is not None
-    assert payload["sub"] == "sb-user" and payload["role"] == "ADMIN"
-
-
-@pytest.mark.parametrize(
-    "token",
-    [
-        _hs(_supabase_claims(exp=_now() - 2)),
-        _hs(_supabase_claims(aud="anon")),
-        _hs(_supabase_claims(), secret="y" * 40),
-        _hs(_supabase_claims(), alg="HS512"),
-        _unsigned(_supabase_claims()),
-        _hs(_supabase_claims(sub=None)),
-        "garbage",
-    ],
-)
-async def test_legacy_ws_rejections_return_none(legacy_ws: Any, token: str) -> None:
-    assert await legacy_ws._validate_jwt_token(token) is None
-
-
-async def test_legacy_ws_future_iat_still_accepted(legacy_ws: Any) -> None:
-    token = _hs(_supabase_claims(iat=_now() + 120))
-    assert await legacy_ws._validate_jwt_token(token) is not None
-
-
-async def test_legacy_ws_refresh_token_round_trips(legacy_ws: Any) -> None:
-    token = await legacy_ws._generate_refresh_token("user-1", "org-1")
-    claims = jwt.decode(
-        token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
-    )
-    assert claims["sub"] == "user-1" and claims["type"] == "websocket_refresh"
-    assert isinstance(claims["exp"], int) and isinstance(claims["iat"], int)
-
-
-# ---------------------------------------------------------------------------
 # src/services/security/user_management.py: AuthService
 # ---------------------------------------------------------------------------
 
@@ -507,11 +457,6 @@ def test_tightened_supabase_token_without_aud_rejected(es256: Any) -> None:
     access tokens always carry ``aud="authenticated"``."""
     assert verify_token(_hs(_supabase_claims(aud=None))) is None
     assert verify_token(_es(es256, _supabase_claims(aud=None))) is None
-
-
-async def test_tightened_legacy_ws_token_without_aud_rejected(legacy_ws: Any) -> None:
-    token = _hs(_supabase_claims(aud=None))
-    assert await legacy_ws._validate_jwt_token(token) is None
 
 
 def test_tightened_token_expiring_this_second_rejected() -> None:

@@ -398,11 +398,19 @@ class StatusUpdateService(BaseService):
         title: str,
         message: str,
         notification_type: str = "info",
-        target_users: List[str] = None,
-        target_organizations: List[str] = None,
+        target_users: Optional[List[str]] = None,
+        target_organizations: Optional[List[str]] = None,
         action_url: str = None,
+        broadcast_to_all: bool = False,
     ):
-        """Broadcast system notification"""
+        """Broadcast system notification.
+
+        Delivered to ``target_users`` and ``target_organizations``. With
+        neither, it goes to every ``user_notifications`` subscriber in every
+        organization only when ``broadcast_to_all`` is set; use that only for
+        text that carries no user or organization data (GOO-740). Otherwise an
+        untargeted notification is logged and not sent.
+        """
         try:
             # Prepare notification data
             notification_data = {
@@ -438,11 +446,19 @@ class StatusUpdateService(BaseService):
                         org_id, ws_message
                     )
 
-            # If no specific targets, broadcast to all
+            # No targets: reach everyone only on explicit opt-in. A missing
+            # target is never read as "everyone" (fail closed, GOO-740).
             if not target_users and not target_organizations:
-                await connection_manager.broadcast_to_channel(
-                    Channel.USER_NOTIFICATIONS.value, ws_message
-                )
+                if broadcast_to_all:
+                    await connection_manager.broadcast_to_channel(
+                        Channel.USER_NOTIFICATIONS.value, ws_message
+                    )
+                else:
+                    logger.warning(
+                        "status_update.untargeted_notification: not broadcast "
+                        "(type=%s)",
+                        notification_type,
+                    )
 
             # Log to database
             await self._log_status_update(

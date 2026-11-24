@@ -1,6 +1,6 @@
 # WebSocket Services Documentation
 
-> **Path check 2026-10-17: component file locations below were updated to the current tree, but the feature descriptions (Redis clustering, circuit breakers, batching) were not re-verified against the code. See `backend/src/websocket/websocket_api.py` and the services named below for the real behavior.**
+> **Path check 2026-10-17: component file locations below were updated to the current tree, but the feature descriptions (Redis clustering, circuit breakers, batching) were not re-verified against the code. See `backend/src/api/realtime/websocket_v2.py` and the services named below for the real behavior. The legacy standalone `backend/src/websocket/` app was deleted in GOO-740.**
 
 ## Overview
 
@@ -250,6 +250,7 @@ Send a test message to a specific WebSocket connection.
 - **Update Frequency**: Immediate
 - **Permissions**: User
 - **Example Use Cases**: Task completion alerts, quota warnings
+- **Delivery**: Addressed to target users or organizations. A notification with no target is dropped unless the producer passes `broadcast_to_all=True`, which is only for text with no user or organization data (GOO-740).
 
 #### `quota_alerts`
 - **Purpose**: Storage and processing quota alerts

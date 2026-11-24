@@ -447,6 +447,8 @@ class WebSocketErrorHandler(BaseService):
             title="Service Temporarily Unavailable",
             message=f"The service is temporarily unavailable due to high error rates. Please try again later.",
             notification_type="error",
+            # Generic text, no user or org data: everyone may see it.
+            broadcast_to_all=True,
         )
 
     async def _handle_retry(self, error_context: ErrorContext):
@@ -626,6 +628,8 @@ class WebSocketErrorHandler(BaseService):
                     title="High Error Rate Detected",
                     message=f"The system is experiencing a high error rate. Administrators have been notified.",
                     notification_type="error",
+                    # Generic text, no user or org data: everyone may see it.
+                    broadcast_to_all=True,
                 )
 
         except Exception as e:
