@@ -203,9 +203,15 @@ class DeploymentConsistency(unittest.TestCase):
             if doc["kind"] == "Deployment"
         }
         worker = containers["celery-worker"]
-        self.assertIn(
-            "inspect ping -d celery@$HOSTNAME",
-            " ".join(worker["readinessProbe"]["exec"]["command"]),
+        readiness = " ".join(worker["readinessProbe"]["exec"]["command"])
+        self.assertIn("inspect ping -d celery@$HOSTNAME", readiness)
+        # Readiness must not import the app (src.tasks loads the whole task
+        # graph); it reaches the broker through the container's REDIS_URL.
+        self.assertNotIn("src.tasks", readiness)
+        self.assertIn('-b "$REDIS_URL"', readiness)
+        self.assertGreaterEqual(
+            worker["readinessProbe"]["timeoutSeconds"],
+            worker["livenessProbe"]["timeoutSeconds"],
         )
         beat = containers["celery-beat"]
         probe = " ".join(beat["livenessProbe"]["exec"]["command"])

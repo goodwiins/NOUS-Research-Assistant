@@ -92,11 +92,27 @@ pod-level `securityContext` (non-root UID/GID 1001) still comes from
 processes write only under `/app`, which the image's UID 1001 owns.
 
 The worker's liveness and readiness probes both run
-`celery -A src.tasks.celery_app inspect ping -d celery@$HOSTNAME`. The ping asks
-only the pod's own node and imports only `celery_app`, not the task graph. A
-stuck consumer stops answering. Readiness (`celeryWorker.readinessProbe.*`,
-default 30 s ping timeout, every 60 s) gates rollout availability and the worker
-PDB; liveness (`celeryWorker.livenessProbe.*`) restarts the container.
+`celery ... inspect ping -d celery@$HOSTNAME`. The ping asks only the pod's own
+node, and a stuck consumer stops answering. They differ in how they reach the
+broker:
+
+- Liveness (`celeryWorker.livenessProbe.*`) uses `-A src.tasks.celery_app` and
+  restarts the container. That import is not light: it runs
+  `src/tasks/__init__.py`, which loads the task modules, the SQLAlchemy models
+  and the DB engine. Measured locally, one probe process took about 13 s and
+  about 750 MB of resident memory.
+- Readiness (`celeryWorker.readinessProbe.*`, default 60 s ping timeout, 90 s
+  probe timeout, every 60 s, 3 failures) uses `-b "$REDIS_URL"` and imports no
+  application code: about 0.7 s and 70 MB for the same ping. It gates rollout
+  availability and the worker PDB. `REDIS_URL` is the variable the worker
+  itself reads its broker from (`backend.env`, or an `envFrom` secret on AWS).
+  For a `rediss://` URL Kombu applies the same no-verify TLS that `celery_app`
+  sets.
+
+Both probes go through the broker. During a broker outage every worker pod
+turns not ready at once (after 3 failed probes), Argo CD shows the app as
+Degraded, and the worker PDB blocks voluntary disruptions such as node drains
+until the broker is back.
 
 Beat runs with `--schedule=/app/celerybeat-schedule`, the same path as Celery's
 implicit default. Its liveness probe fails when no `celerybeat-schedule*` file in
