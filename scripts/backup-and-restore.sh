@@ -377,7 +377,7 @@ fail_after_postgres() {
 count_ragdb_objects() {
     local not_system="n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'"
     local sql="SELECT (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'))"
-    sql+=" + (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('S', 'c') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'))"
+    sql+=" + (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('S', 'c') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.deptype = 'e' AND ((d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid) OR (d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = c.reltype))))"
     sql+=" + (SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'd', 'r', 'm') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e'))"
     sql+=" + (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'))"
     sql+=" + (SELECT count(*) FROM pg_catalog.pg_namespace n WHERE $not_system AND n.nspname <> 'public' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'))"
@@ -427,8 +427,14 @@ restore_backup() {
     fi
 
     # find -print -quit, not `find | grep -q`: under pipefail, grep exiting
-    # early can SIGPIPE find and turn a match into a false "no match".
-    if [ -z "$(find "$restore_dir" -type f -name "*_${backup_id}.*" -print -quit)" ]; then
+    # early can SIGPIPE find and turn a match into a false "no match". The
+    # assignment keeps find's own status, so a traversal error still fails.
+    local first_match
+    if ! first_match=$(find "$restore_dir" -type f -name "*_${backup_id}.*" -print -quit); then
+        log_error "Could not search $restore_dir for backup $backup_id; nothing restored"
+        return 1
+    fi
+    if [ -z "$first_match" ]; then
         log_error "No backup files match ID $backup_id in s3://$S3_BUCKET/backups/; nothing restored"
         return 1
     fi
@@ -436,7 +442,15 @@ restore_backup() {
     # A full backup has all three; say loudly which ones this one lacks.
     local component
     for component in postgres redis neo4j; do
-        if [ -z "$(find "$restore_dir/$component" -type f -name "*_${backup_id}.*" -print -quit 2>/dev/null)" ]; then
+        # An absent component directory is the normal "missing" case; any
+        # other search failure stops the restore.
+        first_match=""
+        if [ -d "$restore_dir/$component" ] &&
+            ! first_match=$(find "$restore_dir/$component" -type f -name "*_${backup_id}.*" -print -quit); then
+            log_error "Could not search $restore_dir/$component for backup $backup_id; nothing restored"
+            return 1
+        fi
+        if [ -z "$first_match" ]; then
             if [ "$component" = "neo4j" ]; then
                 log_warning "MISSING from backup $backup_id: neo4j (this script never restores neo4j; there is no dump to restore by hand either)"
             else
@@ -507,7 +521,7 @@ restore_backup() {
             elif [ "$after_count" != "0" ]; then
                 log_error "PostgreSQL restore failed, but ragdb now holds $after_count objects: it may be partially loaded. Check it (or drop and recreate it, see RUNBOOKS.md) before retrying."
             else
-                log_error "PostgreSQL restore failed; ragdb is still empty, nothing was committed"
+                log_error "PostgreSQL restore failed. ragdb shows no counted objects (tables, sequences, types, functions, schemas), but views or extension objects may still have been committed: inspect it before retrying."
             fi
             return 1
         fi

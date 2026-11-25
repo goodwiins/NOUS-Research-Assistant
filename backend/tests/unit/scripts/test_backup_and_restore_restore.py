@@ -85,6 +85,7 @@ if [ "$1" = "s3" ] && [ "$2" = "sync" ]; then
                 printf 'REDIS0011' | gzip > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
             badredis) mkdir -p "$d/redis"
                 printf 'not gzip' > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
+            lockedredis) mkdir -p "$d/redis"; chmod 000 "$d/redis" ;;
             neo4j) mkdir -p "$d/neo4j"
                 printf 'dump' | gzip > "$d/neo4j/neo4j_backup_${STUB_BACKUP_ID}.dump.gz" ;;
         esac
@@ -182,6 +183,18 @@ def test_restore_fails_when_no_backup_matches(tmp_path: Path) -> None:
     assert "kubectl exec" not in calls
 
 
+def test_unreadable_component_dir_fails_the_restore(tmp_path: Path) -> None:
+    # find's own failure must stop the restore, not read as "MISSING".
+    try:
+        result, _calls, output = _restore(tmp_path, "postgres lockedredis")
+    finally:
+        for locked in tmp_path.rglob("redis"):
+            locked.chmod(0o700)
+    assert result.returncode != 0, output
+    assert "Could not search" in output
+    assert _psql_stdin(tmp_path) is None
+
+
 def test_restore_syncs_only_the_keys_for_the_id(tmp_path: Path) -> None:
     result, calls, output = _restore(tmp_path, "postgres")
     assert result.returncode == 0, output
@@ -208,6 +221,8 @@ def test_emptiness_probe_counts_tables_and_other_user_objects(tmp_path: Path) ->
     # Sequences, composite/enum/domain types, functions and schemas collide
     # with the dump's CREATE statements too, so they count.
     assert "relkind IN ('S', 'c')" in probe
+    # Extension-owned composite types record membership on pg_type.
+    assert "d.objid = c.reltype" in probe
     assert "typtype IN ('e', 'd', 'r', 'm')" in probe
     assert "pg_catalog.pg_proc" in probe and "nspname <> 'public'" in probe
 
@@ -228,13 +243,13 @@ def test_failed_load_that_left_objects_says_partially_loaded(tmp_path: Path) -> 
     assert "rolled back" not in output
 
 
-def test_failed_load_that_left_ragdb_empty_says_nothing_committed(
-    tmp_path: Path,
-) -> None:
+def test_failed_load_with_zero_count_still_says_to_inspect(tmp_path: Path) -> None:
+    # The count skips views and extension objects, so 0 proves nothing.
     result, _calls, output = _restore(tmp_path, "postgres", STUB_FAIL="load")
     assert result.returncode != 0, output
-    assert "ragdb is still empty, nothing was committed" in output
-    assert "partially loaded" not in output
+    assert "shows no counted objects" in output
+    assert "inspect it before retrying" in output
+    assert "nothing was committed" not in output
 
 
 def test_failed_emptiness_probe_restores_nothing(tmp_path: Path) -> None:
