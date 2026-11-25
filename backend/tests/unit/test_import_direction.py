@@ -1,11 +1,14 @@
-"""Import-direction guard: the service layer must not import the API layer.
+"""Import-direction guard: the service and task layers must not import the API layer.
 
 Audit finding B1 moved the agent tool implementations out of
 ``src/api/agent/`` into ``src/services/agent/`` precisely because service
 code importing route modules inverts the dependency direction (API depends
 on services, never the reverse). This test locks that in: any module under
 ``backend/src/services/`` that imports ``src.api`` (top-level or deferred,
-absolute or relative) fails the build.
+absolute or relative) fails the build. Celery tasks under ``backend/src/tasks/``
+sit below the API layer too, so the same scan covers them with no allowlist
+(GOO-503 moved the last task-side import into
+``src/services/research_engine/run_connectors.py``).
 
 The allowlist is a ratchet: it enumerates the exact pre-existing violations
 at the time this guard was introduced and must only ever shrink. Do not add
@@ -23,19 +26,11 @@ pytestmark = pytest.mark.unit
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = BACKEND_DIR / "src"
 SERVICES_DIR = SRC_DIR / "services"
+TASKS_DIR = SRC_DIR / "tasks"
 
 # Module paths (relative to backend/, posix-style) permitted to import
 # src.api. RATCHET — only remove entries, never add (see module docstring).
-ALLOWED_VIOLATIONS: frozenset[str] = frozenset(
-    {
-        # Pre-existing (predates this guard): consumes ConsensusLevel /
-        # EvidenceMeter / Stance, Pydantic types defined in
-        # src/api/evidence/schemas.py via a relative `from ...api.evidence`
-        # import. Fix by moving those schemas into src/shared/ or
-        # src/services/evidence/ — out of scope for the B1 tools_impl move.
-        "src/services/evidence/consensus_calculator.py",
-    }
-)
+ALLOWED_VIOLATIONS: frozenset[str] = frozenset()
 
 
 def _module_name_for(path: Path) -> str:
@@ -105,4 +100,27 @@ def test_guard_scans_a_meaningful_number_of_files() -> None:
     assert len(scanned) > 20, (
         f"Import-direction guard only found {len(scanned)} files under "
         f"{SERVICES_DIR} — the services tree moved and this guard needs updating."
+    )
+
+
+def test_tasks_layer_does_not_import_api_layer() -> None:
+    assert TASKS_DIR.is_dir(), f"tasks dir not found: {TASKS_DIR}"
+
+    violations: list[str] = []
+    for py_file in sorted(TASKS_DIR.rglob("*.py")):
+        violations.extend(_api_imports(py_file))
+
+    assert not violations, (
+        "Celery task modules must not import from src.api. "
+        "Move the shared code into src/services/ and keep a re-export at the "
+        "old API path instead.\n" + "\n".join(violations)
+    )
+
+
+def test_tasks_guard_scans_a_meaningful_number_of_files() -> None:
+    """Fail loudly if the tasks scan silently goes blind."""
+    scanned = list(TASKS_DIR.rglob("*.py"))
+    assert len(scanned) > 20, (
+        f"Import-direction guard only found {len(scanned)} files under "
+        f"{TASKS_DIR} — the tasks tree moved and this guard needs updating."
     )

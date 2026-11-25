@@ -9,7 +9,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
-from ...api.evidence.schemas import ConsensusLevel, EvidenceMeter, Stance
+from .schemas import ConsensusLevel, EvidenceMeter, Stance
 
 logger = logging.getLogger(__name__)
 
