@@ -30,14 +30,20 @@ async def search_rag_store(
     if not organization_id:
         return {"results": []}
 
-    from src.models.search_schemas import SearchQuery
+    from src.models.search_schemas import SearchQuery, SearchSortOrder, SearchType
     from src.services.search.hybrid_search_service import hybrid_search_service
 
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(
         None,
         lambda: hybrid_search_service.search(
-            SearchQuery(query=query, limit=max_results, search_type="hybrid"),
+            SearchQuery(
+                query=query,
+                limit=max_results,
+                search_type=SearchType.HYBRID,
+                sort_order=SearchSortOrder.RELEVANCE,
+                filters=None,
+            ),
             organization_id=organization_id,
         ),
     )
