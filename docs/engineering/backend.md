@@ -94,7 +94,8 @@ deliberate change, not a side effect of an unrelated refactor.
 
 ## Thread message reads
 
-Chat reads never load a whole thread's messages:
+These two chat reads load a bounded page of a thread's messages, not the
+whole thread:
 
 - `GET /api/v2/threads/{thread_id}` returns at most the newest 500 live
   messages (`THREAD_DETAIL_MAX_MESSAGES` in `thread_service.py`), oldest
@@ -106,6 +107,12 @@ Chat reads never load a whole thread's messages:
 - `ChatService.get_thread_context` reads only the newest `max_messages`
   live rows (`message_service.list_messages(order="desc", limit=...)`), and
   takes `total_messages` from that query's count.
+
+The nested `GET /api/v2/workspaces/{ws}/conversations/{c}/threads/{id}`
+route (`workspace_routes/threads.py`) and `ChatService.get_thread(include_messages=True)`
+still load every message of the thread (the whole selected path on a
+branched thread); that nested route always reports
+`has_more_messages: false`.
 
 ## Ratchets
 

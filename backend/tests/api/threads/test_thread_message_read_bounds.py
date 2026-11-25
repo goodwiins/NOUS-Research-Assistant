@@ -4,7 +4,8 @@
 rows and the thread-detail route only the newest
 ``THREAD_DETAIL_MAX_MESSAGES``, both through a ``LIMIT``-ed SQL page instead
 of the whole ``Thread.messages`` relationship. For small threads both return
-what the old full load returned.
+what the old full load returned. On a branched thread both read the newest
+rows of the selected path, and older ones page with the head pinned.
 """
 
 from __future__ import annotations
@@ -13,11 +14,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event, select
+from sqlalchemy import delete, event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.api.threads import threads as threads_routes
@@ -25,10 +27,12 @@ from src.core.config import settings
 from src.core.database import get_db
 from src.core.dependencies import get_current_user
 from src.models.chat_message import ChatMessage, MessageRole
+from src.models.document import Document, DocumentType, ProcessingStatus
 from src.models.thread import Thread
 from src.models.user import User
-from src.services.threads import thread_service
+from src.services.threads import message_service, thread_service
 from src.services.threads.chat_service import ChatService
+from src.services.threads.message_branches import BranchAccessError
 from src.services.threads.thread_service import THREAD_DETAIL_MAX_MESSAGES
 
 ThreadFactory = Callable[..., Awaitable[Thread]]
@@ -72,6 +76,87 @@ async def _small_thread(
     rows[3].superseded_by_message_id = rows[4].id
     await db.commit()
     return rows
+
+
+async def _branched_thread(
+    db: AsyncSession, thread: Thread, user: User, path_length: int
+) -> tuple[UUID, list[ChatMessage], ChatMessage]:
+    """Bind ``thread`` to a PDF with a selected path and one unselected sibling.
+
+    The path alternates user/assistant turns, each parented on the one before.
+    The sibling is a later user message under the same parent as ``path[2]``,
+    so it is live but off the selected path.
+    """
+    document = Document(
+        id=uuid4(),
+        organization_id=user.organization_id,
+        uploaded_by_user_id=user.id,
+        title="Paper",
+        filename="paper.pdf",
+        file_path="paper.pdf",
+        file_size_bytes=1,
+        mime_type="application/pdf",
+        document_type=DocumentType.PDF,
+        processing_status=ProcessingStatus.COMPLETED,
+    )
+    db.add(document)
+    await db.commit()
+    start = datetime.utcnow() - timedelta(hours=1)
+    path: list[ChatMessage] = []
+    for index in range(path_length):
+        created = start + timedelta(milliseconds=index * 10)
+        row = ChatMessage(
+            id=uuid4(),
+            thread_id=thread.id,
+            user_id=user.id,
+            role=MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT,
+            content=f"path-{index}",
+            token_count=1,
+            parent_message_id=path[-1].id if path else None,
+            created_at=created,
+            updated_at=created,
+        )
+        db.add(row)
+        path.append(row)
+    created = start + timedelta(milliseconds=path_length * 10)
+    sibling = ChatMessage(
+        id=uuid4(),
+        thread_id=thread.id,
+        user_id=user.id,
+        role=MessageRole.USER,
+        content="off-path",
+        token_count=1,
+        parent_message_id=path[1].id,
+        created_at=created,
+        updated_at=created,
+    )
+    db.add(sibling)
+    await db.commit()
+    db.info["_created"]["chat_messages"].extend(row.id for row in [*path, sibling])
+    thread.message_branching = True
+    thread.branch_document_id = document.id
+    thread.selected_message_id = path[-1].id
+    await db.commit()
+    return document.id, path, sibling
+
+
+async def _drop_document(db: AsyncSession, document_id: UUID) -> None:
+    """``documents`` is not in the fixture cleanup; the thread FK is SET NULL."""
+    await db.rollback()
+    await db.execute(delete(Document).where(Document.id == document_id))
+    await db.commit()
+
+
+def _client(db: AsyncSession, user: User) -> AsyncClient:
+    app = FastAPI()
+    app.include_router(threads_routes.router, prefix="/api/v2")
+
+    async def session() -> AsyncIterator[AsyncSession]:
+        yield db
+
+    app.dependency_overrides[get_db] = session
+    app.dependency_overrides[get_current_user] = lambda: user
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 @contextmanager
@@ -308,17 +393,7 @@ async def test_thread_detail_route_matches_full_load_for_small_threads(
     ]
     assert old_ids == [str(rows[i].id) for i in (0, 2, 4)]
 
-    app = FastAPI()
-    app.include_router(threads_routes.router, prefix="/api/v2")
-
-    async def session() -> AsyncIterator[AsyncSession]:
-        yield db_session
-
-    app.dependency_overrides[get_db] = session
-    app.dependency_overrides[get_current_user] = lambda: user
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with _client(db_session, user) as client:
         response = await client.get(f"/api/v2/threads/{thread.id}")
         assert response.status_code == 200, response.text
         body = response.json()
@@ -331,3 +406,100 @@ async def test_thread_detail_route_matches_full_load_for_small_threads(
         assert bare.status_code == 200, bare.text
         assert bare.json()["messages"] == []
         assert bare.json()["has_more_messages"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Branched threads: the newest page of the selected path, paged by its head
+# --------------------------------------------------------------------------- #
+
+
+async def test_branched_thread_detail_and_context_page_the_selected_path(
+    db_session: AsyncSession,
+    thread_factory: ThreadFactory,
+    user_factory: UserFactory,
+) -> None:
+    user = await user_factory()
+    thread = await thread_factory(user=user)
+    document_id, path, sibling = await _branched_thread(
+        db_session, thread, user, THREAD_DETAIL_MAX_MESSAGES + 3
+    )
+    path_ids = [row.id for row in path]
+    newest_context = [row.to_llm_format() for row in path[-5:]]
+    try:
+        detail = await ChatService(db_session).get_thread_with_recent_messages(
+            thread.id, user.id
+        )
+        assert detail is not None
+        loaded, has_more = detail
+        assert has_more is True
+        assert [m.id for m in loaded.messages] == path_ids[-THREAD_DETAIL_MAX_MESSAGES:]
+        assert sibling.id not in {m.id for m in loaded.messages}
+        # What a client keeps from the response; later reads refresh the row.
+        oldest_id, head_id = loaded.messages[0].id, loaded.selected_message_id
+        assert head_id == path_ids[-1]
+
+        # The older path rows page through ``/messages`` with the head pinned.
+        older = await message_service.list_messages(
+            db_session,
+            thread.id,
+            user.id,
+            limit=THREAD_DETAIL_MAX_MESSAGES,
+            order="desc",
+            before_id=oldest_id,
+            selected_message_id=head_id,
+        )
+        assert older is not None
+        assert [m.id for m in older[0]] == list(reversed(path_ids[:3]))
+        assert older[2] is False
+        with pytest.raises(BranchAccessError) as unpinned:
+            await message_service.list_messages(
+                db_session,
+                thread.id,
+                user.id,
+                order="desc",
+                before_id=oldest_id,
+            )
+        assert unpinned.value.status_code == 409
+
+        context = await ChatService(db_session).get_thread_context(
+            thread.id, user.id, max_messages=5
+        )
+        assert context is not None
+        assert context["messages"] == newest_context
+        assert context["metadata"]["total_messages"] == len(path)
+        assert context["metadata"]["truncated"] is True
+
+        async with _client(db_session, user) as client:
+            response = await client.get(f"/api/v2/threads/{thread.id}")
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["has_more_messages"] is True
+            assert body["selected_message_id"] == str(path_ids[-1])
+            assert [m["id"] for m in body["messages"]] == [
+                str(i) for i in path_ids[-THREAD_DETAIL_MAX_MESSAGES:]
+            ]
+    finally:
+        await _drop_document(db_session, document_id)
+
+
+async def test_branched_context_maps_branch_errors_like_thread_detail(
+    db_session: AsyncSession,
+    thread_factory: ThreadFactory,
+    user_factory: UserFactory,
+) -> None:
+    user = await user_factory()
+    thread = await thread_factory(user=user)
+    document_id, path, _sibling = await _branched_thread(db_session, thread, user, 4)
+    # A soft-deleted ancestor breaks the selected path: ``read_thread`` raises
+    # ``BranchAccessError``, which both routes must answer with its status.
+    path[1].is_deleted = True
+    await db_session.commit()
+    try:
+        async with _client(db_session, user) as client:
+            detail = await client.get(f"/api/v2/threads/{thread.id}")
+            context = await client.get(f"/api/v2/threads/{thread.id}/context")
+        assert detail.status_code == 404, detail.text
+        assert context.status_code == detail.status_code, context.text
+        assert context.json()["detail"] == detail.json()["detail"]
+    finally:
+        await _drop_document(db_session, document_id)

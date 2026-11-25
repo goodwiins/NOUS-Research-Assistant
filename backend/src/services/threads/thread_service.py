@@ -132,15 +132,12 @@ async def get_thread_with_recent_messages(
     Bounded in SQL, unlike ``get_thread_detail``'s full relationship load.
     """
     from src.services.threads import message_service
+    from src.services.threads.branch_reads import read_thread
 
-    thread = await workspace_access.get_thread(
-        db,
-        thread_id,
-        user_id,
-        include_messages=False,
-        authorize_bound_document=True,
-    )
-    if thread is None:
+    # One access check (and, on a branched thread, one FOR SHARE lock) for
+    # both the thread row and the page.
+    view = await read_thread(db, thread_id=thread_id, actor_id=user_id)
+    if view is None:
         return None
     result = await message_service.list_messages(
         db,
@@ -148,12 +145,13 @@ async def get_thread_with_recent_messages(
         user_id,
         limit=THREAD_DETAIL_MAX_MESSAGES,
         order="desc",
+        view=view,
     )
     if result is None:
         return None
     newest_first, _total, has_more = result
-    set_committed_value(thread, "messages", list(reversed(newest_first)))
-    return thread, has_more
+    set_committed_value(view.thread, "messages", list(reversed(newest_first)))
+    return view.thread, has_more
 
 
 def last_message_preview_expression() -> Any:

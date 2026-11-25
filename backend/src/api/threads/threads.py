@@ -724,12 +724,15 @@ async def get_thread_context(
     Returns messages in the format expected by LLM APIs, limited by count or tokens.
     """
     service = get_chat_service(db)
-    context = await service.get_thread_context(
-        thread_id=thread_id,
-        user_id=current_user.id,
-        max_messages=max_messages,
-        max_tokens=max_tokens,
-    )
+    try:
+        context = await service.get_thread_context(
+            thread_id=thread_id,
+            user_id=current_user.id,
+            max_messages=max_messages,
+            max_tokens=max_tokens,
+        )
+    except BranchAccessError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
 
     if context is None:
         # R5-M10: service distinguishes missing/no-access (None) from a real,
