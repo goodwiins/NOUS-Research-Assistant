@@ -24215,6 +24215,11 @@ export interface components {
             /** Created By Id */
             created_by_id?: string | null;
             /**
+             * Has More Messages
+             * @default false
+             */
+            has_more_messages: boolean;
+            /**
              * Id
              * Format: uuid
              */

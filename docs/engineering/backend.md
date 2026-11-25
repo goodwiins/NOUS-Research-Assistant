@@ -92,6 +92,18 @@ Keep a compatibility export until every caller has migrated (see
 `backend/src/api/threads/workspaces.py`); removing one is a separate,
 deliberate change, not a side effect of an unrelated refactor.
 
+## Thread message reads
+
+Chat reads never load a whole thread's messages:
+
+- `GET /api/v2/threads/{thread_id}` returns at most the newest 500 live
+  messages (`THREAD_DETAIL_MAX_MESSAGES` in `thread_service.py`), oldest
+  first. `has_more_messages` is `true` when older live messages exist; page
+  them through `GET /api/v2/threads/{thread_id}/messages?order=desc&before_id=<oldest returned id>`.
+- `ChatService.get_thread_context` reads only the newest `max_messages`
+  live rows (`message_service.list_messages(order="desc", limit=...)`), and
+  takes `total_messages` from that query's count.
+
 ## Ratchets
 
 - **Ruff `F821`/`F823`** (undefined name / used-before-assignment) are
