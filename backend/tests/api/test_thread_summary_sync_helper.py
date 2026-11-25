@@ -287,3 +287,159 @@ def test_bulk_summarize_queue_failure_does_not_leak_exception_text():
     _tid, ok, err, _t = results[0]
     assert ok is False
     assert "secret" not in err and "redis" not in err
+
+
+# --- Bulk summarize reports "queued", not "summarized" (B8-S7) ---------------
+#
+# The route answers before any summary is written, so an enqueued thread is
+# ``queued: true, success: false``, ``succeeded`` stays 0, and the broadcast is
+# ``summarize_queued`` for the enqueued ids only. Resolve/archive keep their
+# shape (``queued`` is 0). Guard: threads.py ``_build_bulk_response``
+# ``queued_only`` branch. Focused command:
+#   pytest -q backend/tests/api/test_thread_summary_sync_helper.py -k bulk
+
+
+def _bulk_route(handler_name, service, thread_ids):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from src.api.threads import threads as threads_mod
+    from src.schemas.chat import BulkThreadRequest
+
+    user = MagicMock()
+    user.id = uuid.uuid4()
+    user.organization_id = uuid.uuid4()
+    broadcast = AsyncMock()
+    with (
+        patch.object(threads_mod, "get_chat_service", return_value=service),
+        patch.object(
+            threads_mod.thread_event_service,
+            "broadcast_threads_bulk_updated",
+            broadcast,
+        ),
+    ):
+        response = asyncio.run(
+            getattr(threads_mod, handler_name)(
+                BulkThreadRequest(thread_ids=thread_ids),
+                current_user=user,
+                db=MagicMock(),
+                _rate_limit=True,
+            )
+        )
+    return response, broadcast
+
+
+def _summarize_route(threads_by_id, missing_ids=(), *, fail_ids=()):
+    from unittest.mock import AsyncMock
+
+    from src.services.threads.chat_service import ChatService
+
+    service = ChatService(MagicMock(name="AsyncSession"))
+    service.get_thread = AsyncMock(side_effect=lambda tid, uid: threads_by_id.get(tid))
+    task = MagicMock()
+
+    def delay(thread_id, force):
+        if uuid.UUID(thread_id) in fail_ids:
+            raise RuntimeError("broker down")
+
+    task.delay.side_effect = delay
+    with patch("src.tasks.summarize_thread_task.summarize_thread_task", task):
+        return _bulk_route(
+            "bulk_summarize_threads", service, [*threads_by_id, *missing_ids]
+        )
+
+
+def _editable(can_edit=True):
+    thread = _thread_stub(summary=None)
+    thread.conversation.workspace.can_user_edit.return_value = can_edit
+    return thread
+
+
+@pytest.mark.unit
+def test_bulk_summarize_route_reports_queued_not_succeeded():
+    queued_a, queued_b = _editable(), _editable()
+    refused = _editable(can_edit=False)
+    broken = _editable()
+    missing = uuid.uuid4()
+
+    response, broadcast = _summarize_route(
+        {t.id: t for t in (queued_a, queued_b, refused, broken)},
+        missing_ids=[missing],
+        fail_ids={broken.id},
+    )
+
+    assert response.total == 5
+    assert response.succeeded == 0
+    assert response.queued == 2
+    assert response.failed == 3
+    by_id = {r.thread_id: (r.queued, r.success, r.error) for r in response.results}
+    assert by_id[queued_a.id] == (True, False, None)
+    assert by_id[queued_b.id] == (True, False, None)
+    assert by_id[refused.id] == (False, False, "Insufficient permissions")
+    assert by_id[broken.id] == (False, False, "Failed to queue summarization")
+    assert by_id[missing] == (
+        False,
+        False,
+        "Thread not found or insufficient permissions",
+    )
+
+    broadcast.assert_awaited_once()
+    kwargs = broadcast.await_args.kwargs
+    assert kwargs["action"] == "summarize_queued"
+    assert sorted(kwargs["thread_ids"]) == sorted([str(queued_a.id), str(queued_b.id)])
+
+
+@pytest.mark.unit
+def test_bulk_summarize_route_does_not_broadcast_when_nothing_queued():
+    refused = _editable(can_edit=False)
+
+    response, broadcast = _summarize_route({refused.id: refused})
+
+    assert (response.succeeded, response.queued, response.failed) == (0, 0, 1)
+    broadcast.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("handler_name", "action"),
+    [("bulk_resolve_threads", "resolved"), ("bulk_archive_threads", "archived")],
+)
+def test_bulk_resolve_and_archive_keep_succeeded_and_queued_zero(handler_name, action):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.models.thread import ThreadStatus
+
+    now = datetime.now(timezone.utc)
+    done = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        title="t",
+        status=ThreadStatus.RESOLVED,
+        last_message_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    refused_id = uuid.uuid4()
+    service = MagicMock()
+    service.bulk_update_threads = AsyncMock(
+        return_value=[
+            (done.id, True, None, done),
+            (refused_id, False, "Thread not found or insufficient permissions", None),
+        ]
+    )
+
+    response, broadcast = _bulk_route(handler_name, service, [done.id, refused_id])
+
+    assert (response.total, response.succeeded, response.queued, response.failed) == (
+        2,
+        1,
+        0,
+        1,
+    )
+    assert [r.queued for r in response.results] == [False, False]
+    assert [r.success for r in response.results] == [True, False]
+    broadcast.assert_awaited_once()
+    assert broadcast.await_args.kwargs["action"] == action
+    assert broadcast.await_args.kwargs["thread_ids"] == [str(done.id)]
