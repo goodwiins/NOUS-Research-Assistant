@@ -431,15 +431,29 @@ async def get_thread(
 ):
     """
     Get thread details by ID, optionally including messages.
+
+    Included messages are the newest ``THREAD_DETAIL_MAX_MESSAGES`` (500) live
+    ones, oldest first. ``has_more_messages`` is ``True`` when older ones
+    exist; page them through ``GET /threads/{id}/messages`` with
+    ``order=desc&before_id=<oldest returned id>``. On a branched thread
+    (``message_branching``) also pass the returned ``selected_message_id``;
+    without it, or with a stale one, ``/messages`` answers 409.
     """
     service = get_chat_service(db)
+    has_more_messages = False
     try:
-        thread = await service.get_thread(
-            thread_id,
-            current_user.id,
-            include_messages=include_messages,
-            authorize_bound_document=True,
-        )
+        if include_messages:
+            detail = await service.get_thread_with_recent_messages(
+                thread_id, current_user.id
+            )
+            thread, has_more_messages = detail if detail else (None, False)
+        else:
+            thread = await service.get_thread(
+                thread_id,
+                current_user.id,
+                include_messages=False,
+                authorize_bound_document=True,
+            )
     except BranchAccessError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
 
@@ -456,9 +470,9 @@ async def get_thread(
             _format_message_response(m, trusted=trusted)
             for m in thread.messages
             # ``superseded_by_message_id`` is set: an edit-and-resend replaced
-            # this turn. The relationship load has no row filter, so both
-            # copies of this loop (see workspace_routes/presenters.py) filter
-            # in Python.
+            # this turn. The bounded page query already drops these rows; the
+            # workspace_routes copy of this loop (presenters.py) reads an
+            # unfiltered relationship load, so both keep the Python filter.
             if not m.is_deleted and m.superseded_by_message_id is None
         ]
 
@@ -479,6 +493,7 @@ async def get_thread(
         branch_document_id=thread.branch_document_id,
         selected_message_id=thread.selected_message_id,
         messages=messages,
+        has_more_messages=has_more_messages,
     )
 
 
@@ -725,12 +740,15 @@ async def get_thread_context(
     Returns messages in the format expected by LLM APIs, limited by count or tokens.
     """
     service = get_chat_service(db)
-    context = await service.get_thread_context(
-        thread_id=thread_id,
-        user_id=current_user.id,
-        max_messages=max_messages,
-        max_tokens=max_tokens,
-    )
+    try:
+        context = await service.get_thread_context(
+            thread_id=thread_id,
+            user_id=current_user.id,
+            max_messages=max_messages,
+            max_tokens=max_tokens,
+        )
+    except BranchAccessError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
 
     if context is None:
         # R5-M10: service distinguishes missing/no-access (None) from a real,

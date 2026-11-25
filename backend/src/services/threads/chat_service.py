@@ -370,6 +370,14 @@ class ChatService:
             authorize_bound_document=authorize_bound_document,
         )
 
+    async def get_thread_with_recent_messages(
+        self, thread_id: UUID, user_id: UUID
+    ) -> Optional[Tuple[Thread, bool]]:
+        """Thread with its newest live messages, and whether older ones exist."""
+        return await thread_service.get_thread_with_recent_messages(
+            self.db, thread_id, user_id
+        )
+
     async def list_threads(
         self,
         conversation_id: UUID,
@@ -1231,25 +1239,30 @@ class ChatService:
                     effective_max_tokens = int(limit * 0.75)
                     break
 
-        thread = await self.get_thread(thread_id, user_id, include_messages=True)
-        if not thread:
+        # Only the newest ``effective_max_messages`` live rows can reach the
+        # context, so fetch just those (bounded in SQL) instead of the whole
+        # thread. ``total`` counts every live row under the same deleted and
+        # superseded predicates the page uses.
+        result = await message_service.list_messages(
+            self.db,
+            thread_id,
+            user_id,
+            limit=effective_max_messages,
+            order="desc",
+        )
+        if result is None:
             # R5-M10: signal "not found / no access" distinctly so the route
             # can 404; the old fake empty-context dict made that branch dead.
             return None
 
         messages = []
         total_tokens = 0
-        all_message_count = len(
-            [
-                m
-                for m in thread.messages
-                if not m.is_deleted and m.superseded_by_message_id is None
-            ]
-        )
+        newest_first, all_message_count, _has_more = result
+        thread_messages = list(reversed(newest_first))
         truncated = False
 
         # Get messages in reverse order (newest first) for token limiting
-        for msg in reversed(thread.messages):
+        for msg in reversed(thread_messages):
             if msg.is_deleted:
                 continue
             # Edit-and-resend tombstone — skip exactly like a soft delete, else

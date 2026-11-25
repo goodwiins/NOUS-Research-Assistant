@@ -239,6 +239,9 @@ class ThreadDetailResponse(ThreadResponse):
     """Thread with messages"""
 
     messages: List["ChatMessageResponse"] = []
+    # True when live messages older than ``messages`` exist (the detail route
+    # returns only the newest 500); page them through ``/messages``.
+    has_more_messages: bool = False
 
 
 class ThreadListResponse(BaseModel):

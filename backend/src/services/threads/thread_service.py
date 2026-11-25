@@ -68,6 +68,11 @@ logger = structlog.get_logger(__name__)
 # characterization tests import it from that path.
 THREAD_PREVIEW_MAX_CHARS = 240
 
+# ``GET /threads/{id}`` returns at most this many of the newest live messages,
+# the same as the ``limit`` maximum of ``GET /threads/{id}/messages``, which
+# pages older ones (``order=desc&before_id=<oldest returned id>``).
+THREAD_DETAIL_MAX_MESSAGES = 500
+
 
 async def get_thread_detail(
     db: AsyncSession,
@@ -113,6 +118,40 @@ async def get_thread_detail(
             return None
         set_committed_value(view.thread, "messages", result[0])
     return view.thread
+
+
+async def get_thread_with_recent_messages(
+    db: AsyncSession,
+    thread_id: UUID,
+    user_id: UUID,
+) -> Tuple[Thread, bool] | None:
+    """The thread with its newest ``THREAD_DETAIL_MAX_MESSAGES`` live messages.
+
+    ``thread.messages`` holds them oldest first (the selected path on a
+    branched thread). The bool is ``True`` when older live messages exist.
+    Bounded in SQL, unlike ``get_thread_detail``'s full relationship load.
+    """
+    from src.services.threads import message_service
+    from src.services.threads.branch_reads import read_thread
+
+    # One access check (and, on a branched thread, one FOR SHARE lock) for
+    # both the thread row and the page.
+    view = await read_thread(db, thread_id=thread_id, actor_id=user_id)
+    if view is None:
+        return None
+    result = await message_service.list_messages(
+        db,
+        thread_id,
+        user_id,
+        limit=THREAD_DETAIL_MAX_MESSAGES,
+        order="desc",
+        view=view,
+    )
+    if result is None:
+        return None
+    newest_first, _total, has_more = result
+    set_committed_value(view.thread, "messages", list(reversed(newest_first)))
+    return view.thread, has_more
 
 
 def last_message_preview_expression() -> Any:

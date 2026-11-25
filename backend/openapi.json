@@ -30481,6 +30481,11 @@
             ],
             "title": "Created By Id"
           },
+          "has_more_messages": {
+            "default": false,
+            "title": "Has More Messages",
+            "type": "boolean"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
