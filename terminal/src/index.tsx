@@ -1,8 +1,7 @@
 import { render } from "ink";
 import { login } from "../../frontend/cli/auth/deviceFlow";
 import { loadConfig, saveConfig } from "../../frontend/cli/auth/store";
-import { loadTranscript, loadBranches, type TerminalMessage } from "./services";
-import { reconcileHistory } from "./session";
+import { openSavedThread } from "./session";
 import { App } from "./app";
 import { terminalText } from "./adapter";
 
@@ -30,21 +29,11 @@ async function main() {
     config.thread_id = null;
     saveConfig(config);
   }
-  const saved = config.thread_id
-    ? await loadBranches(config.thread_id)
-    : undefined;
-  let initialMessages: TerminalMessage[] = [];
-  let initialHistory = reconcileHistory(undefined, saved, config.thread_id);
-  let initialNotice = "";
-  try {
-    initialMessages = config.thread_id
-      ? await loadTranscript(config.thread_id)
-      : [];
-    initialHistory = reconcileHistory(initialMessages, saved, config.thread_id);
-  } catch {
-    initialNotice =
-      "Could not refresh thread history. Showing saved local history; check your connection or select another thread.";
-  }
+  const {
+    messages: initialMessages,
+    history: initialHistory,
+    notice: initialNotice,
+  } = await openSavedThread(config.thread_id);
   const instance = render(
     <App
       initialMessages={initialMessages}

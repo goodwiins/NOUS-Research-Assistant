@@ -974,7 +974,7 @@ async def _build_bulk_response(
         bulk_results.append(
             BulkThreadResult(
                 thread_id=thread_id,
-                success=success and not queued_only,
+                success=bool(success) and not queued_only,
                 queued=queued,
                 error=error,
                 thread=(
