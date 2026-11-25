@@ -419,7 +419,9 @@ async def get_thread(
     Included messages are the newest ``THREAD_DETAIL_MAX_MESSAGES`` (500) live
     ones, oldest first. ``has_more_messages`` is ``True`` when older ones
     exist; page them through ``GET /threads/{id}/messages`` with
-    ``order=desc&before_id=<oldest returned id>``.
+    ``order=desc&before_id=<oldest returned id>``. On a branched thread
+    (``message_branching``) also pass the returned ``selected_message_id``;
+    without it, or with a stale one, ``/messages`` answers 409.
     """
     service = get_chat_service(db)
     has_more_messages = False

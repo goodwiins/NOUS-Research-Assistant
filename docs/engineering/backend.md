@@ -100,6 +100,9 @@ Chat reads never load a whole thread's messages:
   messages (`THREAD_DETAIL_MAX_MESSAGES` in `thread_service.py`), oldest
   first. `has_more_messages` is `true` when older live messages exist; page
   them through `GET /api/v2/threads/{thread_id}/messages?order=desc&before_id=<oldest returned id>`.
+  On a branched thread (`message_branching: true`), also pass the
+  `selected_message_id` the detail response returned; without it, or with a
+  stale one, `/messages` answers 409.
 - `ChatService.get_thread_context` reads only the newest `max_messages`
   live rows (`message_service.list_messages(order="desc", limit=...)`), and
   takes `total_messages` from that query's count.

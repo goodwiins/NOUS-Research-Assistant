@@ -269,6 +269,10 @@ async def test_thread_context_matches_full_load_for_small_threads(
     assert cut is not None
     assert cut["metadata"]["truncated"] is True
     assert [m["content"] for m in cut["messages"]] == ["msg-4"]
+    capped = await service.get_thread_context(thread.id, user.id, max_messages=3)
+    assert capped is not None
+    assert capped["metadata"]["truncated"] is True
+    assert capped["metadata"]["message_count"] == 3
 
 
 async def test_thread_context_is_none_for_missing_or_foreign_thread(
