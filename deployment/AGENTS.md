@@ -8,19 +8,24 @@ consumer-specific, partly-retired surface, not as proof of what is deployed. Che
 workflow or manifest consumer before editing a similarly named chart, values
 file, manifest, or script.
 
-The current status evidence is in
-[`docs/engineering/gotchas.md`](../docs/engineering/gotchas.md):
+The current status evidence is the deployment-source entry in
+[`docs/engineering/gotchas.md`](../docs/engineering/gotchas.md). Only `dev` is
+live, on AWS EKS (`nous-dev-cluster`, `us-east-1`). The live Argo CD source is
+[`infrastructure/argocd/applications/aws-dev.yaml`](../infrastructure/argocd/applications/aws-dev.yaml):
+application `nous-dev-aws`, tracking `develop`, rendering
+`infrastructure/helm/knowledge-graph-analytics` with `values.yaml` plus
+`values-aws.yaml` into namespace `multimodal-rag-system`. The EKS root app
+([`aws-dev-root.yaml`](../infrastructure/argocd/applications/aws-dev-root.yaml))
+excludes `root.yaml` and `dev.yaml`, so `dev.yaml` (`nous-dev`,
+`values-dev.yaml`, namespace `rag-dev` on the retired DOKS cluster) is frozen
+rollback material, not a live source. The `staging` and `production` Argo CD
+apps were retired 2026-04-29 (PR #442); their values files remain as render
+fixtures. Qdrant is removed; any Qdrant reference left in this tree is dead.
 
-> Only `dev` is live (ArgoCD auto-sync from `develop`, namespace `rag-dev`). `staging` + `production` ArgoCD apps retired 2026-04-29 (PR #442); their values files remain and the gitops workflow still bumps staging tags nothing consumes.
->
-> Qdrant is removed — retrieval migrated to DO KB (`backend/src/services/do_kb/`, behind `DO_KB_ENABLED`, currently off; live retrieval is PostgreSQL fulltext). Legacy non-ArgoCD charts/manifests still carry dead Qdrant refs; not deployed.
-
-The current live Argo CD source is instead
-[`infrastructure/argocd/applications/dev.yaml`](../infrastructure/argocd/applications/dev.yaml),
-and the current CI ownership and retirement notes are in
-[`.github/workflows/README.md`](../.github/workflows/README.md). The older
-[`deployment/README.md`](README.md) describes legacy material where it
-conflicts with those sources.
+The current CI ownership and retirement notes are in
+[`.github/workflows/README.md`](../.github/workflows/README.md).
+[`deployment/README.md`](README.md) is current: it marks this directory as
+legacy and points to the live path.
 
 ## Invalid patterns
 
@@ -55,8 +60,9 @@ helm lint deployment/helm/rag-system/
 ```
 
 This checks only the legacy `deployment/helm/rag-system/` chart package. It
-does not validate the live Argo CD path, which is the base-plus-dev overlay of
-`infrastructure/helm/knowledge-graph-analytics`.
+does not validate the live Argo CD path, which is
+`infrastructure/helm/knowledge-graph-analytics` rendered with `values.yaml`
+plus `values-aws.yaml`.
 
 ## Verification
 

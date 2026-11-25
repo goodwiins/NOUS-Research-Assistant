@@ -35,8 +35,20 @@ Enforced by `backend/tests/unit/architecture/test_workspace_boundaries.py`:
    never calls `.rollback()` / `.flush()` / `.refresh()` (rollback stays
    with the request-scoped session). The shared modules (`dependencies.py`,
    `presenters.py`, `__init__.py`) call none of the four. The test scans
-   only `workspace_routes/`; other `src/api/` modules commit directly and no
-   test constrains them.
+   only `workspace_routes/`. `src/api/agent` has its own, opposite guard,
+   `backend/tests/unit/architecture/test_agent_api_boundaries.py`: its routers
+   call none of the four, open no `SessionLocal`/`AsyncSessionLocal`, and
+   reference no `Thread`/`Conversation`/`Workspace`/`WorkspaceMember` column
+   (scope goes through `workspace_access`); existing debt is in a dated,
+   shrink-only `ALLOWLIST`. Two narrower guards hold more routers to the
+   same no-transaction rule:
+   `backend/tests/unit/architecture/test_integration_boundaries.py` bans the
+   four calls plus `begin()` / `begin_nested()` in `src/api/integrations/*.py`,
+   `src/api/artifacts.py` and `src/api/harness.py`, and
+   `backend/tests/unit/architecture/test_document_file_boundaries.py` bans the
+   same six in the `src/api/documents/files.py` handlers listed in its
+   `SERVICE_OWNED_HANDLERS`. The other `src/api/` modules commit directly and
+   no test constrains them.
 2. No resource module imports a sibling resource module directly — cross-
    handler helpers go through `dependencies.py` or `presenters.py` only.
 3. `workspace_routes/__init__.py` and the `workspaces.py` shim resolve
