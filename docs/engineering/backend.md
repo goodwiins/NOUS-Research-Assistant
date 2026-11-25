@@ -47,8 +47,7 @@ Enforced by `backend/tests/unit/architecture/test_workspace_boundaries.py`:
    `src/api/artifacts.py` and `src/api/harness.py`, and
    `backend/tests/unit/architecture/test_document_file_boundaries.py` bans the
    same six in the `src/api/documents/files.py` handlers listed in its
-   `SERVICE_OWNED_HANDLERS`. The other `src/api/` modules commit directly and
-   no test constrains them.
+   `SERVICE_OWNED_HANDLERS`.
 2. No resource module imports a sibling resource module directly — cross-
    handler helpers go through `dependencies.py` or `presenters.py` only.
 3. `workspace_routes/__init__.py` and the `workspaces.py` shim resolve
