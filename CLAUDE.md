@@ -25,7 +25,7 @@ pnpm monorepo (Node 24, `pnpm@10.18.2`, one root `pnpm-lock.yaml`; no `npm` fall
 - `terminal/` and `./nous` — terminal client. `./nous` defaults to the shared dev backend unless `NOUS_API_URL` is set.
 - `packages/chat-runtime/` — shared chat runtime workspace package.
 - `evals/` — agent eval harness and recorded baselines. `tests/` — root cross-system suites, Playwright, k6 load tests. `backend/tests/` — backend tests.
-- `src/trigger/` — Trigger.dev jobs. The root `trigger.config.ts` (`dirs: ["./src/trigger"]`) loads this tree, and `trigger-deploy.yml` deploys it from the repo root on pushes to `main`. `frontend/trigger.config.ts` is an identical copy that loads only `frontend/src/trigger/example.ts` when run from `frontend/`; see `src/AGENTS.md`.
+- `src/trigger/` — Trigger.dev jobs. The root `trigger.config.ts` (`dirs: ["./src/trigger"]`) loads this tree. Tasks are deployed by hand from the repo root with `pnpm trigger:deploy`; no CI workflow deploys them. `frontend/trigger.config.ts` is an identical copy that loads only `frontend/src/trigger/example.ts` when run from `frontend/`; see `src/AGENTS.md`.
 - `deployment/`, `infrastructure/`, `.github/workflows/` — Helm/ArgoCD, Terraform, CI.
 
 ## Commands
