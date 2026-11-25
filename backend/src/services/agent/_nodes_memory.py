@@ -17,6 +17,15 @@ Performance: embed+PG writes and LLM insight extraction are dispatched as
 fire-and-forget background tasks via ``_persist_memory_async`` so
 ``memory_save_node`` returns immediately after the cheap inline ledger
 write. This keeps the job's critical path free of p95=8s memory I/O.
+
+In-flight persist tasks are capped at ``_MAX_IN_FLIGHT_PERSISTS`` per worker
+process. When the cap is full the write is dropped (never awaited, so the turn
+stays non-blocking), logged at WARNING and counted as ``cap_full``. On
+shutdown, ``drain_memory_persist_tasks`` waits up to
+``_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`` for pending writes, then cancels the rest;
+it is called from the FastAPI lifespan and the Celery
+``worker_process_shutdown`` hook. Every cancelled write is logged at WARNING
+and counted as ``cancelled``.
 """
 
 from __future__ import annotations
@@ -44,6 +53,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
+# Upper bound on in-flight persist tasks; a write that arrives when the set is
+# full is dropped (logged + counted) rather than awaited.
+_MAX_IN_FLIGHT_PERSISTS = 64
+
+# Default shutdown drain budget. Stays well inside the pod's 30 s
+# terminationGracePeriodSeconds next to the other shutdown steps.
+_SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 10.0
+
 _EXPLICIT_MEMORY_RE = re.compile(
     r"^\s*(?:please\s+)?(?:remember|save)\s+(?:this\s+)?(?:that\s+)?",
     re.IGNORECASE,
@@ -54,20 +71,60 @@ def _is_explicit_memory_request(text: str) -> bool:
     return bool(_EXPLICIT_MEMORY_RE.search(text))
 
 
-def _on_persist_done(task: asyncio.Task[Any]) -> None:  # noqa: ANN001
-    """Drop a finished persist task and surface any exception as a warning.
+def _record_persist_dropped(reason: str) -> None:
+    """Count a lost memory write; a metrics failure never propagates."""
+    try:
+        from src.services.agent import observability as _obs
 
-    Cancellation on loop shutdown is expected and stays quiet. All other
-    exceptions are logged at WARNING — memory is best-effort and must
-    never crash the worker.
+        _obs.record_memory_persist_dropped(reason)
+    except Exception:
+        pass
+
+
+def _on_persist_done(task: asyncio.Task[Any]) -> None:  # noqa: ANN001
+    """Drop a finished persist task and surface any failure as a warning.
+
+    A cancelled task (shutdown drain timeout, loop teardown) means the write
+    was lost, so it is logged at WARNING and counted. All other exceptions
+    are logged at WARNING — memory is best-effort and must never crash the
+    worker.
     """
     _BACKGROUND_TASKS.discard(task)
     try:
         task.result()
     except asyncio.CancelledError:
-        pass
+        logger.warning("Background memory persist cancelled: %s", task.get_name())
+        _record_persist_dropped("cancelled")
     except Exception:
         logger.warning("Background memory persist task failed", exc_info=True)
+
+
+async def drain_memory_persist_tasks(
+    timeout: float = _SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+) -> None:
+    """Wait up to ``timeout`` for in-flight memory writes, then cancel the rest.
+
+    Only tasks in flight when the drain starts are handled. Cancelled tasks
+    are logged and counted by ``_on_persist_done``. Never raises.
+    """
+    pending_tasks = list(_BACKGROUND_TASKS)
+    if not pending_tasks:
+        return
+    try:
+        _done, pending = await asyncio.wait(pending_tasks, timeout=timeout)
+        if not pending:
+            return
+        logger.warning(
+            "%d memory persist task(s) still pending after %.1fs shutdown drain; "
+            "cancelling",
+            len(pending),
+            timeout,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    except Exception:
+        logger.warning("Memory persist drain failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +392,19 @@ async def memory_save_node(state: AgentState, config: RunnableConfig) -> dict:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
+        # Bound the in-flight set. Waiting for a slot would block the turn,
+        # so a write that arrives at the cap is dropped instead.
+        if len(_BACKGROUND_TASKS) >= _MAX_IN_FLIGHT_PERSISTS:
+            logger.warning(
+                "Memory persist dropped: %d in-flight writes at cap "
+                "(thread_id=%s, mem_key=%s)",
+                _MAX_IN_FLIGHT_PERSISTS,
+                thread_id,
+                mem_key,
+            )
+            _record_persist_dropped("cap_full")
+            return {}
+
         # Dispatch embed+save and optional insight extraction off the
         # critical path. The node returns {} immediately; the graph reaches
         # END and the job is marked "completed" without blocking on I/O.
@@ -350,7 +420,8 @@ async def memory_save_node(state: AgentState, config: RunnableConfig) -> dict:
                 tool_executions=list(tool_executions),
                 messages=list(state["messages"]),
                 config=config,
-            )
+            ),
+            name=f"memory-persist thread_id={thread_id} mem_key={mem_key}",
         )
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_on_persist_done)
@@ -370,4 +441,4 @@ async def memory_save_node(state: AgentState, config: RunnableConfig) -> dict:
         return {}
 
 
-__all__ = ["memory_retrieval_node", "memory_save_node"]
+__all__ = ["drain_memory_persist_tasks", "memory_retrieval_node", "memory_save_node"]

@@ -324,6 +324,55 @@ def test_agent_tasks_route_through_shared_run_async_one_loop():
     assert first == second
 
 
+def _shutdown_settings():
+    return SimpleNamespace(AGENT_INTENT_PROVIDER="typesafe")
+
+
+def test_worker_shutdown_drains_memory_writes_then_closes_typesafe():
+    """The worker_process_shutdown handler drains memory writes through
+    run_async (budget + margin), then closes the TypeSafe client."""
+    from src.services.agent._nodes_memory import _SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+
+    calls: list[tuple[str, float]] = []
+
+    def fake_run_async(coro, timeout):
+        calls.append((coro.cr_code.co_name, timeout))
+        coro.close()
+
+    with (
+        patch.object(tasks_mod, "run_async", side_effect=fake_run_async),
+        patch.object(tasks_mod, "get_settings", return_value=_shutdown_settings()),
+    ):
+        tasks_mod._close_typesafe_router()
+
+    assert calls == [
+        ("drain_memory_persist_tasks", _SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 2),
+        ("close_typesafe_client", 5),
+    ]
+    assert _SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 2 < 30
+
+
+def test_worker_shutdown_drain_failure_still_closes_typesafe(caplog):
+    """A drain that raises is logged and never stops the TypeSafe close."""
+    names: list[str] = []
+
+    def fake_run_async(coro, timeout):
+        names.append(coro.cr_code.co_name)
+        coro.close()
+        if coro.cr_code.co_name == "drain_memory_persist_tasks":
+            raise TimeoutError("drain stuck")
+
+    with (
+        patch.object(tasks_mod, "run_async", side_effect=fake_run_async),
+        patch.object(tasks_mod, "get_settings", return_value=_shutdown_settings()),
+        caplog.at_level("WARNING", logger=tasks_mod.logger.name),
+    ):
+        tasks_mod._close_typesafe_router()
+
+    assert names == ["drain_memory_persist_tasks", "close_typesafe_client"]
+    assert any("Memory persist drain failed" in r.getMessage() for r in caplog.records)
+
+
 def test_run_agent_job_routed_to_dedicated_queue():
     from src.tasks.celery_app import celery_app
 
