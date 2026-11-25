@@ -975,10 +975,11 @@ export function AuiAssistantMessage({
  * thread switch. {@link AuiMessageByIndex} now addresses rows by identity
  * (Unstable_MessageById renders null instead of resolving a missing
  * message), so this boundary no longer carries the crash — it remains as
- * defense in depth for any render-phase transient throw the installed
- * @assistant-ui version still emits (including the index-addressed wording
- * below). Anything else is a real bug — rethrow it to the app's error
- * boundary rather than silently swallow.
+ * defense in depth for the render-phase transient lookup throw that
+ * @assistant-ui/react@0.15.37 still emits (see
+ * {@link TRANSIENT_INDEX_ERROR_PATTERN} for the exact wording and source).
+ * Anything else is a real bug — rethrow it to the app's error boundary rather
+ * than silently swallow.
  */
 function MessageByIndexRetry({
   resetKey,
@@ -1010,6 +1011,20 @@ function MessageByIndexRetry({
   return null;
 }
 
+/**
+ * The SDK's transient client-lookup error, version-coupled to the upstream
+ * wording. Verified against @assistant-ui/react@0.15.37, whose nested
+ * @assistant-ui/store@0.3.24 throws from `useClientLookup`
+ * (dist/useClientLookup.js):
+ *   `useClientLookup: index ${i} out of bounds (length: ${n}) (ignore if recovered)`
+ *   `useClientLookup: key "${key}" not found (ignore if recovered)`
+ * Guarded by `MessageByIndexBoundary SDK contract` in
+ * __tests__/MessageByIndexBoundary.sdkContract.test.tsx, which drives the real
+ * runtime into the index throw. On an @assistant-ui bump, run that test; if it
+ * fails, match the new wording here and update the versions above.
+ */
+export const TRANSIENT_INDEX_ERROR_PATTERN = /out of bounds|useClientLookup/i;
+
 export class MessageByIndexBoundary extends React.Component<
   { resetKey: string; children: ReactNode },
   { error: Error | null; lastResetKey: string }
@@ -1022,7 +1037,7 @@ export class MessageByIndexBoundary extends React.Component<
   }
 
   private static isTransientIndexError(error: Error): boolean {
-    return /out of bounds|useClientLookup/i.test(error.message);
+    return TRANSIENT_INDEX_ERROR_PATTERN.test(error.message);
   }
 
   static getDerivedStateFromError(error: Error): { error: Error } {
@@ -1059,8 +1074,10 @@ export class MessageByIndexBoundary extends React.Component<
   render(): ReactNode {
     const { error } = this.state;
     if (error) {
-      // Retry only the SDK's transient client index lookup error. Other
-      // errors go to the surrounding error boundary.
+      // Retry only the SDK's transient client index lookup error (wording
+      // pinned to @assistant-ui/react@0.15.37 / @assistant-ui/store@0.3.24,
+      // see TRANSIENT_INDEX_ERROR_PATTERN). Other errors go to the
+      // surrounding error boundary.
       if (MessageByIndexBoundary.isTransientIndexError(error)) {
         return this.retriedResetKey === this.props.resetKey ? null : (
           <MessageByIndexRetry
