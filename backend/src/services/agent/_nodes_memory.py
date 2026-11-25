@@ -22,10 +22,11 @@ In-flight persist tasks are capped at ``_MAX_IN_FLIGHT_PERSISTS`` per worker
 process. When the cap is full the write is dropped (never awaited, so the turn
 stays non-blocking), logged at WARNING and counted as ``cap_full``. On
 shutdown, ``drain_memory_persist_tasks`` waits up to
-``_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`` for pending writes, then cancels the rest;
-it is called from the FastAPI lifespan and the Celery
+``_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`` for pending writes, then cancels the rest
+and gives them ``_SHUTDOWN_CANCEL_GRACE_SECONDS`` to unwind before abandoning
+them; it is called from the FastAPI lifespan and the Celery
 ``worker_process_shutdown`` hook. Every cancelled write is logged at WARNING
-and counted as ``cancelled``.
+and counted once as ``cancelled``.
 """
 
 from __future__ import annotations
@@ -60,6 +61,11 @@ _MAX_IN_FLIGHT_PERSISTS = 64
 # Default shutdown drain budget. Stays well inside the pod's 30 s
 # terminationGracePeriodSeconds next to the other shutdown steps.
 _SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 10.0
+
+# Extra time cancelled writes get to unwind. A write that delays or swallows
+# its cancellation past this is abandoned, so the whole drain is bounded by
+# the drain timeout plus this grace.
+_SHUTDOWN_CANCEL_GRACE_SECONDS = 1.0
 
 _EXPLICIT_MEMORY_RE = re.compile(
     r"^\s*(?:please\s+)?(?:remember|save)\s+(?:this\s+)?(?:that\s+)?",
@@ -99,13 +105,23 @@ def _on_persist_done(task: asyncio.Task[Any]) -> None:  # noqa: ANN001
         logger.warning("Background memory persist task failed", exc_info=True)
 
 
+def _discard_abandoned(task: asyncio.Task[Any]) -> None:
+    """Done callback for a write the drain already logged and counted."""
+    _BACKGROUND_TASKS.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
 async def drain_memory_persist_tasks(
     timeout: float = _SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
 ) -> None:
     """Wait up to ``timeout`` for in-flight memory writes, then cancel the rest.
 
     Only tasks in flight when the drain starts are handled. Cancelled tasks
-    are logged and counted by ``_on_persist_done``. Never raises.
+    are logged and counted by ``_on_persist_done``. A task still running
+    ``_SHUTDOWN_CANCEL_GRACE_SECONDS`` after its cancel is abandoned: logged
+    and counted here once, and its own callback no longer counts it. Returns
+    within ``timeout + _SHUTDOWN_CANCEL_GRACE_SECONDS``. Never raises.
     """
     pending_tasks = list(_BACKGROUND_TASKS)
     if not pending_tasks:
@@ -122,7 +138,19 @@ async def drain_memory_persist_tasks(
         )
         for task in pending:
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        _done, stuck = await asyncio.wait(
+            pending, timeout=_SHUTDOWN_CANCEL_GRACE_SECONDS
+        )
+        for task in stuck:
+            task.remove_done_callback(_on_persist_done)
+            task.add_done_callback(_discard_abandoned)
+            logger.warning(
+                "Memory persist did not finish cancelling within %.1fs; "
+                "abandoned: %s",
+                _SHUTDOWN_CANCEL_GRACE_SECONDS,
+                task.get_name(),
+            )
+            _record_persist_dropped("cancelled")
     except Exception:
         logger.warning("Memory persist drain failed", exc_info=True)
 

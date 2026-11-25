@@ -71,16 +71,20 @@ def _close_typesafe_router(**kwargs: Any) -> None:
     """Drain memory writes, then close the pooled client, on the worker loop."""
     from src.services.agent.typesafe_classifier import close_typesafe_client
 
-    # Margin over the drain budget so the drain's own timeout fires first.
+    # Margin over the drain budget (wait + cancel grace) so the drain's own
+    # bounds fire first.
     try:
         from src.services.agent._nodes_memory import (
+            _SHUTDOWN_CANCEL_GRACE_SECONDS,
             _SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
             drain_memory_persist_tasks,
         )
 
         run_async(
             drain_memory_persist_tasks(),
-            timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 2,
+            timeout=_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+            + _SHUTDOWN_CANCEL_GRACE_SECONDS
+            + 1,
         )
     except Exception as exc:
         logger.warning("Memory persist drain failed (%s)", type(exc).__name__)

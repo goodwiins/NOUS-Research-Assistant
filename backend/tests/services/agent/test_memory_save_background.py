@@ -335,3 +335,64 @@ async def test_cancelled_persist_is_logged_and_counted(
     assert len(cancel_logs) == 1
     assert task.get_name() in cancel_logs[0].getMessage()
     dropped.assert_called_once_with("cancelled")
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — a write that resists cancellation cannot stretch the drain budget
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_drain_bounds_slow_cancellation_cleanup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A persist that delays its cancel unwind is abandoned after the grace,
+    logged, and counted exactly once."""
+    store = MagicMock()
+
+    async def stubborn_save(*args, **kwargs) -> None:  # type: ignore[misc]
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            # Slow cleanup far past the drain budget, then finish cancelled.
+            await asyncio.sleep(3)
+            raise
+
+    dropped = MagicMock()
+    caplog.set_level(logging.WARNING, logger=_NODES_LOGGER)
+    with (
+        patch("src.services.agent._nodes_memory._SHUTDOWN_CANCEL_GRACE_SECONDS", 0.1),
+        patch(
+            "src.services.agent.memory.get_memory_store",
+            new=AsyncMock(return_value=store),
+        ),
+        patch("src.services.agent.memory.save_memory", new=stubborn_save),
+        patch("src.services.agent.iteration_ledger.write_iteration"),
+        patch(_DROPPED_HELPER, new=dropped),
+    ):
+        await memory_save_node(_tool_bearing_state(), _config("thread-stubborn"))
+        (task,) = list(_BACKGROUND_TASKS)
+
+        start = time.monotonic()
+        await drain_memory_persist_tasks(timeout=0.1)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2.0, f"drain took {elapsed:.2f}s (expected < 2s)"
+        assert not task.done()
+        messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "did not finish cancelling" in m and "thread-stubborn" in m
+            for m in messages
+        )
+        dropped.assert_called_once_with("cancelled")
+
+        # The abandoned task finishes cancelled later: no second count.
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    assert task.cancelled()
+    assert not _BACKGROUND_TASKS
+    dropped.assert_called_once_with("cancelled")

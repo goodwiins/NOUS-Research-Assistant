@@ -331,7 +331,12 @@ def _shutdown_settings():
 def test_worker_shutdown_drains_memory_writes_then_closes_typesafe():
     """The worker_process_shutdown handler drains memory writes through
     run_async (budget + margin), then closes the TypeSafe client."""
-    from src.services.agent._nodes_memory import _SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+    from src.services.agent._nodes_memory import (
+        _SHUTDOWN_CANCEL_GRACE_SECONDS,
+        _SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+    )
+
+    drain_budget = _SHUTDOWN_DRAIN_TIMEOUT_SECONDS + _SHUTDOWN_CANCEL_GRACE_SECONDS
 
     calls: list[tuple[str, float]] = []
 
@@ -346,10 +351,11 @@ def test_worker_shutdown_drains_memory_writes_then_closes_typesafe():
         tasks_mod._close_typesafe_router()
 
     assert calls == [
-        ("drain_memory_persist_tasks", _SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 2),
+        ("drain_memory_persist_tasks", drain_budget + 1),
         ("close_typesafe_client", 5),
     ]
-    assert _SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 2 < 30
+    # The future timeout outlasts the whole drain, and both fit the 30 s grace.
+    assert drain_budget < drain_budget + 1 < 30
 
 
 def test_worker_shutdown_drain_failure_still_closes_typesafe(caplog):
