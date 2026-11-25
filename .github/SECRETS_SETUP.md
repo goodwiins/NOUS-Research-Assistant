@@ -22,7 +22,7 @@ is.
 | `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET` | `trigger-deploy.yml` | Universal Auth machine identity used to read Trigger.dev secrets from Infisical (project `nous-platform`, env `dev`, path `/trigger`) before `trigger.dev deploy`. |
 | `OPENCODE_API_KEY` | `opencode.yml` | Key for the `/oc` and `/opencode` comment bot, restricted to owner, member and collaborator comments. |
 | `CODECOV_TOKEN` | `test-pipeline.yml` | Coverage upload. |
-| `LANGSMITH_API_KEY`, `AZURE_OPENAI_*`, `EVAL_DATABASE_URL`, `EVAL_NEO4J_*`, `EVAL_REDIS_URL`, `EVAL_DO_API_TOKEN`, `EVAL_DO_KB_*` | `agent-eval.yml` | Weekly agent regression eval. It runs on a `[self-hosted, linux]` runner; see [../infrastructure/runner/README.md](../infrastructure/runner/README.md) for the unverified runner status. |
+| `LANGSMITH_API_KEY`, `AZURE_OPENAI_*`, `EVAL_DATABASE_URL`, `EVAL_NEO4J_*`, `EVAL_REDIS_URL` | `agent-eval.yml` | Weekly agent regression eval. It runs on a `[self-hosted, linux]` runner; see [../infrastructure/runner/README.md](../infrastructure/runner/README.md) for the unverified runner status. |
 
 ## AWS access (no static keys)
 
