@@ -13,17 +13,17 @@ logger = logging.getLogger(__name__)
 
 
 async def _tick() -> int:
-    from src.api.research_engine.runs import _build_connectors
     from src.core.config import settings
     from src.core.database import AsyncSessionLocal
     from src.services.research_engine import search_update_service as service
+    from src.services.research_engine.run_connectors import build_run_connectors
 
     if not settings.SEARCH_UPDATES_ENABLED:
         return 0
 
     def connectors(organization_id: UUID | None) -> dict[str, Any]:
         org = None if organization_id is None else str(organization_id)
-        return _build_connectors(org)
+        return build_run_connectors(org)
 
     done = 0
     async with AsyncSessionLocal() as db:

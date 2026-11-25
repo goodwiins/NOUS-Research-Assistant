@@ -98,6 +98,15 @@ deliberate change, not a side effect of an unrelated refactor.
   blocking, repo-wide: `ruff check backend/src`. These are latent
   `NameError`s, not style — the rest of the default rule set is either
   ignored (see `pyproject.toml`'s `[tool.ruff.lint]`) or advisory.
+- **Import direction** (blocking): no module under `backend/src/services/`
+  or `backend/src/tasks/` may import `src.api` — top-level or deferred,
+  absolute or relative. Enforced by
+  `backend/tests/unit/test_import_direction.py`, whose services allowlist is
+  empty and may only stay that way. When a service or task needs code that
+  lives in a router or API schema module, move it into the service layer
+  (e.g. `src/services/evidence/schemas.py`,
+  `src/services/research_engine/run_connectors.py`) and keep a re-export at
+  the old API path while callers still use it.
 - **Changed-file gate** (CI `lint-backend`, blocking): every changed
   `.py` file (`scripts/ci/changed_source_files.py --kind python`) must pass
   `ruff check`, `black --check`, `isort --check-only`. *Added* files only

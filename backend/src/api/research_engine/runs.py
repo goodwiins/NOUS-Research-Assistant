@@ -1,7 +1,6 @@
 """Research Engine run endpoints."""
 
 import asyncio
-import functools
 import json
 import logging
 import os
@@ -39,10 +38,7 @@ from src.services.research_engine.connectors import (
     RagStoreConnector,
     SemanticScholarConnector,
 )
-from src.services.research_engine.connectors.registry import (
-    build_connectors,
-    safe_capability_projection,
-)
+from src.services.research_engine.connectors.registry import safe_capability_projection
 from src.services.research_engine.contracts import (
     canonical_stage_output_hash,
     rehydrate_stage_outputs,
@@ -74,6 +70,12 @@ from src.services.research_engine.review_service import ResearchReviewService
 from src.services.research_engine.run_conformance import create_approved_run
 from src.services.research_engine.run_conformance import (
     require_run_conformance as _require_run_conformance,
+)
+from src.services.research_engine.run_connectors import (
+    build_run_connectors as _build_connectors,
+)
+from src.services.research_engine.run_connectors import (  # noqa: F401
+    search_rag_store as _search_rag_store,
 )
 from src.services.research_engine.run_lifecycle import (
     ResearchRunLifecycleError,
@@ -264,61 +266,6 @@ def _build_providers(steps: List[Dict[str, Any]]) -> Dict[str, Any]:
         if provider is not None:
             providers[str(model_id)] = provider
     return providers
-
-
-async def _search_rag_store(
-    query: str, max_results: int = 50, *, organization_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """Search the existing hybrid RAG index for local-store style connector output.
-
-    MUST be scoped to the run owner's ``organization_id`` — without it
-    ``hybrid_search_service.search`` runs org-unfiltered and a research run
-    would surface (and copy ``full_text`` from) every tenant's documents.
-    """
-    if not organization_id:
-        return {"results": []}
-
-    from src.models.search_schemas import SearchQuery
-    from src.services.search.hybrid_search_service import hybrid_search_service
-
-    loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(
-        None,
-        lambda: hybrid_search_service.search(
-            SearchQuery(query=query, limit=max_results, search_type="hybrid"),
-            organization_id=organization_id,
-        ),
-    )
-
-    results = []
-    for item in response.results:
-        metadata = getattr(item, "metadata", {}) or {}
-        content = (
-            metadata.get("full_text")
-            or metadata.get("text")
-            or getattr(item, "content_preview", None)
-            or getattr(item, "content_snippet", None)
-            or ""
-        )
-        results.append(
-            {
-                "id": str(getattr(item, "document_id", "")),
-                "title": getattr(item, "title", ""),
-                "content": content,
-                "metadata": metadata,
-            }
-        )
-    return {"results": results}
-
-
-def _build_connectors(organization_id: Optional[str] = None) -> Dict[str, Any]:
-    """Create connector instances for workflow execution.
-
-    ``organization_id`` (the run owner's) is bound into the rag_store search so
-    the local-index connector only ever returns this tenant's documents.
-    """
-    rag_search = functools.partial(_search_rag_store, organization_id=organization_id)
-    return build_connectors(rag_search)
 
 
 def _get_effective_parameters(
