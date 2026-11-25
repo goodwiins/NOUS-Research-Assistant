@@ -42,7 +42,8 @@ exit 0
 
 # kubectl stub:
 # - `get pods -l app=redis` prints $STUB_REDIS_POD;
-# - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT;
+# - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT, or
+#   $STUB_COUNT_AFTER_LOAD (when set) once the load has run;
 # - any other psql call stores its stdin in $STUB_PSQL_STDIN;
 # - `cp` copies its source to $STUB_CP_OUT.
 # - `get externalsecret aws-database-credentials` succeeds only when $STUB_RDS=1;
@@ -55,7 +56,13 @@ case "$*" in
     *"get externalsecret aws-database-credentials"*) [ "${STUB_RDS:-0}" = 1 ]; exit $? ;;
     *"get deployment postgres"*) [ "${STUB_NO_PG_DEPLOY:-0}" != 1 ]; exit $? ;;
     *"get pods"*"app=redis"*) printf '%s' "${STUB_REDIS_POD:-}"; exit 0 ;;
-    *psql*-tAc*) fails probe && exit 1; echo "${STUB_TABLE_COUNT:-0}"; exit 0 ;;
+    *psql*-tAc*) fails probe && exit 1
+        if [ -f "$STUB_PSQL_STDIN" ] && [ -n "${STUB_COUNT_AFTER_LOAD:-}" ]; then
+            echo "$STUB_COUNT_AFTER_LOAD"
+        else
+            echo "${STUB_TABLE_COUNT:-0}"
+        fi
+        exit 0 ;;
     *psql*) cat > "$STUB_PSQL_STDIN"; fails load && exit 1; exit 0 ;;
     cp\\ *) fails cp && exit 1; cp "$2" "$STUB_CP_OUT"; exit 0 ;;
 esac
@@ -193,11 +200,16 @@ def test_restore_pipes_the_dump_into_psql_with_on_error_stop(tmp_path: Path) -> 
     assert "ON_ERROR_STOP=1" in load[0] and "--single-transaction" in load[0]
 
 
-def test_emptiness_probe_counts_only_base_tables(tmp_path: Path) -> None:
+def test_emptiness_probe_counts_tables_and_other_user_objects(tmp_path: Path) -> None:
     _result, calls, _output = _restore(tmp_path, "postgres")
     probe = next(line for line in calls.splitlines() if "-tAc" in line)
-    # Views and extension-owned tables must not make a fresh DB look populated.
+    # Views and extension-owned objects must not make a fresh DB look populated.
     assert "relkind IN ('r', 'p')" in probe and "deptype = 'e'" in probe
+    # Sequences, composite/enum/domain types, functions and schemas collide
+    # with the dump's CREATE statements too, so they count.
+    assert "relkind IN ('S', 'c')" in probe
+    assert "typtype IN ('e', 'd', 'r', 'm')" in probe
+    assert "pg_catalog.pg_proc" in probe and "nspname <> 'public'" in probe
 
 
 def test_failed_psql_load_fails_the_restore(tmp_path: Path) -> None:
@@ -205,6 +217,24 @@ def test_failed_psql_load_fails_the_restore(tmp_path: Path) -> None:
     assert result.returncode != 0, output
     assert "PostgreSQL restore failed" in output
     assert "Restored 1 component" not in output
+
+
+def test_failed_load_that_left_objects_says_partially_loaded(tmp_path: Path) -> None:
+    result, _calls, output = _restore(
+        tmp_path, "postgres", STUB_FAIL="load", STUB_COUNT_AFTER_LOAD="7"
+    )
+    assert result.returncode != 0, output
+    assert "may be partially loaded" in output
+    assert "rolled back" not in output
+
+
+def test_failed_load_that_left_ragdb_empty_says_nothing_committed(
+    tmp_path: Path,
+) -> None:
+    result, _calls, output = _restore(tmp_path, "postgres", STUB_FAIL="load")
+    assert result.returncode != 0, output
+    assert "ragdb is still empty, nothing was committed" in output
+    assert "partially loaded" not in output
 
 
 def test_failed_emptiness_probe_restores_nothing(tmp_path: Path) -> None:
