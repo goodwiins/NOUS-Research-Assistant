@@ -323,7 +323,9 @@ class ThreadEventService:
 
         Args:
             thread_ids: List of affected thread IDs
-            action: The action performed ("resolved", "archived", "deleted")
+            action: The action performed ("resolved", "archived", "deleted"),
+                or "summarize_queued" when bulk summarization was only
+                enqueued for ``thread_ids`` (no summary is written yet)
             user_id: User who performed the operation
             organization_id: Owning organization (tenant scope — required)
         """

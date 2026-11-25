@@ -263,20 +263,30 @@ class BulkThreadRequest(BaseModel):
 
 
 class BulkThreadResult(BaseModel):
-    """Result for a single thread in bulk operation"""
+    """Result for a single thread in bulk operation.
+
+    ``queued`` is true when the work was only enqueued (bulk summarize); such
+    a result has ``success`` false because nothing completed in the request.
+    """
 
     thread_id: UUID
     success: bool
+    queued: bool = False
     error: Optional[str] = None
     thread: Optional[ThreadResponse] = None
 
 
 class BulkThreadResponse(BaseModel):
-    """Bulk thread operation response"""
+    """Bulk thread operation response.
+
+    ``failed`` is ``total - succeeded - queued``. ``queued`` counts threads
+    whose work was only enqueued (bulk summarize) and is 0 for the others.
+    """
 
     total: int
     succeeded: int
     failed: int
+    queued: int = 0
     results: List[BulkThreadResult]
 
 

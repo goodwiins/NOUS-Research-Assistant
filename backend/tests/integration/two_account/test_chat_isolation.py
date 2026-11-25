@@ -66,11 +66,7 @@ def owner_only_routes(key: str) -> list:
 async def assert_denied(client: AsyncClient, key: str, *leak_keys: str) -> None:
     for route in chat_routes(key) + owner_only_routes(key):
         r = await client.get(route)
-        # Thread-messages list answers 200 [] instead of 404; either way the
-        # body must not carry the content.
-        assert r.status_code in (404, 200), route
-        if r.status_code == 200:
-            assert r.json().get("messages") == [], route
+        assert r.status_code == 404, route
         assert_no_canary(r.content, *(leak_keys or B_PRIVATE_CHAT_KEYS))
     listing = await client.get("/api/v2/workspaces")
     assert_no_canary(listing.content, f"{key}-ws")

@@ -258,15 +258,24 @@ async def list_threads(
 ):
     """
     List threads in a conversation.
+
+    Returns 404 when the conversation is missing or not accessible.
     """
     service = get_chat_service(db)
-    threads, total = await service.list_threads(
+    listed = await service.list_threads(
         conversation_id=conversation_id,
         user_id=current_user.id,
         status_filter=status_filter,
         limit=limit,
         offset=offset,
     )
+    if listed is None:
+        # Missing and forbidden answer alike (no existence oracle), as /context.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found or access denied",
+        )
+    threads, total = listed
 
     page = (offset // limit) + 1 if limit > 0 else 1
     has_more = (offset + len(threads)) < total
@@ -361,7 +370,13 @@ async def bulk_summarize_threads(
     _rate_limit: bool = Depends(check_bulk_summarize_rate_limit),
 ):
     """
-    Bulk trigger AI summarization for multiple threads.
+    Bulk queue AI summarization for multiple threads.
+
+    Summarization runs asynchronously, so nothing is summarized when this
+    returns: each enqueued thread is reported with ``queued: true`` and
+    ``success: false``, ``succeeded`` is always 0, and ``queued`` counts the
+    enqueued threads. A ``threads_bulk_updated`` event with action
+    ``"summarize_queued"`` is broadcast for the enqueued threads only.
 
     Rate limited to 5 operations per minute per user (heavy AI operations).
     """
@@ -370,10 +385,11 @@ async def bulk_summarize_threads(
 
     return await _build_bulk_response(
         results=results,
-        action="summarized",
+        action="summarize_queued",
         user_id=current_user.id,
         organization_id=str(current_user.organization_id),
         include_threads=False,  # Thread data would be stale since summarization is async
+        queued_only=True,
     )
 
 
@@ -765,11 +781,13 @@ async def list_messages(
 ):
     """
     List messages in a thread.
+
+    Returns 404 when the thread is missing or not accessible.
     """
     service = get_chat_service(db)
     metadata = MessagePageMetadata()
     try:
-        messages, total = await service.list_messages(
+        listed = await service.list_messages(
             thread_id=thread_id,
             user_id=current_user.id,
             limit=limit,
@@ -782,6 +800,13 @@ async def list_messages(
         )
     except BranchAccessError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
+    if listed is None:
+        # Missing and forbidden answer alike (no existence oracle), as /context.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Thread not found or access denied",
+        )
+    messages, total = listed
 
     page = (offset // limit) + 1 if limit > 0 else 1
     has_more = (offset + len(messages)) < total
@@ -916,20 +941,27 @@ async def _build_bulk_response(
     user_id: UUID,
     organization_id: str,
     include_threads: bool = True,
+    queued_only: bool = False,
 ) -> BulkThreadResponse:
     """
     Build bulk response and broadcast events.
 
     Args:
         results: List of tuples (thread_id, success, error, [thread])
-        action: Action name for event broadcasting ('resolved', 'archived', 'deleted')
+        action: Action name for event broadcasting ('resolved', 'archived',
+            'deleted', 'summarize_queued')
         user_id: ID of the user performing the action
         organization_id: Owning organization — required so the bulk broadcast is
             tenant-scoped (a missed value would reopen the cross-tenant leak).
         include_threads: Whether to include thread objects in the response results
+        queued_only: The tuple's second element means "queued", not "done"
+            (bulk summarize). A true value is reported as ``queued: true``,
+            ``success: false``; ``succeeded`` stays 0 and the broadcast covers
+            the queued threads only.
     """
     bulk_results = []
     succeeded_ids = []
+    queued_ids = []
 
     for result in results:
         thread_id = result[0]
@@ -938,10 +970,12 @@ async def _build_bulk_response(
         # Thread object might not be present if include_threads is False (e.g. delete)
         thread = result[3] if len(result) > 3 else None
 
+        queued = bool(success) and queued_only
         bulk_results.append(
             BulkThreadResult(
                 thread_id=thread_id,
-                success=success,
+                success=bool(success) and not queued_only,
+                queued=queued,
                 error=error,
                 thread=(
                     ThreadResponse.model_validate(thread)
@@ -950,12 +984,15 @@ async def _build_bulk_response(
                 ),
             )
         )
-        if success:
+        if queued:
+            queued_ids.append(str(thread_id))
+        elif success:
             succeeded_ids.append(str(thread_id))
 
-    if succeeded_ids:
+    broadcast_ids = queued_ids if queued_only else succeeded_ids
+    if broadcast_ids:
         await thread_event_service.broadcast_threads_bulk_updated(
-            thread_ids=succeeded_ids,
+            thread_ids=broadcast_ids,
             action=action,
             user_id=str(user_id),
             organization_id=str(organization_id),
@@ -964,7 +1001,8 @@ async def _build_bulk_response(
     return BulkThreadResponse(
         total=len(results),
         succeeded=len(succeeded_ids),
-        failed=len(results) - len(succeeded_ids),
+        queued=len(queued_ids),
+        failed=len(results) - len(succeeded_ids) - len(queued_ids),
         results=bulk_results,
     )
 

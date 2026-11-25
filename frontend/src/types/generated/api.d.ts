@@ -10378,6 +10378,8 @@ export interface paths {
         /**
          * List Threads
          * @description List threads in a conversation.
+         *
+         *     Returns 404 when the conversation is missing or not accessible.
          */
         get: operations["list_threads_api_v2_threads_get"];
         put?: never;
@@ -10469,7 +10471,13 @@ export interface paths {
         put?: never;
         /**
          * Bulk Summarize Threads
-         * @description Bulk trigger AI summarization for multiple threads.
+         * @description Bulk queue AI summarization for multiple threads.
+         *
+         *     Summarization runs asynchronously, so nothing is summarized when this
+         *     returns: each enqueued thread is reported with ``queued: true`` and
+         *     ``success: false``, ``succeeded`` is always 0, and ``queued`` counts the
+         *     enqueued threads. A ``threads_bulk_updated`` event with action
+         *     ``"summarize_queued"`` is broadcast for the enqueued threads only.
          *
          *     Rate limited to 5 operations per minute per user (heavy AI operations).
          */
@@ -13142,11 +13150,19 @@ export interface components {
         };
         /**
          * BulkThreadResponse
-         * @description Bulk thread operation response
+         * @description Bulk thread operation response.
+         *
+         *     ``failed`` is ``total - succeeded - queued``. ``queued`` counts threads
+         *     whose work was only enqueued (bulk summarize) and is 0 for the others.
          */
         BulkThreadResponse: {
             /** Failed */
             failed: number;
+            /**
+             * Queued
+             * @default 0
+             */
+            queued: number;
             /** Results */
             results: components["schemas"]["BulkThreadResult"][];
             /** Succeeded */
@@ -13156,11 +13172,19 @@ export interface components {
         };
         /**
          * BulkThreadResult
-         * @description Result for a single thread in bulk operation
+         * @description Result for a single thread in bulk operation.
+         *
+         *     ``queued`` is true when the work was only enqueued (bulk summarize); such
+         *     a result has ``success`` false because nothing completed in the request.
          */
         BulkThreadResult: {
             /** Error */
             error?: string | null;
+            /**
+             * Queued
+             * @default false
+             */
+            queued: boolean;
             /** Success */
             success: boolean;
             thread?: components["schemas"]["ThreadResponse"] | null;

@@ -253,8 +253,12 @@ class ChatService:
         search_query: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> Tuple[List[Conversation], int]:
+    ) -> Optional[Tuple[List[Conversation], int]]:
         """List conversations in a workspace.
+
+        Returns ``None`` when the workspace was not found or is not
+        accessible to ``user_id`` (router callers map it to 404); an
+        accessible workspace with no conversations returns ``([], 0)``.
 
         Delegates with ``order_pinned_first=True`` — this class's pre-4.3
         ordering (pinned conversations float to the top). The router-inline
@@ -271,7 +275,7 @@ class ChatService:
             order_pinned_first=True,
         )
         if result is None:
-            return [], 0
+            return None
         conversations, total, _counts = result
         return conversations, total
 
@@ -373,8 +377,13 @@ class ChatService:
         status_filter: Optional[ThreadStatus] = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> Tuple[List[Thread], int]:
-        """List threads in a conversation."""
+    ) -> Optional[Tuple[List[Thread], int]]:
+        """List threads in a conversation.
+
+        Returns ``None`` when the conversation was not found or is not
+        accessible to ``user_id`` (router callers map it to 404); an
+        accessible conversation with no threads returns ``([], 0)``.
+        """
         result = await thread_service.list_threads(
             self.db,
             conversation_id,
@@ -385,7 +394,7 @@ class ChatService:
             with_preview=False,
         )
         if result is None:
-            return [], 0
+            return None
         threads, total, _previews = result
         return threads, total
 
@@ -636,8 +645,13 @@ class ChatService:
             thread_ids: List of thread UUIDs to summarize
             user_id: User performing the operation
 
+        Summarization runs later in a Celery task, so nothing is summarized
+        when this returns.
+
         Returns:
-            List of (thread_id, success, error_msg, thread) tuples.
+            List of (thread_id, queued, error_msg, thread) tuples. ``queued``
+            is ``True`` when the summarization task was enqueued, not when a
+            summary was written.
         """
         results = []
 
@@ -916,23 +930,24 @@ class ChatService:
                         )
                         doc_id = None
 
-                try:
-                    citation = Citation(
-                        message_id=message.id,
-                        document_id=doc_id,
-                        external_reference_id=cit.get("external_reference_id"),
-                        chunk_index=cit.get("chunk_index"),
-                        chunk_id=cit.get("chunk_id"),
-                        snippet=cit.get("snippet"),
-                        page_number=cit.get("page_number"),
-                        score=cit.get("score"),
-                        rerank_score=cit.get("rerank_score"),
-                        document_title=cit.get("document_title"),
-                        document_type=cit.get("document_type"),
-                    )
-                    self.db.add(citation)
-                except Exception as cit_exc:
-                    logger.warning(f"Failed to create citation: {cit_exc}")
+                # A citation failure propagates before commit, so the message
+                # and its thread-counter update are not persisted without it
+                # (same atomicity as create_message); the session owner rolls
+                # back.
+                citation = Citation(
+                    message_id=message.id,
+                    document_id=doc_id,
+                    external_reference_id=cit.get("external_reference_id"),
+                    chunk_index=cit.get("chunk_index"),
+                    chunk_id=cit.get("chunk_id"),
+                    snippet=cit.get("snippet"),
+                    page_number=cit.get("page_number"),
+                    score=cit.get("score"),
+                    rerank_score=cit.get("rerank_score"),
+                    document_title=cit.get("document_title"),
+                    document_type=cit.get("document_type"),
+                )
+                self.db.add(citation)
 
         # Update thread stats (eagerly load conversation to avoid lazy-load
         # MissingGreenlet errors in async context)
@@ -996,8 +1011,12 @@ class ChatService:
         order: Literal["asc", "desc"] = "asc",
         selected_message_id: Optional[UUID] = None,
         branch_metadata: Optional["MessagePageMetadata"] = None,
-    ) -> Tuple[List[ChatMessage], int]:
+    ) -> Optional[Tuple[List[ChatMessage], int]]:
         """List messages in a thread.
+
+        Returns ``None`` when the thread was not found or is not accessible
+        to ``user_id`` (router callers map it to 404); an accessible thread
+        with no messages returns ``([], 0)``.
 
         ``since`` (optional) filters to messages with ``created_at > since``
         (strict). Used by clients (CLI, web) to delta-fetch only rows newer
@@ -1022,7 +1041,7 @@ class ChatService:
             branch_metadata=branch_metadata,
         )
         if result is None:
-            return [], 0
+            return None
         messages, total, _has_more = result
         return messages, total
 
