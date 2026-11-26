@@ -47,18 +47,53 @@ vi.mock('../BlueprintEditor', () => ({
   BlueprintEditor: ({
     projectId,
     readOnly,
+    onBlueprintSaved,
   }: {
     projectId: string;
     readOnly?: boolean;
+    onBlueprintSaved?: (
+      blueprintId: string,
+      templateSource: string | null
+    ) => void;
   }) => (
     <div>
       Blueprint for {projectId} {readOnly ? '(read only)' : '(editable)'}
+      <button
+        type="button"
+        onClick={() =>
+          onBlueprintSaved?.('blueprint-brief', 'daily_research_brief')
+        }
+      >
+        Save brief blueprint
+      </button>
+      <button
+        type="button"
+        onClick={() => onBlueprintSaved?.('blueprint-custom', null)}
+      >
+        Save custom blueprint
+      </button>
     </div>
   ),
 }));
 vi.mock('../ProtocolPanel', () => ({
-  ProtocolPanel: ({ projectId }: { projectId: string }) => (
-    <div>Protocol for {projectId}</div>
+  ProtocolPanel: ({
+    projectId,
+    blueprintId,
+    dailyBrief,
+  }: {
+    projectId: string;
+    blueprintId?: string;
+    dailyBrief?: boolean;
+  }) => (
+    <div>
+      Protocol for {projectId}
+      <span>Protocol blueprint {blueprintId ?? 'none'}</span>
+      {dailyBrief ? (
+        <span>Question fieldset hidden</span>
+      ) : (
+        <span>Question fieldset shown</span>
+      )}
+    </div>
   ),
 }));
 vi.mock('../ReportIdentityPanel', () => ({
@@ -513,6 +548,43 @@ describe('ProjectWorkflow', () => {
       ).toBeInTheDocument()
     );
     expect(useProjectStore.getState().currentProject).toEqual(other);
+  });
+
+  it('tells the protocol panel when the saved blueprint is a Daily Research Brief', () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectWorkflow
+          project={{
+            id: 'collection-1',
+            workspace_id: 'workspace-1',
+            name: 'Brief',
+            research_engine_project_id: 'engine-1',
+            can_edit: true,
+            can_manage: true,
+            workspace_archived: false,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          }}
+        />
+      </QueryClientProvider>
+    );
+
+    expect(screen.getByText('Question fieldset shown')).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save brief blueprint' })
+    );
+    expect(
+      screen.getByText('Protocol blueprint blueprint-brief')
+    ).toBeInTheDocument();
+    expect(screen.getByText('Question fieldset hidden')).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save custom blueprint' })
+    );
+    expect(
+      screen.getByText('Protocol blueprint blueprint-custom')
+    ).toBeInTheDocument();
+    expect(screen.getByText('Question fieldset shown')).toBeInTheDocument();
   });
 
   it('renders the corpus panel read-only for an archived project', async () => {

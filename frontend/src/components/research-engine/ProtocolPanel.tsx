@@ -17,6 +17,7 @@ import type {
   ResearchQuestionResponse,
 } from '@/services/researchProtocolService';
 import { useAuthStore } from '@/stores/authStore';
+import { DAILY_BRIEF_PROTOCOL_NAME } from '@/utils/dailyBriefProtocol';
 
 const SNAPSHOT_SECTIONS = [
   'eligibility',
@@ -38,6 +39,8 @@ const EMPTY_SNAPSHOT = Object.fromEntries(
 interface ProtocolPanelProps {
   projectId: string;
   blueprintId?: string;
+  /** The saved blueprint is a Daily Research Brief: its setup owns the protocol content. */
+  dailyBrief?: boolean;
   readOnly: boolean;
   onApprovedVersionChange: (versionId?: string) => void;
 }
@@ -105,6 +108,11 @@ export function ProtocolPanel(props: ProtocolPanelProps): ReactElement {
     questionOptions[0];
   const protocol =
     protocolOptions.find((candidate) => candidate.id === selectedProtocolId) ??
+    (props.dailyBrief
+      ? protocolOptions.find(
+          (candidate) => candidate.name === DAILY_BRIEF_PROTOCOL_NAME
+        )
+      : undefined) ??
     protocolOptions[0];
   return (
     <ProtocolPanelContent
@@ -200,6 +208,7 @@ interface ProtocolPanelContentProps extends ProtocolPanelProps {
 function ProtocolPanelContent({
   projectId,
   blueprintId,
+  dailyBrief = false,
   readOnly,
   onApprovedVersionChange,
   question,
@@ -518,41 +527,50 @@ function ProtocolPanelContent({
         </div>
       )}
 
-      <fieldset disabled={readOnly} className="space-y-3">
-        <legend className="text-sm font-medium">Research question</legend>
-        <textarea
-          aria-label="Research question"
-          value={questionText}
-          onChange={(event) => setQuestionText(event.target.value)}
-          className="min-h-20 w-full rounded-md border border-border bg-background p-3 text-sm"
-        />
-        <input
-          aria-label="Hypothesis"
-          value={hypothesis}
-          onChange={(event) => setHypothesis(event.target.value)}
-          placeholder="Hypothesis (optional)"
-          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-        />
-        <input
-          aria-label="Question scope"
-          value={scope}
-          onChange={(event) => setScope(event.target.value)}
-          placeholder="Scope (optional)"
-          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-        />
-        <button
-          type="button"
-          onClick={saveQuestion}
-          disabled={
-            !questionText.trim() ||
-            actions.createQuestion.isPending ||
-            actions.createQuestionVersion.isPending
-          }
-          className="rounded-md border border-border px-3 py-2 text-sm font-medium disabled:opacity-50"
-        >
-          {question ? 'Create question version' : 'Save question'}
-        </button>
-      </fieldset>
+      {dailyBrief && (
+        <p className="text-sm text-muted-foreground">
+          This protocol is created from the Daily Research Brief setup each time
+          you save the brief.
+        </p>
+      )}
+
+      {!dailyBrief && (
+        <fieldset disabled={readOnly} className="space-y-3">
+          <legend className="text-sm font-medium">Research question</legend>
+          <textarea
+            aria-label="Research question"
+            value={questionText}
+            onChange={(event) => setQuestionText(event.target.value)}
+            className="min-h-20 w-full rounded-md border border-border bg-background p-3 text-sm"
+          />
+          <input
+            aria-label="Hypothesis"
+            value={hypothesis}
+            onChange={(event) => setHypothesis(event.target.value)}
+            placeholder="Hypothesis (optional)"
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+          />
+          <input
+            aria-label="Question scope"
+            value={scope}
+            onChange={(event) => setScope(event.target.value)}
+            placeholder="Scope (optional)"
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+          />
+          <button
+            type="button"
+            onClick={saveQuestion}
+            disabled={
+              !questionText.trim() ||
+              actions.createQuestion.isPending ||
+              actions.createQuestionVersion.isPending
+            }
+            className="rounded-md border border-border px-3 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            {question ? 'Create question version' : 'Save question'}
+          </button>
+        </fieldset>
+      )}
 
       {question && (
         <details>
@@ -582,7 +600,7 @@ function ProtocolPanelContent({
         </details>
       )}
 
-      {question && (
+      {question && !dailyBrief && (
         <fieldset
           disabled={readOnly || protocol?.can_edit === false}
           className="space-y-3"

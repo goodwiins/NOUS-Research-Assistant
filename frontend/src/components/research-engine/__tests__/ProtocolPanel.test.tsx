@@ -405,6 +405,111 @@ describe('ProtocolPanel', () => {
     expect(onApprovedVersionChange).toHaveBeenCalledWith(undefined);
   });
 
+  it('replaces the question and snapshot forms with the brief setup line for a Daily Research Brief', () => {
+    arrange(true);
+    render(
+      <ProtocolPanel
+        projectId="collection-1"
+        blueprintId="blueprint-1"
+        dailyBrief
+        readOnly={false}
+        onApprovedVersionChange={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.queryByRole('textbox', { name: 'Research question' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('textbox', { name: 'Protocol eligibility' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /This protocol is created from the Daily Research Brief setup/
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Approve exact version' })
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('Compare snapshot')).toHaveLength(2);
+    expect(screen.getByText('Approved version 1')).toBeInTheDocument();
+  });
+
+  it('keeps the question and snapshot forms for a non-brief blueprint', () => {
+    arrange(true);
+    render(
+      <ProtocolPanel
+        projectId="collection-1"
+        blueprintId="blueprint-1"
+        readOnly={false}
+        onApprovedVersionChange={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByRole('textbox', { name: 'Research question' })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('textbox', { name: 'Protocol eligibility' })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/created from the Daily Research Brief setup/)
+    ).not.toBeInTheDocument();
+  });
+
+  it('selects the Daily Research Brief protocol by default for a brief blueprint', () => {
+    const briefDraft = {
+      ...initialVersion,
+      id: 'brief-version-1',
+      protocol_id: 'protocol-brief',
+      blueprint_id: 'blueprint-brief',
+      content_hash: 'c'.repeat(64),
+      status: 'draft',
+      approved_by_user_id: null,
+      approved_at: null,
+      can_approve: true,
+    };
+    arrange(false, [
+      {
+        id: 'protocol-brief',
+        project_id: 'collection-1',
+        name: 'Daily Research Brief protocol',
+        current_draft_version_id: briefDraft.id,
+        current_approved_version_id: null,
+        versions: [briefDraft],
+        can_edit: true,
+        can_manage: true,
+        can_approve: true,
+        created_at: '2026-01-03T00:00:00Z',
+        updated_at: '2026-01-03T00:00:00Z',
+      },
+    ]);
+    const onApprovedVersionChange = vi.fn();
+    render(
+      <ProtocolPanel
+        projectId="collection-1"
+        blueprintId="blueprint-brief"
+        dailyBrief
+        readOnly={false}
+        onApprovedVersionChange={onApprovedVersionChange}
+      />
+    );
+
+    expect(screen.getByLabelText('Protocol record')).toHaveValue(
+      'protocol-brief'
+    );
+    expect(screen.getByText(/No approved protocol exists/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Approval is bound to version 1 and hash c{64}/)
+    ).toBeInTheDocument();
+    expect(onApprovedVersionChange).toHaveBeenLastCalledWith(undefined);
+
+    fireEvent.change(screen.getByLabelText('Protocol record'), {
+      target: { value: 'protocol-1' },
+    });
+    expect(screen.getByText('Approved version 1')).toBeInTheDocument();
+  });
+
   it('requires an explicit protocol selection when multiple records exist', () => {
     arrange(false, [
       {

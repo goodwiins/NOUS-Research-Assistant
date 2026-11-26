@@ -47,6 +47,14 @@ transaction. Approval retries are scoped to one protocol aggregate: the same
 key and fingerprint identifies the original decision; conflicting reuse fails.
 Fingerprints include the actor, target, expected state and rationale.
 
+**Daily Research Brief (2026-11-26, GOO-803).** The brief's setup is the only
+place its research question and scope are entered. Each successful brief save
+creates the protocol records from that setup: a question version (only when the
+question text changed) and the `Daily Research Brief protocol` draft, or an
+amendment to it bound to the newly saved blueprint. The approval rules above
+are unchanged: an independent, explicitly assigned supervisor who is not the
+author still approves the exact draft before a run can start.
+
 ## Canonical content hashes
 
 `research-protocol-v1` hashes UTF-8 JSON with SHA-256. Keys are sorted, separators

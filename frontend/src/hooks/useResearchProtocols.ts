@@ -1,5 +1,6 @@
 'use client';
 
+import { useCallback, useRef } from 'react';
 import {
   useMutation,
   useQuery,
@@ -23,6 +24,11 @@ import {
   type ResearchQuestionResponse,
   type ResearchQuestionVersionCreate,
 } from '@/services/researchProtocolService';
+import {
+  DAILY_BRIEF_AMENDMENT_REASON,
+  DAILY_BRIEF_PROTOCOL_NAME,
+  dailyBriefProtocolSnapshot,
+} from '@/utils/dailyBriefProtocol';
 
 export const researchProtocolKeys = {
   root: (projectId: string) => ['project', projectId, 'protocols'] as const,
@@ -188,4 +194,103 @@ export function useProtocolDeviations(
     queryFn: () => researchProtocolService.listDeviations(protocolId!),
     enabled: Boolean(protocolId),
   });
+}
+
+/**
+ * Create the Daily Research Brief's question version and protocol draft (or
+ * amendment) for a newly saved brief blueprint. Approval still belongs to an
+ * independent assigned supervisor in ProtocolPanel.
+ */
+export function useDailyBriefProtocolSync(
+  projectId: string
+): (blueprintId: string, parameters: Record<string, unknown>) => Promise<void> {
+  const queryClient = useQueryClient();
+  // A question created before a failed protocol call is reused on retry, so
+  // pressing Save again does not create a duplicate question record.
+  const unboundQuestion = useRef<{ text: string; versionId: string }>();
+
+  return useCallback(
+    async (blueprintId, parameters) => {
+      const questionText =
+        typeof parameters.research_question === 'string'
+          ? parameters.research_question.trim()
+          : '';
+      const snapshot = dailyBriefProtocolSnapshot(parameters);
+      try {
+        const protocols =
+          await researchProtocolService.listProtocols(projectId);
+        const brief = protocols.find(
+          (candidate) => candidate.name === DAILY_BRIEF_PROTOCOL_NAME
+        );
+
+        if (!brief) {
+          let questionVersionId =
+            unboundQuestion.current?.text === questionText
+              ? unboundQuestion.current.versionId
+              : undefined;
+          if (!questionVersionId) {
+            const created = await researchProtocolService.createQuestion(
+              projectId,
+              { question: questionText, framework: {} }
+            );
+            questionVersionId = created.current_version_id;
+            unboundQuestion.current = {
+              text: questionText,
+              versionId: questionVersionId,
+            };
+          }
+          await researchProtocolService.createProtocol(projectId, {
+            name: DAILY_BRIEF_PROTOCOL_NAME,
+            question_version_id: questionVersionId,
+            blueprint_id: blueprintId,
+            snapshot,
+          });
+          unboundQuestion.current = undefined;
+          return;
+        }
+
+        const draftId = brief.current_draft_version_id;
+        const draft = brief.versions?.find((version) => version.id === draftId);
+        if (!draftId || !draft) {
+          throw new Error('The brief protocol has no draft version.');
+        }
+        const questions =
+          await researchProtocolService.listQuestions(projectId);
+        const question = questions.find(
+          (candidate) =>
+            candidate.current_version_id === draft.question_version_id ||
+            (candidate.versions ?? []).some(
+              (version) => version.id === draft.question_version_id
+            )
+        );
+        if (!question) {
+          throw new Error('The brief protocol question was not found.');
+        }
+        let questionVersionId = question.current_version_id;
+        if (question.current_version.question !== questionText) {
+          const updated = await researchProtocolService.createQuestionVersion(
+            question.id,
+            {
+              question: questionText,
+              framework: {},
+              parent_version_id: question.current_version_id,
+            }
+          );
+          questionVersionId = updated.current_version_id;
+        }
+        await researchProtocolService.createProtocolVersion(brief.id, {
+          question_version_id: questionVersionId,
+          blueprint_id: blueprintId,
+          snapshot,
+          parent_version_id: draftId,
+          amendment_reason: DAILY_BRIEF_AMENDMENT_REASON,
+        });
+      } finally {
+        await queryClient.invalidateQueries({
+          queryKey: researchProtocolKeys.root(projectId),
+        });
+      }
+    },
+    [projectId, queryClient]
+  );
 }

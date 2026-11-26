@@ -226,7 +226,9 @@ describe('DailyResearchBriefSetup', () => {
     fireEvent.change(include, { target: { value: 'Peer reviewed \n  RCTs ' } });
     expect(include).toHaveValue('Peer reviewed \n  RCTs ');
     expect(onChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ inclusion_criteria: ['Peer reviewed', 'RCTs'] }),
+      expect.objectContaining({
+        inclusion_criteria: ['Peer reviewed', 'RCTs'],
+      }),
       null
     );
 
@@ -234,5 +236,51 @@ describe('DailyResearchBriefSetup', () => {
     fireEvent.change(exclude, { target: { value: 'Preprints\n' } });
     expect(exclude).toHaveValue('Preprints\n');
   });
-});
 
+  it('reports parameter edits through onEdit but not scope confirmation', async () => {
+    const onEdit = vi.fn();
+    render(
+      <QueryClientProvider
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
+      >
+        <DailyResearchBriefSetup
+          initialParameters={{
+            contract_version: 1,
+            research_question: 'What changed?',
+            inclusion_criteria: ['Peer reviewed'],
+            exclusion_criteria: [],
+            providers: ['openalex'],
+            limit_per_provider: 25,
+            notes: '',
+          }}
+          onChange={vi.fn()}
+          onEdit={onEdit}
+        />
+      </QueryClientProvider>
+    );
+
+    const confirm = screen.getByRole('checkbox', { name: 'Confirm scope' });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    expect(onEdit).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('Research question'), {
+      target: { value: 'What changed this week?' },
+    });
+    fireEvent.change(screen.getByLabelText('What to include'), {
+      target: { value: 'Peer reviewed\nPreprints' },
+    });
+    fireEvent.change(screen.getByLabelText('What to exclude'), {
+      target: { value: 'Editorials' },
+    });
+    fireEvent.change(screen.getByLabelText('Results per source'), {
+      target: { value: '10' },
+    });
+    fireEvent.change(screen.getByLabelText('Notes'), {
+      target: { value: 'Focus on benchmarks' },
+    });
+    expect(onEdit).toHaveBeenCalledTimes(5);
+  });
+});

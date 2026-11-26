@@ -29,6 +29,9 @@ import type {
   DailyBriefScopeConfirmation,
   ProjectResponse,
 } from '@/services/researchEngineService';
+import { useDailyBriefProtocolSync } from '@/hooks/useResearchProtocols';
+import { getApiErrorMessage } from '@/utils/apiErrorMessage';
+import { DAILY_BRIEF_TEMPLATE_SOURCE } from '@/utils/dailyBriefProtocol';
 import { StepCard } from './StepCard';
 import { SourceSelector } from './SourceSelector';
 import { TemplateSelector } from './TemplateSelector';
@@ -60,7 +63,10 @@ export interface BlueprintEditorProps {
   projectId: string;
   readOnly?: boolean;
   approvedProtocolVersionId?: string;
-  onBlueprintSaved?: (blueprintId: string) => void;
+  onBlueprintSaved?: (
+    blueprintId: string,
+    templateSource: string | null
+  ) => void;
 }
 
 async function loadProjectBlueprint(projectId: string): Promise<{
@@ -87,6 +93,7 @@ export function BlueprintEditor({
   onBlueprintSaved,
 }: BlueprintEditorProps): ReactElement {
   const router = useRouter();
+  const syncDailyBriefProtocol = useDailyBriefProtocolSync(projectId);
 
   const [project, setProject] = useState<EditorProject | null>(null);
   const [blueprint, setBlueprint] = useState<BlueprintResponse | null>(null);
@@ -119,7 +126,7 @@ export function BlueprintEditor({
         setProject(proj);
         if (bp) {
           setBlueprint(bp);
-          onBlueprintSaved?.(bp.id);
+          onBlueprintSaved?.(bp.id, bp.template_source ?? null);
           setBlueprintName(bp.name);
           setSteps(bp.steps.map(withKey));
           setGlobalParams(bp.parameters);
@@ -227,8 +234,10 @@ export function BlueprintEditor({
     if (globalParamsError) return;
 
     const topologyRevisionAtSave = topologyRevisionRef.current;
+    const parametersAtSave = globalParams;
     setSaving(true);
     setError(null);
+    let savedBrief: BlueprintResponse | null = null;
     try {
       const cleanSteps = steps.map(({ _key, ...rest }) => rest);
       const bp = await createBlueprint(projectId, {
@@ -242,13 +251,32 @@ export function BlueprintEditor({
         setBlueprint(bp);
         setTemplateSource(bp.template_source ?? null);
         setTopologyDirty(false);
-        onBlueprintSaved?.(bp.id);
+        onBlueprintSaved?.(bp.id, bp.template_source ?? null);
+        if (bp.template_source === DAILY_BRIEF_TEMPLATE_SOURCE) {
+          savedBrief = bp;
+        }
       }
     } catch {
       setError('Failed to save blueprint.');
-    } finally {
       setSaving(false);
+      return;
     }
+    // A brief without a research question cannot be confirmed or started, so
+    // its protocol draft waits for a save that has one.
+    const question = parametersAtSave.research_question;
+    if (savedBrief && typeof question === 'string' && question.trim()) {
+      try {
+        await syncDailyBriefProtocol(savedBrief.id, parametersAtSave);
+      } catch (err) {
+        setError(
+          getApiErrorMessage(
+            err,
+            'The brief was saved, but its protocol draft could not be created.'
+          )
+        );
+      }
+    }
+    setSaving(false);
   };
 
   const handleStartRun = async (): Promise<void> => {
@@ -272,11 +300,13 @@ export function BlueprintEditor({
       if (run?.id) {
         router.push(`/research-engine/runs/${run.id}`);
       }
-    } catch {
-      setError('Failed to start run.');
+    } catch (err) {
+      setError(getApiErrorMessage(err, 'Failed to start run.'));
       setStarting(false);
     }
   };
+
+  const isDailyBrief = templateSource === DAILY_BRIEF_TEMPLATE_SOURCE;
 
   // Loading state
   if (loading) {
@@ -413,10 +443,19 @@ export function BlueprintEditor({
               {starting ? 'Starting' : 'Start run'}
             </button>
           )}
-          {blueprint && !approvedProtocolVersionId && (
+          {blueprint && isDailyBrief && topologyDirty ? (
             <p className="text-xs text-muted-foreground">
-              Approve a protocol version before starting a run.
+              Save your changes before starting a run.
             </p>
+          ) : (
+            blueprint &&
+            !approvedProtocolVersionId && (
+              <p className="text-xs text-muted-foreground">
+                {isDailyBrief
+                  ? "An independent supervisor must approve this brief's protocol before it can start."
+                  : 'Approve a protocol version before starting a run.'}
+              </p>
+            )
           )}
         </div>
       </div>
@@ -507,6 +546,7 @@ export function BlueprintEditor({
             {templateSource === 'daily_research_brief' ? (
               <DailyResearchBriefSetup
                 initialParameters={globalParams}
+                onEdit={markTopologyDirty}
                 onChange={(parameters, confirmation) => {
                   setGlobalParams(parameters);
                   setGlobalParamsText(JSON.stringify(parameters, null, 2));
