@@ -294,6 +294,14 @@ class PerformanceDashboardService:
 
                 return overview
 
+        except _TRANSIENT_DB_ERRORS as exc:
+            # An outage is "unavailable" (503), never a 500 (GOO-750).
+            logger.warning(
+                "Dashboard overview unavailable (%s)",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            raise MetricsUnavailable() from exc
         except Exception as e:
             logger.error(f"Failed to get dashboard overview: {e}")
             raise
