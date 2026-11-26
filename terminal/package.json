@@ -12,15 +12,15 @@
     "test": "node --import ./react-runtime.mjs --import tsx --test src/*.test.tsx"
   },
   "dependencies": {
-    "@assistant-ui/react-ink": "0.0.43",
-    "@assistant-ui/react-ink-markdown": "0.0.42",
+    "@assistant-ui/react-ink": "0.0.55",
+    "@assistant-ui/react-ink-markdown": "0.0.55",
     "ink": "7.1.1",
     "react": "19.2.8",
     "shiki": "^4.4.2",
     "@nous/chat-runtime": "workspace:*",
-    "@assistant-ui/core": "0.3.19",
-    "@assistant-ui/store": "0.3.13",
-    "@assistant-ui/tap": "0.9.17"
+    "@assistant-ui/core": "0.3.37",
+    "@assistant-ui/store": "0.3.24",
+    "@assistant-ui/tap": "0.9.26"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
