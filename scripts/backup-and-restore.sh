@@ -375,7 +375,10 @@ fail_after_postgres() {
 # and non-public schemas, since the plain dump's CREATE statements collide
 # with any of them. Views and extension-owned objects do not count.
 count_ragdb_objects() {
-    local not_system="n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'"
+    # \_ is LIKE's escaped, literal underscore (standard_conforming_strings is
+    # on by default). A bare _ is a wildcard: 'pg_temp%' would also skip a
+    # user schema such as pgxtemp and let the restore load over it.
+    local not_system="n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'"
     local sql="SELECT (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'))"
     sql+=" + (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('S', 'c') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.deptype = 'e' AND ((d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid) OR (d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = c.reltype))))"
     sql+=" + (SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'd', 'r', 'm') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e'))"

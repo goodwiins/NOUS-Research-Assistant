@@ -53,3 +53,10 @@ def test_local_backups_are_private() -> None:
     assert not re.search(
         r'BACKUP_DIR="\$\{BACKUP_DIR:-/tmp/', code
     ), "do not default to a fixed, shared /tmp path"
+
+
+def test_system_schema_filters_match_a_literal_underscore() -> None:
+    # In LIKE a bare _ matches any character, so 'pg_temp%' would also drop a
+    # user schema such as pgxtemp from the restore's emptiness count.
+    patterns = re.findall(r"nspname NOT LIKE '([^']*)'", "\n".join(_code_lines()))
+    assert patterns == [r"pg\_toast%", r"pg\_temp%"]
