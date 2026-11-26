@@ -75,16 +75,17 @@ rules. `F slot` and `F parallel` are never run.
 ### Switching to `F list` and `F stats`
 
 `factory_ui/sources.py` is the one place the server gets the Jobs rows
-(`jobs_rows`), the backtests block (`backtests_block`) and the backtest rows
-(`backtest_rows`). Today both read
+(`jobs_rows`) and the backtests block (`backtests_block`). Today both read
 files: `jobs/*/job.json` as the helper's `cached_jobs` and `merge` read it,
 and `verify-backtest.jsonl` counted line by line like the helper's
 `verify_stats`. The rows carry the `F list` field names (`id`, `phase`,
 `round`, `pr`, `home`, `lease`) and the block uses the `F stats`
 `verify.backtests` key names. Once the helper gains a no-write mode, switch
-by changing `jobs_rows` and `backtests_block` to call it, and add the
-commands to `ALLOWED` with a new proof. Nothing else changes. `F stats`
-prints no rows, so `backtest_rows` stays a file read.
+by changing those two functions to call it, and add the commands to
+`ALLOWED` with a new proof. Nothing else changes. The block may carry one
+extra key, `listing`, with the backtest rows the Verifier view lists; the
+server takes it off the served block. `F stats` prints no rows, so a block
+from it leaves `listing` out (or keeps reading the rows from the file).
 
 ## Rules
 
@@ -93,7 +94,10 @@ prints no rows, so `backtest_rows` stays a file read.
 - **Reads.** Every read goes through one guard (`paths.safe_read`): it opens
   the path one component at a time from the factory root's descriptor with
   `O_NOFOLLOW`, so no symlink below the root is followed; the file must be a
-  regular file and is cut at 2 MB with a notice. A `verify-backtest.jsonl`
+  regular file (opened non-blocking, so a named pipe is refused at once)
+  and is cut at 2 MB with a notice. JSON with `NaN`, `Infinity` or an
+  overflowing number is treated as malformed; such a `job.json` shows as
+  unreadable without affecting other jobs. A `verify-backtest.jsonl`
   over 2 MB is flagged on the Verifier view. A job id must match the job-name pattern and
   be a folder `os.listdir` returned; an artifact key must be one of `spec`,
   `build`, `decision`, `decision-<n>`, `pr-body`, `related-tests`,
@@ -101,7 +105,8 @@ prints no rows, so `backtest_rows` stays a file read.
 - **Secrets.** The server never opens the Linear key file or anything under
   `~/.config/`. `write_token`, `lease.session` and `docs` are never shown;
   session ids show by their first 8 characters at most, and never more
-  than half of the id. Environment values are
+  than half of the id. The helper's budget text fields are cleaned of the
+  full session id and of file paths before they are shown. Environment values are
   never logged or returned.
 - **`## Re-run`.** A verify file's `## Re-run` section prints the verify
   sandbox's environment. The server replaces its body with "hidden:

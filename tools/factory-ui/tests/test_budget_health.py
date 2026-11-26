@@ -126,3 +126,24 @@ def test_short_session_id_is_never_shown_whole(factory: Factory) -> None:
     assert data["session"] == "abcd"
     assert data["readings"][0]["session"] == "abcd"
     assert sid.encode() not in res.body
+
+
+def test_helper_diagnostic_never_carries_the_session_or_a_path(
+    factory: Factory,
+) -> None:
+    """The helper's `reading` can quote an OSError naming the usage file."""
+    reading = (
+        "unparsable: [Errno 2] No such file or directory: "
+        f"'/srv/example/factory/usage/{NEWEST_SESSION}.json'"
+    )
+    factory.set_control(
+        "budget",
+        out={"go": True, "why": "usage data unreadable; starting", "reading": reading},
+    )
+    for running in start(factory):
+        res = running.get("/api/budget")
+    assert NEWEST_SESSION.encode() not in res.body
+    assert b"/srv/example" not in res.body
+    got = res.json()["answer"]["reading"]
+    assert got == "unparsable: [Errno 2] No such file or directory: '<path>'"
+    assert res.json()["answer"]["why"] == "usage data unreadable; starting"

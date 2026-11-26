@@ -5,7 +5,7 @@ from Linear, the top-level fields are this Mac's own."""
 from __future__ import annotations
 
 import datetime as dt
-import json
+import math
 import os
 import re
 import stat
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config, paths
-from . import as_dict, as_list, reviews
+from . import as_dict, as_list, loads, reviews
 
 # Never shown: a credential-like token, the session that holds a lease, and
 # the Linear document links of the owner's workspace.
@@ -30,7 +30,7 @@ def _load(root: Path, job: str) -> tuple[dict[str, Any] | None, bool]:
     if read is None:
         return {}, True
     try:
-        doc = json.loads(read.text)
+        doc = loads(read.text)
     except ValueError:
         return None, False
     if not isinstance(doc, dict):
@@ -40,7 +40,11 @@ def _load(root: Path, job: str) -> tuple[dict[str, Any] | None, bool]:
 
 def _epoch(value: Any) -> float | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        try:
+            t = float(value)
+        except OverflowError:
+            return None
+        return t if math.isfinite(t) else None
     if isinstance(value, str) and value:
         try:
             return dt.datetime.fromisoformat(value).timestamp()
@@ -117,7 +121,12 @@ def read_jobs(root: Path, now: float | None = None) -> list[dict[str, Any]]:
     rows = []
     for job in paths.listed_jobs(root):
         doc, readable = _load(root, job)
-        rows.append(_row(job, doc, readable, now))
+        try:
+            rows.append(_row(job, doc, readable, now))
+        except (ValueError, TypeError, OverflowError, AttributeError):
+            # A job.json that parses but holds odd values is this job's
+            # problem only: it shows as unreadable, the others still render.
+            rows.append(_row(job, None, False, now))
     return rows
 
 

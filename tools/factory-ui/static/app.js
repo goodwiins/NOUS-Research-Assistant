@@ -562,11 +562,14 @@
 
   function loadArtifact(key) {
     const ui = state.job;
-    return getJSON("/api/jobs/" + ui.id + "/artifact/" + key).then((res) => {
-      if (state.job !== ui || !onJobPage(ui)) return;
-      ui.texts[key] = res.ok ? res.body : { text: "not written yet", truncated: false };
-      drawJob();
-    });
+    return getJSON("/api/jobs/" + ui.id + "/artifact/" + key)
+      .then((res) => (res.ok ? res.body : { text: "not written yet", truncated: false }))
+      .catch(() => ({ text: "could not reach the server", truncated: false }))
+      .then((text) => {
+        if (state.job !== ui || !onJobPage(ui)) return;
+        ui.texts[key] = text;
+        drawJob();
+      });
   }
 
   function load(refresh) {
@@ -586,7 +589,10 @@
           drawJob();
           return Promise.all([...ui.open].map(loadArtifact));
         })
-        .catch(() => showError("could not reach the server"));
+        .catch(() => {
+          // A failure of a request the user has moved on from stays quiet.
+          if (seq === state.seq) showError("could not reach the server");
+        });
     }
     const url = "/api/" + route.view + (refresh ? "?refresh=1" : "");
     return getJSON(url)
@@ -597,7 +603,9 @@
         data.actions = { refresh: () => load(true) };
         mount(views[route.view](data));
       })
-      .catch(() => showError("could not reach the server"));
+      .catch(() => {
+        if (seq === state.seq) showError("could not reach the server");
+      });
   }
 
   function onHash() {
@@ -622,7 +630,7 @@
     }, FILE_REFRESH_MS);
   }
 
-  root.FactoryUI = { views, fmtAge, parseRoute, _state: state, _drawJob: drawJob };
+  root.FactoryUI = { views, fmtAge, parseRoute, _state: state, _drawJob: drawJob, _load: load };
   if (root.location && root.document.readyState) {
     if (root.document.readyState === "loading") {
       root.document.addEventListener("DOMContentLoaded", start);

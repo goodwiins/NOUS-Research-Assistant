@@ -1,5 +1,4 @@
-"""The one place the server gets the Jobs rows, the backtests block and the
-backtest rows.
+"""The one place the server gets the Jobs rows and the backtests block.
 
 v1 reads files. `F list` and `F stats` write under the factory directory
 (both call the helper's write_targets), so they are not run. Once the helper
@@ -23,12 +22,8 @@ def jobs_rows(root: Path, now: float | None = None) -> list[dict[str, Any]]:
 
 
 def backtests_block(root: Path) -> dict[str, Any]:
-    """The `F stats` verify.backtests block, under its key names."""
-    return verifier.count_backtests(root)
-
-
-def backtest_rows(root: Path) -> dict[str, Any]:
-    """The rows of `verify-backtest.jsonl` the Verifier view lists:
-    {"rows", "skipped", "truncated"}. `F stats` does not print rows, so this
-    stays a file read after the switch."""
-    return verifier.backtest_rows(root)
+    """The `F stats` verify.backtests block, under its key names. It may
+    carry one extra key, `listing` ({"rows", "skipped", "truncated"}), the
+    rows the Verifier view lists; the server takes it off the block. A source
+    without rows (F stats prints none) leaves it out and the list is empty."""
+    return verifier.backtests(root)

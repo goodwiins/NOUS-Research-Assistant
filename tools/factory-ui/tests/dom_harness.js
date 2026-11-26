@@ -122,6 +122,33 @@ if (view === "stale-draw") {
   process.stdout.write(JSON.stringify({ elsewhere, onPage }));
   process.exit(0);
 }
+if (view === "stale-error") {
+  // Jobs is requested, the user moves to Parallel, Parallel renders, and only
+  // then does the Jobs request fail: the Parallel view must stay.
+  const ui = globalThis.FactoryUI;
+  const pending = {};
+  globalThis.fetch = (url) =>
+    new Promise((resolve, reject) => {
+      pending[url] = { resolve, reject };
+    });
+  ui._state.route = { view: "jobs" };
+  const first = ui._load(false);
+  ui._state.route = { view: "parallel" };
+  const second = ui._load(false);
+  pending["/api/parallel"].resolve({ ok: true, status: 200, json: () => Promise.resolve(data) });
+  second
+    .then(() => {
+      pending["/api/jobs"].reject(new Error("connection reset"));
+      return first;
+    })
+    .then(() => {
+      const text = mountPoints.app.textContent;
+      process.stdout.write(
+        JSON.stringify({ parallel: text.includes("Parallel jobs"), error: text.includes("could not reach") }),
+      );
+    });
+  return;
+}
 let node;
 if (view === "markdown") node = globalThis.FactoryRender.markdown(data.text);
 else if (view === "raw") node = globalThis.FactoryRender.raw(data.text);

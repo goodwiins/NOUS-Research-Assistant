@@ -12,7 +12,9 @@ from conftest import (
     MERGED,
     NO_CACHE,
     PR_OPEN,
+    Factory,
     Running,
+    start,
 )
 from dom import render
 
@@ -77,3 +79,42 @@ def test_rendered_jobs_view(running: Running, tmp_path: Path) -> None:
     # Ages are shown as durations, PR "-" when absent.
     assert "2h" in text and "9d" in text and "5m" in text
     assert ">-<" in html
+
+
+def test_odd_values_make_one_job_unreadable_not_the_list(
+    factory: Factory,
+) -> None:
+    """NaN, Infinity or a number that overflows: that job shows unreadable,
+    the healthy jobs and the Verifier still answer."""
+    jobs = factory.root / "jobs"
+    bad = {
+        "2026-01-08-example-nan": '{"cache": {"phase": "build", "created": NaN}}',
+        "2026-01-09-example-inf": '{"cache": {"phase": "build"}, "cache_at": 1e400}',
+        "2026-01-10-example-bigint": '{"cache": {"phase": "build", "created": '
+        + "9" * 400
+        + "}}",
+    }
+    for job, raw in bad.items():
+        (jobs / job).mkdir()
+        (jobs / job / "job.json").write_text(raw)
+    for running in start(factory):
+        res = running.get("/api/jobs")
+        assert res.status == 200
+        rows = {r["id"]: r for r in res.json()["rows"]}
+        assert rows["2026-01-08-example-nan"]["group"] == "unreadable"
+        assert rows["2026-01-09-example-inf"]["group"] == "unreadable"
+        assert rows["2026-01-10-example-bigint"]["group"] == "cached"
+        assert rows["2026-01-10-example-bigint"]["age_s"] is None
+        assert rows[ACTIVE]["group"] == "cached"
+        assert b"NaN" not in res.body and b"Infinity" not in res.body
+        assert running.get("/api/verifier").status == 200
+        for job in bad:
+            assert running.get(f"/api/jobs/{job}").status == 200
+
+
+def test_failed_old_request_does_not_replace_the_new_view(
+    running: Running, tmp_path: Path
+) -> None:
+    data = running.get("/api/parallel").json()
+    out = render("stale-error", data, tmp_path)
+    assert out == {"parallel": True, "error": False}

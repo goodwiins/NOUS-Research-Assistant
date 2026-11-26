@@ -90,7 +90,11 @@ def _open_under(root: Path, path: Path) -> int | None:
             nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = nxt
-        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        # O_NONBLOCK: a named pipe opens at once and fails the regular-file
+        # check instead of blocking until a writer appears.
+        return os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd
+        )
     except OSError:
         return None
     finally:

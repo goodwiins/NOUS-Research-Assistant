@@ -7,13 +7,13 @@ environment.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
 from typing import Any
 
 from .. import config, paths
+from . import loads
 
 _READING = re.compile(r"^[A-Za-z0-9_-]{1,80}\.json$")
 WINDOWS = tuple(config.LIMITS)
@@ -54,7 +54,7 @@ def _readings(root: Path) -> list[tuple[str, dict[str, Any]]]:
         if read is None:
             continue
         try:
-            data = json.loads(read.text)
+            data = loads(read.text)
             seen = int(data.get("seen_at") or 0)
             limits = data.get("rate_limits") or {}
         except (ValueError, AttributeError, TypeError):
@@ -97,11 +97,25 @@ def recent_readings(root: Path, now: float) -> list[dict[str, Any]]:
     return out
 
 
-def answer(data: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The `F budget` answer, field by field."""
+_PATH = re.compile(r"(?<![\w.])/[^\s'\"]+")  # an absolute path
+
+
+def _scrub(value: Any, sid: str | None) -> Any:
+    """A helper diagnostic without the full session id or a file path (an
+    OSError names the usage file, whose name is the session id)."""
+    if not isinstance(value, str):
+        return value
+    if sid:
+        value = value.replace(sid, short(sid) + "...")
+    return _PATH.sub("<path>", value)
+
+
+def answer(data: dict[str, Any] | None, sid: str | None) -> dict[str, Any] | None:
+    """The `F budget` answer, field by field. `sid`: the session id the run
+    used, removed from every text field."""
     if data is None:
         return None
-    out = {k: data[k] for k in ANSWER_FIELDS if k in data}
+    out = {k: _scrub(data[k], sid) for k in ANSWER_FIELDS if k in data}
     usage = data.get("usage")
     if isinstance(usage, dict):
         out["usage"] = {w: _window(usage.get(w)) for w in WINDOWS}

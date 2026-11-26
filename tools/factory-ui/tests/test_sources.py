@@ -31,10 +31,10 @@ CANNED_BLOCK = {
     "no_match": 0,
     "owner_read": 3,
 }
-CANNED_ROWS = {
+CANNED_LISTING = {
     "rows": [{"job": "2026-01-21-canned-backtest", "verdict": "PASS"}],
-    "skipped": 0,
-    "truncated": False,
+    "skipped": 1,
+    "truncated": True,
 }
 
 
@@ -46,10 +46,9 @@ def test_routes_use_only_the_sources(
 
     monkeypatch.setattr(sources, "jobs_rows", lambda root: [dict(CANNED_ROW)])
     monkeypatch.setattr(sources, "backtests_block", lambda root: dict(CANNED_BLOCK))
-    monkeypatch.setattr(sources, "backtest_rows", lambda root: dict(CANNED_ROWS))
     monkeypatch.setattr(jobs_reader, "read_jobs", boom)
     monkeypatch.setattr(verifier_reader, "count_backtests", boom)
-    monkeypatch.setattr(verifier_reader, "backtest_rows", boom)
+    monkeypatch.setattr(verifier_reader, "backtests", boom)
     opened: list[str] = []
     real_read = paths.safe_read
 
@@ -65,7 +64,8 @@ def test_routes_use_only_the_sources(
     assert ver.status == 200
     body = ver.json()
     assert body["backtests"] == CANNED_BLOCK
-    assert body["rows"] == CANNED_ROWS["rows"]
+    # A block without rows (as F stats would give) lists none.
+    assert body["rows"] == []
     assert body["skipped"] == 0 and body["truncated"] is False
     assert "job.json" not in opened
     assert "verify-backtest.jsonl" not in opened
@@ -83,12 +83,27 @@ def test_routes_use_only_the_sources(
     ]
 
 
+def test_block_listing_supplies_the_rows(
+    running: Running, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows come from the block source's optional `listing` key, which the
+    server takes off the served block."""
+    block = dict(CANNED_BLOCK, listing=dict(CANNED_LISTING))
+    monkeypatch.setattr(sources, "backtests_block", lambda root: dict(block))
+    body = running.get("/api/verifier").json()
+    assert body["backtests"] == CANNED_BLOCK
+    assert body["rows"] == CANNED_LISTING["rows"]
+    assert body["skipped"] == 1 and body["truncated"] is True
+
+
 def test_sources_default_to_the_file_readers(running: Running) -> None:
     root = running.factory.root
     now = 2_000_000_000.0
     assert sources.jobs_rows(root, now=now) == jobs_reader.read_jobs(root, now=now)
-    assert sources.backtests_block(root) == verifier_reader.count_backtests(root)
-    assert sources.backtest_rows(root) == verifier_reader.backtest_rows(root)
+    block = sources.backtests_block(root)
+    listing = block.pop("listing")
+    assert block == verifier_reader.count_backtests(root)
+    assert len(listing["rows"]) == 6 and listing["skipped"] == 2
 
 
 def test_runner_names_no_list_stats_or_show() -> None:

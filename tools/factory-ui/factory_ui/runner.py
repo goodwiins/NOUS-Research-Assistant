@@ -7,7 +7,6 @@ and run() refuses any other name before it spawns anything.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import signal
@@ -20,6 +19,7 @@ from typing import IO, Any
 
 from . import config
 from .cache import CommandCache
+from .readers import loads
 
 _F = str(config.FACTORY_ROOT / "bin" / "factory")
 ALLOWED: dict[str, tuple[str, str]] = {
@@ -116,7 +116,7 @@ def run(
         out["error"] = "output larger than 1 MB"
         return out
     try:
-        data = json.loads(stdout.text())
+        data = loads(stdout.text())
     except ValueError:
         out["error"] = "output is not JSON"
         return out

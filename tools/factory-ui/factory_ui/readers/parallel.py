@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
 
 from .. import config, paths
+from . import loads
 from .verifier import valid_date
 
 LOG_KEYS = ("at", "host", "mode", "kind", "job")
@@ -45,7 +45,7 @@ def view(root: Path) -> dict[str, Any]:
         if not line.strip():
             continue
         try:
-            r = json.loads(line)
+            r = loads(line)
         except ValueError:
             skipped += 1
             continue

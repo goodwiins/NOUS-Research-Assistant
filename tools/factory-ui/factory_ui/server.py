@@ -90,13 +90,14 @@ class App:
 
     def verifier(self) -> dict[str, Any]:
         mode, since = verifier.verify_mode(self.root)
-        bt = sources.backtest_rows(self.root)
+        block = dict(sources.backtests_block(self.root))
+        listing = block.pop("listing", None) or {}
         return {
             "mode": {"mode": mode, "since": since},
-            "backtests": sources.backtests_block(self.root),
-            "rows": bt["rows"],
-            "skipped": bt["skipped"],
-            "truncated": bt["truncated"],
+            "backtests": block,
+            "rows": listing.get("rows", []),
+            "skipped": listing.get("skipped", 0),
+            "truncated": listing.get("truncated", False),
             "rounds": verifier.round_rows(sources.jobs_rows(self.root)),
         }
 
@@ -108,7 +109,7 @@ class App:
         )
         return {
             "command": _command(res),
-            "answer": budget.answer(res.get("data")),
+            "answer": budget.answer(res.get("data"), res.get("session")),
             "session": budget.short(res["session"]) if res.get("session") else None,
             "limits": dict(config.LIMITS),
             "readings": budget.recent_readings(self.root, time.time()),

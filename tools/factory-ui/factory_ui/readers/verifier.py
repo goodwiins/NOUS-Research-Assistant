@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import re
 from pathlib import Path
 from typing import Any
 
 from .. import paths
-from . import as_list
+from . import as_list, loads
 
 ROW_FIELDS = (
     "job",
@@ -57,12 +56,24 @@ def _read(root: Path) -> paths.Read | None:
     return paths.safe_read(root, root / "verify-backtest.jsonl")
 
 
-def _lines(root: Path) -> list[str]:
+def backtests(root: Path) -> dict[str, Any]:
+    """The backtests block (F stats key names) recomputed from
+    `verify-backtest.jsonl`, plus the UI's own `listing` key with the rows
+    the Verifier view lists. One read serves both."""
     read = _read(root)
-    return read.text.splitlines() if read else []
+    lines = read.text.splitlines() if read else []
+    block = _count(lines)
+    block["listing"] = _rows(lines, bool(read and read.truncated))
+    return block
 
 
 def count_backtests(root: Path) -> dict[str, Any]:
+    """The `backtests` block alone, under the F stats key names."""
+    read = _read(root)
+    return _count(read.text.splitlines() if read else [])
+
+
+def _count(lines: list[str]) -> dict[str, Any]:
     """The `backtests` block of `F stats`, ported line by line from the
     helper's verify_stats over the same file, with its key names."""
     bt: dict[str, Any] = {
@@ -75,9 +86,9 @@ def count_backtests(root: Path) -> dict[str, Any]:
         "no_match": 0,
         "owner_read": 0,
     }
-    for line in _lines(root):
+    for line in lines:
         try:
-            r = json.loads(line)
+            r = loads(line)
         except ValueError:
             continue
         if not isinstance(r, dict):
@@ -104,17 +115,16 @@ def count_backtests(root: Path) -> dict[str, Any]:
     return bt
 
 
-def backtest_rows(root: Path) -> dict[str, Any]:
+def _rows(lines: list[str], truncated: bool) -> dict[str, Any]:
     """The backtest rows with the shown fields; a line that is not a JSON
     object is skipped and counted. `truncated`: the file is over the 2 MB
     read cap, so rows and the recomputed block cover its start only."""
-    read = _read(root)
     rows, skipped = [], 0
-    for line in read.text.splitlines() if read else []:
+    for line in lines:
         if not line.strip():
             continue
         try:
-            r = json.loads(line)
+            r = loads(line)
         except ValueError:
             skipped += 1
             continue
@@ -125,7 +135,7 @@ def backtest_rows(root: Path) -> dict[str, Any]:
     return {
         "rows": rows,
         "skipped": skipped,
-        "truncated": bool(read and read.truncated),
+        "truncated": truncated,
     }
 
 

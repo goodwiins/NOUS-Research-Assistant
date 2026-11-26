@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -110,3 +111,17 @@ def test_symlinked_directory_below_root_is_never_followed(tmp_path: Path) -> Non
     assert paths.safe_read(root, root / "jobs" / "to-outside" / "spec.md") is None
     assert paths.safe_read(root, root / "jobs" / "to-inside" / "spec.md") is None
     assert paths.safe_read(root, outside / "spec.md") is None
+
+
+def test_named_pipe_artifact_is_refused_without_blocking(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "jobs" / "2026-01-01-x").mkdir(parents=True)
+    fifo = root / "jobs" / "2026-01-01-x" / "spec.md"
+    os.mkfifo(fifo)
+    result: list = []
+    t = threading.Thread(target=lambda: result.append(paths.safe_read(root, fifo)))
+    t.daemon = True
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "opening a named pipe blocked"
+    assert result == [None]
