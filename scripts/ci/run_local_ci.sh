@@ -12,8 +12,17 @@
 # directory-docs lint, mypy on added files, the alembic head check, the
 # API-contract gates (OpenAPI snapshot + generated TS types), the targeted
 # evidence migration-delta probe (blocking when it runs; visible skip when
-# PostgreSQL is unavailable), and the unit suite. The truly-empty Alembic
-# replay remains a visible advisory measurement of legacy-chain health.
+# PostgreSQL is unavailable), the backend architecture tests (even with
+# --skip-tests), and the unit suite run from the repo root as CI runs it.
+# --frontend adds type-check, the lint ratchets, and vitest with the coverage
+# ratchet. The Trigger.dev tsc gate and node tests run with --frontend or when
+# src/trigger, tests/trigger or the files they read changed: the task-caller
+# trees the path contract scans (frontend/app, frontend/src, src, terminal/src,
+# packages) and frontend/package.json, which pins the tsc version. The node
+# tests fail when tests/trigger/*.test.mjs matches no file. The truly-empty
+# Alembic replay remains a visible advisory measurement of legacy-chain health.
+# Untracked (not yet `git add`-ed) files count as changed, so a new file is
+# ratcheted before it is committed.
 #
 # The three contract gates, and when each one runs:
 #   * OpenAPI snapshot drift        — ALWAYS (offline: in-memory SQLite + placeholder env)
@@ -72,12 +81,17 @@ warn() { printf '\033[33m%s\033[0m\n' "$1"; }
 # untracked files (a brand-new migration or a freshly generated api.d.ts is
 # untracked until `git add`, and a trigger that misses it would silently skip
 # the gate it is meant to arm). Prints "<unresolved-base>" when the base does
-# not resolve, so conditional gates fire instead of quietly passing.
+# not resolve, so conditional gates fire instead of quietly passing. Each git
+# call is captured on its own so a failure of either is the function's status:
+# in a `{ a; b; } | sort` group only the last command's status survives.
 changed_paths() {
   if [ -z "$MERGE_BASE" ]; then echo "<unresolved-base>"; return 0; fi
+  local diffed untracked
+  diffed="$(git diff --name-only "$MERGE_BASE" -- "$@")" || return
+  untracked="$(git ls-files --others --exclude-standard -- "$@")" || return
   {
-    git diff --name-only "$MERGE_BASE" -- "$@"
-    git ls-files --others --exclude-standard -- "$@"
+    if [ -n "$diffed" ]; then printf '%s\n' "$diffed"; fi
+    if [ -n "$untracked" ]; then printf '%s\n' "$untracked"; fi
   } | sort -u
 }
 
@@ -405,18 +419,89 @@ else
   fi
 fi
 
+# Backend pytest the way the unit-tests job runs it: bare `pytest` from the
+# repo root with -c backend/pytest.ini and the job's placeholder env. Running
+# from backend/ (or `python -m pytest`, which also puts the cwd on sys.path)
+# hides import-path bugs in tests that start subprocesses; -P (Python 3.11+,
+# the CI version) keeps sys.path the way the console script sees it.
+BACKEND_UNIT_MARKERS="unit or not (integration or e2e or slow)"
+backend_pytest() {
+  ENVIRONMENT=testing \
+    DATABASE_URL="sqlite:///:memory:" \
+    AZURE_OPENAI_CHAT_ENDPOINT="https://example.invalid" \
+    AZURE_OPENAI_CHAT_API_KEY="test-key-not-real" \
+    AZURE_OPENAI_CHAT_DEPLOYMENT_NAME="test-deployment" \
+    AZURE_OPENAI_CHAT_API_VERSION="2024-02-01" \
+    AZURE_OPENAI_ENDPOINT="https://example.invalid" \
+    AZURE_OPENAI_API_KEY="test-key-not-real" \
+    NEXT_PUBLIC_SUPABASE_URL="http://localhost:8999" \
+    SUPABASE_JWT_SECRET="ci-test-supabase-jwt-secret-not-for-prod-use" \
+    "$PY" -P -m pytest "$@" -c backend/pytest.ini -m "$BACKEND_UNIT_MARKERS" \
+    -q -p no:cacheprovider --no-cov
+}
+
+# Static architecture contracts (no dangling create_task, router/service
+# boundaries, ...). CI runs them inside the unit suite; they are cheap and
+# easy to break without noticing, so they run here even with --skip-tests.
+step "Backend architecture tests (blocking, runs even with --skip-tests)"
+backend_pytest backend/tests/unit/architecture
+check $? "backend architecture tests"
+
 if [ "$SKIP_TESTS" -eq 0 ]; then
   step "NOUS workflow contract tests (blocking)"
   "$PY" -m pytest tests/unit/scripts/ --confcutdir=tests/unit/scripts \
     -q -p no:cacheprovider --no-cov
   check $? "NOUS workflow contract tests"
 
-  step "Unit tests (blocking)"
-  ( cd backend && "$PY" -m pytest tests/ -c pytest.ini \
-    -m "unit or not (integration or e2e or slow)" \
-    -q -p no:cacheprovider --no-cov )
+  step "Unit tests (blocking, from the repo root like CI)"
+  # The architecture tests already ran above; everything else CI selects.
+  backend_pytest backend/tests/ --ignore=backend/tests/unit/architecture
   check $? "pytest"
+else
+  skipped "NOUS workflow contract tests + backend unit tests" "--skip-tests"
 fi
+
+# Mirrors the frontend-tests job's two Trigger.dev steps (GOO-764). CI runs
+# them on every full-profile run; here they run with --frontend or whenever a
+# path they read changed: the task code, its tests, the OpenAPI snapshot the
+# path contract checks, the task-caller trees that contract scans (its
+# TASK_CALLER_DIRS), the root TypeScript/dependency config, or
+# frontend/package.json, whose typescript pin is the tsc that runs.
+TRIGGER_CHANGES="$(changed_paths src tests/trigger backend/openapi.json \
+  frontend/app frontend/src terminal/src packages frontend/package.json \
+  tsconfig.json trigger.config.ts package.json pnpm-lock.yaml)" || check 1 "list changed Trigger.dev paths"
+if [ "$DO_FRONTEND" -eq 1 ] || [ -n "$TRIGGER_CHANGES" ]; then
+  if [ ! -x frontend/node_modules/.bin/tsc ] && [ ! -x node_modules/.bin/tsc ]; then
+    warn "  node_modules are missing; run pnpm install --frozen-lockfile"
+    check 1 "Trigger.dev gates (no node_modules)"
+  else
+    step "Trigger.dev type-check (blocking, runs even with --skip-tests)"
+    ( cd frontend && pnpm exec tsc --noEmit -p ../tsconfig.json )
+    check $? "Trigger.dev tsc"
+    if [ "$SKIP_TESTS" -eq 0 ]; then
+      step "Trigger.dev node tests (blocking)"
+      compgen -G 'tests/trigger/*.test.mjs'
+      check $? "Trigger.dev test files (tests/trigger/*.test.mjs)"
+      node --experimental-transform-types --experimental-test-module-mocks --no-warnings --test tests/trigger/*.test.mjs
+      check $? "Trigger.dev node tests"
+    else
+      skipped "Trigger.dev node tests" "--skip-tests"
+    fi
+  fi
+else
+  skipped "Trigger.dev type-check + node tests" "no --frontend and no Trigger.dev path changed"
+fi
+
+# Removes only the directory this run created with `mktemp -d` for the ESLint
+# report; the variable is empty before that and after cleanup.
+ESLINT_REPORT_DIR=""
+# shellcheck disable=SC2329  # invoked indirectly, by the traps below
+_remove_eslint_report_dir() {
+  if [ -n "$ESLINT_REPORT_DIR" ] && [ -d "$ESLINT_REPORT_DIR" ]; then
+    rm -rf -- "$ESLINT_REPORT_DIR"
+  fi
+  ESLINT_REPORT_DIR=""
+}
 
 if [ "$DO_FRONTEND" -eq 1 ]; then
   step "Frontend type-check + quality ratchet (blocking) + full lint (advisory)"
@@ -427,7 +512,20 @@ if [ "$DO_FRONTEND" -eq 1 ]; then
   # used by .github/workflows/test-pipeline.yml. ESLint returns nonzero when
   # the known full-tree debt is present, so its exit status is intentionally
   # not used as the ratchet verdict; the comparator below owns that decision.
-  ESLINT_REPORT="$(mktemp "${TMPDIR:-/tmp}/run_local_ci-eslint.XXXXXX.json")"
+  #
+  # The report lives in a fresh `mktemp -d` directory: the Xs must be the
+  # last characters of the template, because BSD/macOS mktemp uses a
+  # template with a suffix after the Xs literally (GOO-771). The trap removes the
+  # directory on every exit path, including Ctrl-C during the ESLint run.
+  ESLINT_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/run_local_ci-eslint.XXXXXX")"
+  ESLINT_REPORT=""
+  if [ -n "$ESLINT_REPORT_DIR" ] && [ -d "$ESLINT_REPORT_DIR" ]; then
+    trap _remove_eslint_report_dir EXIT
+    trap '_remove_eslint_report_dir; exit 130' INT
+    trap '_remove_eslint_report_dir; exit 143' TERM
+    ESLINT_REPORT="$ESLINT_REPORT_DIR/eslint-report.json"
+    : > "$ESLINT_REPORT"
+  fi
   if [ -z "$ESLINT_REPORT" ] || [ ! -f "$ESLINT_REPORT" ]; then
     warn "  could not create a temporary ESLint JSON report"
     check 1 "frontend quality ratchet (report unavailable)"
@@ -441,8 +539,9 @@ if [ "$DO_FRONTEND" -eq 1 ]; then
     check $? "frontend quality ratchet"
     "$PY" scripts/ci/check_tsconfig_exclusions.py --base "$BASE"
     check $? "tsconfig exclusion ratchet"
-    rm -f -- "$ESLINT_REPORT"
   fi
+  _remove_eslint_report_dir
+  trap - EXIT INT TERM
 
   # Preserve the complete human-readable lint output for diagnosis, but keep
   # the known baseline debt advisory just as the GitHub workflow does.
@@ -452,6 +551,26 @@ if [ "$DO_FRONTEND" -eq 1 ]; then
     printf '\033[32m  ✓ pnpm lint (advisory)\033[0m\n'
   else
     warn "  ⚠ pnpm lint (advisory) exited $FULL_LINT_RC; full lint output is shown above"
+  fi
+
+  # Mirrors the frontend-tests job: `pnpm test:coverage` with CI=true (same
+  # retries and reporters), then the blocking coverage ratchet against the
+  # floors in frontend/quality-baseline.json. The old summary is removed first
+  # so a failed or crashed run can never be ratcheted on stale numbers.
+  if [ "$SKIP_TESTS" -eq 0 ]; then
+    step "Frontend unit tests + coverage ratchet (blocking)"
+    COVERAGE_SUMMARY="frontend/coverage/coverage-summary.json"
+    rm -f -- "$COVERAGE_SUMMARY"
+    ( cd frontend && CI=true pnpm test:coverage ); check $? "pnpm test:coverage"
+    if [ -f "$COVERAGE_SUMMARY" ]; then
+      node scripts/ci/check_frontend_coverage.mjs "$COVERAGE_SUMMARY"
+      check $? "frontend coverage ratchet"
+    else
+      warn "  $COVERAGE_SUMMARY was not written; the coverage ratchet cannot run"
+      check 1 "frontend coverage ratchet (no coverage summary)"
+    fi
+  else
+    skipped "pnpm test:coverage + frontend coverage ratchet" "--skip-tests"
   fi
 fi
 

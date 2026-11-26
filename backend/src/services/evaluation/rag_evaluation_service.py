@@ -135,7 +135,7 @@ class RAGEvaluationService:
         thread so they do not block the event loop (GOO-643 / API-5).
         """
         return await to_thread_finish_on_cancel(
-            self._create_evaluation_job_sync, request, db
+            self._create_evaluation_job_sync, request, db, guard_session=db
         )
 
     def _create_evaluation_job_sync(

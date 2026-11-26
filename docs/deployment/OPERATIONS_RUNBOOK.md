@@ -27,7 +27,7 @@
 - **Vector/RAG Search**: DO Knowledge Base (GradientAI, `kbaas.do-ai.run`) behind `DO_KB_ENABLED` flag (off by default); effective retrieval falls back to PostgreSQL full-text search
 - **Cache**: Redis — DO Managed Redis (external, not in-cluster)
 - **Database**: PostgreSQL — Supabase managed (not in-cluster)
-- **Processing**: Celery workers (backend tasks) + Trigger.dev cloud (durable orchestration); both deploy from `main` branch only
+- **Processing**: Celery workers (backend tasks) + Trigger.dev cloud (durable orchestration); Celery workers deploy through the AWS Argo CD release path from `develop`, and Trigger.dev tasks deploy by hand with `pnpm trigger:deploy`
 - **File Storage**: DO Spaces (object storage)
 - **Secrets**: Infisical operator
 - **Auth**: Supabase GoTrue (no self-hosted auth)

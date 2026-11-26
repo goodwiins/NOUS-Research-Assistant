@@ -9,14 +9,14 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { TrendData } from '@/types/monitoring';
 import {
-  ArrowTrendingUpIcon,
-  ArrowTrendingDownIcon,
-  MinusIcon,
-  InformationCircleIcon,
-  ExclamationTriangleIcon,
-  CheckCircleIcon,
-  XCircleIcon,
-} from '@heroicons/react/24/outline';
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  Info,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
+} from 'lucide-react';
 
 export interface MetricCardProps {
   title: string;
@@ -235,10 +235,10 @@ const MetricCard: React.FC<MetricCardProps> = ({
 
     const TrendIcon =
       trend.direction === 'up'
-        ? ArrowTrendingUpIcon
+        ? TrendingUp
         : trend.direction === 'down'
-          ? ArrowTrendingDownIcon
-          : MinusIcon;
+          ? TrendingDown
+          : Minus;
     const trendColor =
       trend.direction === 'up'
         ? 'text-green-600'
@@ -276,7 +276,7 @@ const MetricCard: React.FC<MetricCardProps> = ({
       <Card className={cn('border-red-200 bg-red-50', className)}>
         <CardContent className={cn(sizeClasses.card)}>
           <div className="flex items-center space-x-2">
-            <XCircleIcon className="h-5 w-5 text-red-500" />
+            <XCircle className="h-5 w-5 text-red-500" />
             <div>
               <div className={cn('font-medium', colors.text)}>Error</div>
               <div className="text-sm text-red-600">{error}</div>

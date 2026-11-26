@@ -11,6 +11,11 @@ import {
 import type { ChatPageMessage } from '@/components/chat/shared/cloudMessageView';
 import { makeChatPageMessage } from '@/test/chatMessageFactory';
 import { ChatRuntimeProvider } from '../ChatRuntimeProvider';
+import {
+  HitlApprovalRenderer,
+  HITL_APPROVAL_TOOL,
+} from '../HitlApprovalToolUI';
+import { SearchDocumentsToolRenderer } from '../toolUIs';
 
 const messages: ChatPageMessage[] = [
   makeChatPageMessage({ id: 'u1', role: 'user', content: 'hi', timestamp: 1 }),
@@ -37,6 +42,16 @@ function IdentityProbe() {
     thread.messages.map((message) => message.id).join(',')
   );
   return <div data-testid="identity-probe">{ids}</div>;
+}
+
+function ToolUIProbe({
+  onToolUIs,
+}: {
+  onToolUIs: (toolUIs: unknown) => void;
+}): null {
+  const toolUIs = useAuiState((s) => s.tools.toolUIs);
+  onToolUIs(toolUIs);
+  return null;
 }
 
 function CancelProbe() {
@@ -81,6 +96,37 @@ describe('ChatRuntimeProvider', () => {
     );
 
     expect(screen.getByTestId('probe')).toHaveTextContent('2:true');
+  });
+
+  it('registers the bespoke tool renderers with their display mode', async () => {
+    let latest: unknown;
+    render(
+      <ChatRuntimeProvider
+        messages={messages}
+        isRunning={false}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+      >
+        <ToolUIProbe onToolUIs={(toolUIs) => (latest = toolUIs)} />
+      </ChatRuntimeProvider>
+    );
+
+    await waitFor(() =>
+      expect(latest).toEqual({
+        search_documents: [
+          expect.objectContaining({
+            render: SearchDocumentsToolRenderer,
+            standalone: false,
+          }),
+        ],
+        [HITL_APPROVAL_TOOL]: [
+          expect.objectContaining({
+            render: HitlApprovalRenderer,
+            standalone: true,
+          }),
+        ],
+      })
+    );
   });
 
   it('invokes onCancel when the runtime cancels a run', async () => {

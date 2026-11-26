@@ -30,6 +30,7 @@ from src.services.quality.user_behavior_service import (
     analytics_window,
     user_behavior_service,
 )
+from src.utils.csv_safety import needs_formula_quote
 
 logger = logging.getLogger(__name__)
 
@@ -68,17 +69,14 @@ def _naive_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-# A spreadsheet runs a cell that starts with one of these as a formula.
-_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
-
-
 def _csv_cell(value: Any) -> Any:
     """Make user-controlled text (titles, names) literal in a spreadsheet.
 
-    Only strings are prefixed, so a negative number stays a number (GOO-691).
+    A number, or a string that is strictly a plain number, stays a number
+    (GOO-691, GOO-753).
     """
-    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
-        return "'" + value
+    if needs_formula_quote(value):
+        return "'" + str(value)
     return value
 
 
@@ -296,7 +294,8 @@ async def get_user_behavior_analytics(
         # different org. Guard against None==None: a null-org caller must not
         # read other null-org users' behavior.
         target_user = await to_thread_finish_on_cancel(
-            lambda: db.query(UserModel).filter(UserModel.id == user_id).first()
+            lambda: db.query(UserModel).filter(UserModel.id == user_id).first(),
+            guard_session=db,
         )
         if (
             not current_user.organization_id
@@ -542,7 +541,8 @@ async def get_organization_user_behavior(
                     "cutoff_date": datetime.utcnow() - timedelta(days=90),
                     "limit": limit * 2,  # Get more to filter
                 },
-            ).fetchall()
+            ).fetchall(),
+            guard_session=db,
         )
 
         user_analytics = []
@@ -737,7 +737,8 @@ async def generate_behavior_report(
             target_user = await to_thread_finish_on_cancel(
                 lambda: db.query(UserModel)
                 .filter(UserModel.id == report_request.user_id)
-                .first()
+                .first(),
+                guard_session=db,
             )
             if (
                 not current_user.organization_id
@@ -836,6 +837,7 @@ async def export_behavior_data(
                 limit=500,
                 start_date=start_date,
                 end_date=end_date,
+                guard_session=db,
             )
 
         data: Dict[str, Any] = (

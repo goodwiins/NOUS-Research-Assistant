@@ -3,18 +3,18 @@
  * Entity detail view with role-based access control.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Edit,
   Clock,
   CheckCircle,
   FileText,
-  Plus,
   Trash2,
   Info,
   Network,
   Code2,
   Database,
+  AlertCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -39,8 +39,11 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Entity, GraphEdge } from '@/types/entity';
-import { entityService } from '@/services/entityService';
 import { useEntityPermissions } from '@/hooks/useEntityPermissions';
+import {
+  useDeleteEntityRelationship,
+  useEntityRelationships,
+} from '@/hooks/useEntityRelationships';
 import { NeighborhoodExplorer } from './NeighborhoodExplorer';
 import { formatEntityType, entityTypeBadgeClass } from './entityType';
 import { cn } from '@/lib/utils';
@@ -63,43 +66,24 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
   onClose,
   onEntityClick,
 }) => {
-  const { canCreate, canEdit, canDelete } = useEntityPermissions();
-  const [relationships, setRelationships] = useState<GraphEdge[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { canEdit, canDelete } = useEntityPermissions();
+  // Relationships come only from the query hook, keyed by entity id. A save
+  // (GOO-794) or a delete invalidates it, so the open dialog refetches.
+  const relationshipsQuery = useEntityRelationships(entity?.id);
+  const relationships = relationshipsQuery.data ?? [];
+  const deleteRelationship = useDeleteEntityRelationship();
+  const deleting = deleteRelationship.isPending;
   const [relationshipToDelete, setRelationshipToDelete] =
     useState<GraphEdge | null>(null);
-  const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    if (entity?.id) {
-      fetchRelationships();
-    }
-  }, [entity?.id]);
-
-  const fetchRelationships = async () => {
-    try {
-      setLoading(true);
-      const response = await entityService.getEntityRelationships(entity.id);
-      setRelationships(response);
-    } catch (error) {
-      console.error('Error fetching relationships:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleConfirmDeleteRelationship = async () => {
+  const handleConfirmDeleteRelationship = async (): Promise<void> => {
     if (!relationshipToDelete) return;
 
     try {
-      setDeleting(true);
-      await entityService.deleteRelationship(relationshipToDelete.id);
-      await fetchRelationships();
+      await deleteRelationship.mutateAsync(relationshipToDelete.id);
       setRelationshipToDelete(null);
     } catch (error) {
       console.error('Error deleting relationship:', error);
-    } finally {
-      setDeleting(false);
     }
   };
 
@@ -373,22 +357,9 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
                 />
                 Relationships
               </CardTitle>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!canCreate}
-                className="h-7 text-xs hover:text-primary hover:bg-primary/10 disabled:opacity-30 disabled:cursor-not-allowed"
-                title={
-                  !canCreate ? 'Admin access required' : 'Add relationship'
-                }
-              >
-                <Plus aria-hidden="true" className="h-3.5 w-3.5 mr-1.5" />
-                Add relationship
-                {!canCreate && <span className="ml-1 opacity-80">(admin)</span>}
-              </Button>
             </CardHeader>
             <CardContent className="p-0">
-              {loading ? (
+              {relationshipsQuery.isPending ? (
                 <div
                   className="p-8 space-y-3"
                   role="status"
@@ -400,6 +371,27 @@ export const EntityDetail: React.FC<EntityDetailProps> = ({
                       className="h-12 bg-muted/50 border border-border rounded-md animate-pulse"
                     ></div>
                   ))}
+                </div>
+              ) : relationshipsQuery.isError ? (
+                <div
+                  className="text-center py-12 flex flex-col items-center gap-3"
+                  role="alert"
+                >
+                  <AlertCircle
+                    aria-hidden="true"
+                    className="w-8 h-8 text-destructive opacity-60"
+                  />
+                  <p className="text-sm text-muted-foreground">
+                    Couldn&apos;t load relationships
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void relationshipsQuery.refetch()}
+                    disabled={relationshipsQuery.isFetching}
+                  >
+                    Try again
+                  </Button>
                 </div>
               ) : relationships.length === 0 ? (
                 <div className="text-center py-12 flex flex-col items-center gap-3">

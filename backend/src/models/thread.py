@@ -108,6 +108,7 @@ class Thread(BaseModel):
             use_alter=True,
         ),
         nullable=True,
+        index=True,
     )
 
     # Database indexes for performance optimization

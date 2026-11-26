@@ -189,6 +189,7 @@ LEAF_TXN: Dict[str, Dict[str, FrozenSet[str]]] = {
     },
     "thread_service": {
         "get_thread_detail": frozenset(),  # selected-branch read, caller owns session
+        "get_thread_with_recent_messages": frozenset(),  # bounded detail read
         "last_message_preview_expression": frozenset(),  # query builder, no db
         # PR 3 Task 3.2 (threads flip): commit -> flush; the ``commit`` flag on
         # create_thread was DELETED (now unconditional flush + refresh). The
@@ -396,6 +397,7 @@ CHAT_PURE_DELEGATES: FrozenSet[str] = frozenset(
         "list_conversations",
         "create_thread",
         "get_thread",
+        "get_thread_with_recent_messages",
         "list_threads",
         "bulk_summarize_threads",
         "_filter_owned_document_ids",

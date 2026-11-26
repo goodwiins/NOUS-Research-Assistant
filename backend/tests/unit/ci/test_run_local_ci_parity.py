@@ -1,0 +1,857 @@
+"""run_local_ci.sh must run the gates CI runs, the way CI runs them (GOO-738).
+
+Each contract below is a gap that let a branch pass locally and fail in CI:
+backend tests run from ``backend/`` instead of the repo root, architecture
+tests skipped with ``--skip-tests``, and no frontend coverage ratchet.
+"""
+
+from __future__ import annotations
+
+import copy
+import re
+import shlex
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml  # type: ignore[import-untyped]  # CI lint installs types-PyYAML; local venvs may not
+
+pytestmark = pytest.mark.unit
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+LOCAL_CI_PATH = REPO_ROOT / "scripts" / "ci" / "run_local_ci.sh"
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "test-pipeline.yml"
+
+SKIP_TESTS_OPEN = 'if [ "$SKIP_TESTS" -eq 0 ]; then\n'
+
+
+def _script() -> str:
+    return LOCAL_CI_PATH.read_text(encoding="utf-8")
+
+
+def _block(script: str, opener: str) -> str:
+    """Return the text of the top-level ``if`` block that starts at ``opener``."""
+    start = script.index(opener)
+    end = script.index("\nfi\n", start)
+    return script[start:end]
+
+
+def test_backend_tests_run_from_the_repo_root_like_ci() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    script = _script()
+
+    # The unit-tests job: `pytest backend/tests/ -c backend/pytest.ini` from
+    # the checkout root, never from backend/.
+    assert "pytest backend/tests/ \\\n            -c backend/pytest.ini" in workflow
+    assert '( cd backend && "$PY" -m pytest' not in script
+    assert "backend_pytest backend/tests/" in script
+    assert '-c backend/pytest.ini -m "$BACKEND_UNIT_MARKERS"' in script
+    # `python -m` puts the cwd on sys.path; bare `pytest` (CI) does not.
+    assert '"$PY" -P -m pytest "$@"' in script
+
+
+# Workflow-level variables that configure the runner, not the tests.
+RUNNER_ONLY_ENV = frozenset(
+    {
+        "PYTHON_VERSION",
+        "NODE_VERSION",
+        "DOCKER_BUILDKIT",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+    }
+)
+# CI-only reporting/parallelism flags; local runs stay quiet and uncovered.
+CI_REPORTING_FLAGS = frozenset(
+    {"--cov", "--cov-report", "--cov-fail-under", "--junitxml", "-n", "-v"}
+)
+# Local-only flags the unit-suite call may add, each with its reason. Any
+# other local-only flag (an --ignore, --deselect or -k CI does not pass)
+# narrows the local run, so it is drift (GOO-764).
+LOCAL_ONLY_FLAGS = {
+    ("-q", ""): "quiet local output; CI's -v is reporting only",
+    ("-p", "no:cacheprovider"): "no .pytest_cache in the checkout",
+    ("--no-cov", ""): "CI's --cov flags are reporting only",
+    ("--ignore", "backend/tests/unit/architecture"): (
+        "the architecture tests already ran in their own unconditional step"
+    ),
+}
+# Flags whose value is the next token.
+VALUE_FLAGS = frozenset({"-c", "-m", "-n", "-p", "-k", "-o", "--ignore", "--deselect"})
+
+
+def _workflow() -> dict[str, Any]:
+    doc: dict[str, Any] = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    return doc
+
+
+def _unit_test_step(workflow: dict[str, Any]) -> dict[str, Any]:
+    steps = workflow["jobs"]["unit-tests"]["steps"]
+    matches = [s for s in steps if "pytest backend/tests/" in str(s.get("run", ""))]
+    assert len(matches) == 1, "expected one unit-tests pytest step"
+    step: dict[str, Any] = matches[0]
+    return step
+
+
+def ci_unit_env(workflow: dict[str, Any]) -> dict[str, str]:
+    """Env the CI unit-test pytest sees: workflow, then job, then step."""
+    env = {
+        k: str(v)
+        for k, v in (workflow.get("env") or {}).items()
+        if k not in RUNNER_ONLY_ENV
+    }
+    env.update(
+        {
+            k: str(v)
+            for k, v in (workflow["jobs"]["unit-tests"].get("env") or {}).items()
+        }
+    )
+    env.update(
+        {k: str(v) for k, v in (_unit_test_step(workflow).get("env") or {}).items()}
+    )
+    return env
+
+
+def _helper(script: str) -> str:
+    start = script.index("backend_pytest() {")
+    return script[start : script.index("\n}\n", start)]
+
+
+def local_helper_env(script: str) -> dict[str, str]:
+    """`NAME=value \\` assignments that prefix the local pytest command."""
+    env: dict[str, str] = {}
+    for line in _helper(script).splitlines():
+        m = re.match(r'^\s*([A-Z_][A-Z0-9_]*)=("?)(.*?)\2\s*\\$', line)
+        if m:
+            env[m.group(1)] = m.group(3)
+    return env
+
+
+def _parse_args(tokens: list[str]) -> tuple[list[str], set[tuple[str, str]]]:
+    """Split pytest args into positionals and (flag, value) pairs."""
+    positionals: list[str] = []
+    flags: set[tuple[str, str]] = set()
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-"):
+            if "=" in tok:
+                name, _, value = tok.partition("=")
+                flags.add((name, value))
+            elif tok in VALUE_FLAGS and i + 1 < len(tokens):
+                flags.add((tok, tokens[i + 1]))
+                i += 1
+            else:
+                flags.add((tok, ""))
+        else:
+            positionals.append(tok)
+        i += 1
+    return positionals, flags
+
+
+def ci_pytest_args(workflow: dict[str, Any]) -> tuple[list[str], set[tuple[str, str]]]:
+    run = str(_unit_test_step(workflow)["run"]).replace("\\\n", " ")
+    line = next(ln for ln in run.splitlines() if ln.strip().startswith("pytest "))
+    return _parse_args(shlex.split(line)[1:])
+
+
+def local_pytest_args(script: str) -> tuple[list[str], set[tuple[str, str]]]:
+    """Args of the local unit-suite call, with the helper's fixed args added."""
+    helper = _helper(script).replace("\\\n", " ")
+    markers = re.search(r'^BACKEND_UNIT_MARKERS="([^"]*)"', script, re.M)
+    assert markers, "BACKEND_UNIT_MARKERS is not defined"
+    fixed = helper[helper.index('pytest "$@"') + len('pytest "$@"') :]
+    fixed = fixed.replace('"$BACKEND_UNIT_MARKERS"', shlex.quote(markers.group(1)))
+    call = re.search(r"^\s*backend_pytest (backend/tests/ .*)$", script, re.M)
+    assert call, "the local unit-suite call is missing"
+    return _parse_args(shlex.split(call.group(1)) + shlex.split(fixed))
+
+
+def env_drift(workflow: dict[str, Any], script: str) -> list[str]:
+    ci, local = ci_unit_env(workflow), local_helper_env(script)
+    return sorted(
+        f"{k}: CI={ci.get(k)!r} local={local.get(k)!r}"
+        for k in ci.keys() | local.keys()
+        if ci.get(k) != local.get(k)
+    )
+
+
+def pytest_drift(workflow: dict[str, Any], script: str) -> list[str]:
+    ci_pos, ci_flags = ci_pytest_args(workflow)
+    local_pos, local_flags = local_pytest_args(script)
+    drift = [f"test path: CI={ci_pos} local={local_pos}"] if ci_pos != local_pos else []
+    for name, value in sorted(ci_flags):
+        if name in CI_REPORTING_FLAGS:
+            continue
+        if (name, value) not in local_flags:
+            drift.append(f"CI passes {name} {value!r}; the local run does not")
+    for name, value in sorted(local_flags - ci_flags):
+        if (name, value) not in LOCAL_ONLY_FLAGS:
+            drift.append(f"the local run passes {name} {value!r}; CI does not")
+    return drift
+
+
+_LOOP_OPENERS = ("while ", "until ", "for ")
+
+
+def _closes_block(line: str) -> bool:
+    """``fi``/``done``/``esac``, alone or ending a multi-line block's last line."""
+    if line == "fi" or (line.endswith("; fi") and not line.startswith("if ")):
+        return True
+    if line == "esac" or line.startswith("esac "):
+        return True
+    # `done`, `done <<< "$LIST"`, `done < file`
+    return (
+        line == "done"
+        or line.startswith(("done ", "done<"))
+        or (line.endswith("; done") and not line.startswith(_LOOP_OPENERS))
+    )
+
+
+def _opens_block(line: str) -> bool:
+    """A multi-line ``if``, loop or ``case``; one-liners open nothing."""
+    if line.startswith("if "):
+        return not line.endswith("; fi")
+    if line.startswith(_LOOP_OPENERS):
+        return not re.search(r"\bdone\b", line)
+    return line.startswith("case ") and line.endswith(" in")
+
+
+def enclosing_conditions(script: str, index: int) -> list[str]:
+    """The ``if``/``elif``/``else`` and loop/``case`` headers around line
+    ``index``, innermost first.
+
+    A one-line ``if ...; fi`` or ``for ...; done`` neither opens nor encloses
+    anything."""
+    lines = [ln.strip() for ln in script.splitlines()]
+    depth = 0
+    found: list[str] = []
+    for line in reversed(lines[:index]):
+        if _closes_block(line):
+            depth += 1
+        elif _opens_block(line):
+            if depth:
+                depth -= 1
+            else:
+                found.append(line)
+        elif depth == 0 and (line.startswith("elif ") or line == "else"):
+            found.append(line)
+    return found
+
+
+# A line ending in one of these runs the next line as part of the same
+# command list, so `cond && \` + an exact gate line is still conditional.
+_CONTINUATIONS = ("\\", "&&", "||", "|")
+
+
+def _continuation_problem(lines: list[str], index: int, command: str) -> list[str]:
+    previous = next(
+        (ln for ln in reversed(lines[:index]) if ln and not ln.startswith("#")), ""
+    )
+    if previous.endswith(_CONTINUATIONS):
+        return [
+            f"{command!r} continues the line before it ({previous!r}); "
+            "it must be a command of its own"
+        ]
+    return []
+
+
+def _command_line(script: str, command: str) -> tuple[int | None, list[str]]:
+    """Index of the line that is exactly ``command``, and its problems."""
+    lines = [ln.strip() for ln in script.splitlines()]
+    exact = [i for i, ln in enumerate(lines) if ln == command]
+    if len(exact) != 1:
+        near = [ln for ln in lines if command in ln and ln != command]
+        return None, [
+            f"expected one line that is exactly {command!r}, found {len(exact)}"
+            + (f"; it is wrapped as {near}" if near else "")
+        ]
+    return exact[0], []
+
+
+# `cat <<EOF`, `: <<'X'`, `<<-"X"`; not the `<<<` here-string.
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_]\w*)\2")
+# `exit`/`exec` where a command starts: line start, after `;`, `&&`, `||`,
+# `|`, `{`, `(`, or a `then`/`else`/`do` keyword.
+_SCRIPT_ENDERS = re.compile(
+    r"(?:^|[;&|({]|\bthen|\belse|\bdo)\s*(exit|exec)\b(?:\s+([^\s;&|)]+))?"
+)
+# `trap 'exit 0' DEBUG`: the action runs before the next command (DEBUG),
+# when one fails (ERR), when a function returns (RETURN) or at the end, where
+# its `exit` replaces the status (EXIT). An action that can exit cleanly ends
+# the run before, or instead of, a gate's failure (GOO-795).
+_TRAP = re.compile(
+    r"(?:^|[;&|({]|\bthen|\belse|\bdo)\s*trap\s+"
+    r"(?:'([^']*)'|\"((?:\\.|[^\"\\])*)\"|([^\s'\";&|]+))\s+([^;&|#]+)"
+)
+_EXITING_TRAP_SIGNALS = frozenset({"DEBUG", "ERR", "RETURN", "EXIT", "0"})
+
+
+def _code(line: str) -> str:
+    """``line`` without its quoted strings and trailing comment."""
+    line = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", line)
+    return re.sub(r"(?:^|\s)#.*$", "", line).strip()
+
+
+def _clean_exits(code: str) -> list[str]:
+    """The `exit`/`exec` commands in ``code`` that can end it cleanly: all but
+    `exit N` with a literal N > 0, which makes the run fail, never pass."""
+    return [
+        word
+        for word, status in _SCRIPT_ENDERS.findall(code)
+        if not (word == "exit" and status.isdigit() and int(status) > 0)
+    ]
+
+
+def _exiting_traps(line: str) -> list[str]:
+    """Signals of a `trap` on ``line`` whose action can exit cleanly and that
+    fire on their own (DEBUG, ERR, RETURN, EXIT). A trap for INT or TERM
+    runs only when the run is interrupted."""
+    found = []
+    for single, double, bare, signals in _TRAP.findall(line):
+        action = single or double or bare
+        names = {s.upper().removeprefix("SIG") for s in signals.split()}
+        if names & _EXITING_TRAP_SIGNALS and _clean_exits(_code(action)):
+            found += sorted(names & _EXITING_TRAP_SIGNALS)
+    return found
+
+
+def line_contexts(script: str) -> list[tuple[str | None, tuple[str, ...]]]:
+    """For each line: the heredoc opener that swallows it (or None), and the
+    headers of the function/brace/subshell groups open around it, outermost
+    first.
+
+    A group opens on a line ending in ``{`` or ``(`` and closes at the next
+    line at the same indentation that starts with ``}`` or ``)``. A heredoc
+    without its terminator, or a group without its closer, encloses the rest
+    of the script, so a malformed wrapper fails closed. As in bash, a ``<<``
+    heredoc ends only at a line that is exactly its terminator, and a ``<<-``
+    heredoc also at one indented with tabs (not spaces)."""
+    contexts: list[tuple[str | None, tuple[str, ...]]] = []
+    heredoc: tuple[str, str, bool] | None = None  # (terminator, opener, <<-)
+    groups: list[tuple[int, str]] = []
+    for raw in script.splitlines():
+        stripped = raw.strip()
+        if heredoc is not None:
+            contexts.append((heredoc[1], tuple(g for _, g in groups)))
+            body = raw.lstrip("\t") if heredoc[2] else raw
+            if body == heredoc[0]:
+                heredoc = None
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if groups and stripped[:1] in ("}", ")") and indent == groups[-1][0]:
+            groups.pop()
+        contexts.append((None, tuple(g for _, g in groups)))
+        if stripped.startswith("#"):
+            continue
+        opener = _HEREDOC.search(raw)
+        if opener:
+            heredoc = (opener.group(3), stripped, opener.group(1) == "-")
+        if _code(raw).endswith(("{", "(")):
+            groups.append((indent, stripped))
+    return contexts
+
+
+def _execution_problems(script: str, index: int, command: str) -> list[str]:
+    """Problems that stop the exact gate line at ``index`` from executing:
+    a heredoc around it, a function or group around it, or an earlier line
+    that can end the script cleanly (`exit`, `exit 0`, `true || exit 0`,
+    `exec`).
+
+    `exit N` with a literal N > 0 is allowed: it makes the run fail, never
+    pass. Exits inside a `( )` subshell (the migration probes) are contained."""
+    lines = script.splitlines()
+    contexts = line_contexts(script)
+    heredoc, groups = contexts[index]
+    problems = []
+    if heredoc is not None:
+        problems.append(f"{command!r} is inside a heredoc ({heredoc!r}); it never runs")
+    if groups:
+        problems.append(
+            f"{command!r} must run at the top level, not inside {list(groups)}"
+        )
+    for i in range(index):
+        doc, open_groups = contexts[i]
+        if doc is not None or any(g.endswith("(") for g in open_groups):
+            continue
+        for _ in _clean_exits(_code(lines[i])):
+            problems.append(
+                f"line {i + 1} ({lines[i].strip()!r}) can end the script "
+                f"before {command!r}; only `exit N` with N > 0 may run first"
+            )
+        for signal in _exiting_traps(lines[i]):
+            problems.append(
+                f"line {i + 1} ({lines[i].strip()!r}) sets a trap on {signal} that "
+                f"can end the script cleanly before or instead of {command!r}"
+            )
+    return problems
+
+
+def _gated_step_problems(
+    script: str,
+    command: str,
+    check: str,
+    *,
+    under_skip_tests: bool,
+) -> list[str]:
+    """``command`` must be a bare line followed by ``check``, with its status
+    unmasked, and gated by --skip-tests exactly when ``under_skip_tests``."""
+    index, problems = _command_line(script, command)
+    if index is None:
+        return problems
+    lines = [ln.strip() for ln in script.splitlines()]
+    problems += _continuation_problem(lines, index, command)
+    problems += _execution_problems(script, index, command)
+    following = next((ln for ln in lines[index + 1 :] if ln), "")
+    if following != check:
+        problems.append(f"{command!r} must be followed by {check!r}, not {following!r}")
+    enclosing = enclosing_conditions(script, index)
+    loops = [c for c in enclosing if c.startswith(_LOOP_OPENERS)]
+    if loops:
+        # A loop can skip the gate (`while false`) or hide a --skip-tests
+        # gate; a gate runs once, so no loop wrapper is legitimate.
+        problems.append(f"{command!r} must not run inside a loop: {loops}")
+    gated = any("SKIP_TESTS" in c for c in enclosing)
+    if gated != under_skip_tests:
+        problems.append(
+            f"{command!r} is {'inside' if gated else 'outside'} the --skip-tests "
+            f"gate; it must be {'inside' if under_skip_tests else 'outside'}"
+        )
+    return problems
+
+
+ARCHITECTURE_COMMAND = "backend_pytest backend/tests/unit/architecture"
+
+
+def architecture_problems(script: str) -> list[str]:
+    problems = _gated_step_problems(
+        script,
+        ARCHITECTURE_COMMAND,
+        'check $? "backend architecture tests"',
+        under_skip_tests=False,
+    )
+    index, _ = _command_line(script, ARCHITECTURE_COMMAND)
+    if index is not None and enclosing_conditions(script, index):
+        problems.append(f"{ARCHITECTURE_COMMAND!r} must run unconditionally")
+    return problems
+
+
+TRIGGER_GUARD_CHECK = 'check $? "Trigger.dev test files (tests/trigger/*.test.mjs)"'
+
+
+def trigger_problems(workflow: dict[str, Any], script: str) -> list[str]:
+    steps = {s.get("name"): s for s in workflow["jobs"]["frontend-tests"]["steps"]}
+    tsc = steps["Type-check Trigger.dev tasks (tsc)"]["run"].strip()
+    guard = steps["Require Trigger.dev test files"]["run"].strip()
+    node = steps["Check Trigger.dev tasks (node:test)"]["run"].strip()
+    return (
+        _gated_step_problems(
+            script,
+            f"( cd frontend && {tsc} )",
+            'check $? "Trigger.dev tsc"',
+            under_skip_tests=False,
+        )
+        + _gated_step_problems(
+            script, guard, TRIGGER_GUARD_CHECK, under_skip_tests=True
+        )
+        + _gated_step_problems(
+            script, node, 'check $? "Trigger.dev node tests"', under_skip_tests=True
+        )
+    )
+
+
+def script_problems(workflow: dict[str, Any], script: str) -> list[str]:
+    return (
+        pytest_drift(workflow, script)
+        + architecture_problems(script)
+        + trigger_problems(workflow, script)
+    )
+
+
+def test_backend_tests_get_the_ci_unit_env() -> None:
+    """Every variable CI's unit-test pytest sees, derived from the workflow."""
+    assert env_drift(_workflow(), _script()) == []
+
+
+def test_backend_pytest_args_match_the_workflow() -> None:
+    """Every non-reporting pytest flag and the test path, derived from the workflow."""
+    assert pytest_drift(_workflow(), _script()) == []
+
+
+def test_architecture_and_trigger_steps_are_bare_and_gated_right() -> None:
+    """The architecture tests and the Trigger tsc run even with --skip-tests;
+    the Trigger node tests run only without it. Each is a bare command line
+    whose status the next line checks (GOO-764)."""
+    workflow, script = _workflow(), _script()
+    assert architecture_problems(script) == []
+    assert trigger_problems(workflow, script) == []
+
+
+def test_trigger_steps_mirror_the_frontend_tests_job() -> None:
+    steps = {s.get("name"): s for s in _workflow()["jobs"]["frontend-tests"]["steps"]}
+    node_step = steps["Check Trigger.dev tasks (node:test)"]
+    tsc_step = steps["Type-check Trigger.dev tasks (tsc)"]
+    script = _script()
+    # node:test runs from the repo root in both places.
+    assert node_step["working-directory"] == "."
+    assert f"      {node_step['run'].strip()}\n" in script
+    # tsc runs from frontend/ (the job default) in both places.
+    assert "working-directory" not in tsc_step
+    assert f"( cd frontend && {tsc_step['run'].strip()} )" in script
+    assert 'check $? "Trigger.dev tsc"' in script
+    assert 'check $? "Trigger.dev node tests"' in script
+    assert 'skipped "Trigger.dev node tests" "--skip-tests"' in script
+
+
+def test_the_trigger_test_file_guard_runs_right_before_the_node_tests() -> None:
+    """node --test passes with zero tests on an unmatched glob, so a step that
+    fails on no match runs first, from the same directory."""
+    steps = _workflow()["jobs"]["frontend-tests"]["steps"]
+    names = [s.get("name") for s in steps]
+    guard_at = names.index("Require Trigger.dev test files")
+    assert names[guard_at + 1] == "Check Trigger.dev tasks (node:test)"
+    assert steps[guard_at]["working-directory"] == "."
+    script = _script()
+    guard_line = f"      {steps[guard_at]['run'].strip()}\n"
+    node_line = f"      {steps[guard_at + 1]['run'].strip()}\n"
+    assert script.index(guard_line) < script.index(node_line)
+
+
+def test_the_trigger_guard_glob_is_the_node_test_glob() -> None:
+    steps = {s.get("name"): s for s in _workflow()["jobs"]["frontend-tests"]["steps"]}
+    guard = shlex.split(steps["Require Trigger.dev test files"]["run"])
+    node = shlex.split(steps["Check Trigger.dev tasks (node:test)"]["run"])
+    assert guard[:2] == ["compgen", "-G"] and len(guard) == 3
+    assert node[node.index("--test") + 1 :] == [guard[2]]
+
+
+def test_architecture_tests_run_even_with_skip_tests() -> None:
+    script = _script()
+    command = "backend_pytest backend/tests/unit/architecture"
+    assert command in script
+    assert 'check $? "backend architecture tests"' in script
+    # Not gated behind --skip-tests: outside the block that --skip-tests skips.
+    skip_block = _block(script, SKIP_TESTS_OPEN)
+    assert command not in skip_block
+    assert script.index(command) < script.index(SKIP_TESTS_OPEN)
+    # The full suite does not run them a second time.
+    assert "--ignore=backend/tests/unit/architecture" in skip_block
+
+
+def test_skip_tests_is_reported_as_skipped_not_passed() -> None:
+    skip_block = _block(_script(), SKIP_TESTS_OPEN)
+    assert 'skipped "NOUS workflow contract tests + backend unit tests"' in skip_block
+
+
+def test_trigger_gates_report_skipped_when_they_do_not_fire() -> None:
+    script = _script()
+    line = (
+        'skipped "Trigger.dev type-check + node tests" '
+        '"no --frontend and no Trigger.dev path changed"'
+    )
+    index, problems = _command_line(script, line)
+    assert index is not None, problems
+    assert enclosing_conditions(script, index) == [
+        "else",
+        'if [ "$DO_FRONTEND" -eq 1 ] || [ -n "$TRIGGER_CHANGES" ]; then',
+    ]
+
+
+def test_frontend_gate_runs_vitest_coverage_and_the_coverage_ratchet() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "run: pnpm test:coverage" in workflow
+    assert "check_frontend_coverage.mjs coverage/coverage-summary.json" in workflow
+
+    frontend = _block(_script(), 'if [ "$DO_FRONTEND" -eq 1 ]; then\n')
+    assert "( cd frontend && CI=true pnpm test:coverage )" in frontend
+    assert 'check $? "pnpm test:coverage"' in frontend
+    assert 'COVERAGE_SUMMARY="frontend/coverage/coverage-summary.json"' in frontend
+    assert 'node scripts/ci/check_frontend_coverage.mjs "$COVERAGE_SUMMARY"' in frontend
+    assert 'check $? "frontend coverage ratchet"' in frontend
+    # A stale summary from an earlier run must never be ratcheted.
+    assert frontend.index('rm -f -- "$COVERAGE_SUMMARY"') < frontend.index(
+        "CI=true pnpm test:coverage"
+    )
+    assert 'check 1 "frontend coverage ratchet (no coverage summary)"' in frontend
+    assert 'skipped "pnpm test:coverage + frontend coverage ratchet"' in frontend
+
+
+def _plant_run(old: str, new: str) -> Callable[[dict[str, Any]], None]:
+    def plant(workflow: dict[str, Any]) -> None:
+        step = _unit_test_step(workflow)
+        assert old in step["run"]
+        step["run"] = step["run"].replace(old, new, 1)
+
+    return plant
+
+
+def _set_step_env(key: str, value: str) -> Callable[[dict[str, Any]], None]:
+    return lambda wf: _unit_test_step(wf)["env"].update({key: value})
+
+
+WORKFLOW_PLANTS: dict[str, Callable[[dict[str, Any]], None]] = {
+    "step env value": _set_step_env("AZURE_OPENAI_API_KEY", "x"),
+    "new step env var": _set_step_env("NEW_FLAG", "1"),
+    "new workflow env var": lambda wf: wf["env"].update(FEATURE_X="on"),
+    "new job env var": lambda wf: wf["jobs"]["unit-tests"].update(env={"JOB_VAR": "1"}),
+    "extra -p flag": _plant_run(
+        "-c backend/pytest.ini", "-c backend/pytest.ini -p no:randomly"
+    ),
+    "extra --flag=value": _plant_run(
+        "-c backend/pytest.ini", "-c backend/pytest.ini --maxfail=1"
+    ),
+    "marker expression": _plant_run("or slow)", "or slow or flaky)"),
+    "-c path": _plant_run("-c backend/pytest.ini", "-c pytest.ini"),
+    "test path": _plant_run("pytest backend/tests/ ", "pytest backend/tests/unit/ "),
+}
+
+
+@pytest.mark.parametrize("name", sorted(WORKFLOW_PLANTS))
+def test_a_planted_workflow_divergence_is_reported(name: str) -> None:
+    """Mutation guard for the derived checks: each plant must be reported."""
+    workflow = copy.deepcopy(_workflow())
+    WORKFLOW_PLANTS[name](workflow)
+    assert env_drift(workflow, _script()) + pytest_drift(workflow, _script())
+
+
+_TSC = "( cd frontend && pnpm exec tsc --noEmit -p ../tsconfig.json )"
+_UNIT_CALL = "backend_pytest backend/tests/ --ignore=backend/tests/unit/architecture"
+
+SCRIPT_PLANTS: dict[str, tuple[str, str]] = {
+    "one-line gated architecture step": (
+        f"\n{ARCHITECTURE_COMMAND}\n",
+        f'\n[ "$SKIP_TESTS" -eq 0 ] && {ARCHITECTURE_COMMAND}\n',
+    ),
+    "architecture step inside an if": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f'\nif [ "$DO_FRONTEND" -eq 1 ]; then\n  {ARCHITECTURE_COMMAND}\n'
+        '  check $? "backend architecture tests"\nfi\n',
+    ),
+    "local-only --ignore": (
+        _UNIT_CALL,
+        f"{_UNIT_CALL} --ignore=backend/tests/unit/api",
+    ),
+    "local-only --deselect": (_UNIT_CALL, f"{_UNIT_CALL} --deselect=backend/tests/x"),
+    "local-only -k": (_UNIT_CALL, f"{_UNIT_CALL} -k 'not slow'"),
+    "|| true after the Trigger tsc": (_TSC, f"{_TSC} || true"),
+    "Trigger tsc inside the --skip-tests gate": (
+        f"    {_TSC}\n",
+        f'    if [ "$SKIP_TESTS" -eq 0 ]; then\n    {_TSC}\n',
+    ),
+    "Trigger node tests outside the --skip-tests gate": (
+        '    if [ "$SKIP_TESTS" -eq 0 ]; then\n      step "Trigger.dev node tests',
+        '    if [ "$DO_FRONTEND" -eq 1 ]; then\n      step "Trigger.dev node tests',
+    ),
+    # GOO-782: a gate whose line is still exact, made conditional by the line
+    # before it (a `&& \` continuation, or a trailing `||`)...
+    "`&& \\` continuation gates the architecture step": (
+        f"\n{ARCHITECTURE_COMMAND}\n",
+        f'\n[ "$SKIP_TESTS" -eq 0 ] && \\\n  {ARCHITECTURE_COMMAND}\n',
+    ),
+    "|| true after the Trigger test-file guard": (
+        "      compgen -G 'tests/trigger/*.test.mjs'\n",
+        "      compgen -G 'tests/trigger/*.test.mjs' || true\n",
+    ),
+    "Trigger test-file guard outside the --skip-tests gate": (
+        '    if [ "$SKIP_TESTS" -eq 0 ]; then\n'
+        '      step "Trigger.dev node tests (blocking)"\n'
+        "      compgen -G 'tests/trigger/*.test.mjs'\n"
+        f"      {TRIGGER_GUARD_CHECK}\n",
+        "    compgen -G 'tests/trigger/*.test.mjs'\n"
+        f"    {TRIGGER_GUARD_CHECK}\n"
+        '    if [ "$SKIP_TESTS" -eq 0 ]; then\n'
+        '      step "Trigger.dev node tests (blocking)"\n',
+    ),
+    "`&& \\` continuation gates the Trigger tsc": (
+        f"    {_TSC}\n",
+        f'    [ "$SKIP_TESTS" -eq 0 ] && \\\n    {_TSC}\n',
+    ),
+    "trailing `||` continuation before the architecture step": (
+        f"\n{ARCHITECTURE_COMMAND}\n",
+        f"\ntrue ||\n{ARCHITECTURE_COMMAND}\n",
+    ),
+    # ...or wrapped in a loop that gates it, or never runs it.
+    "`while` --skip-tests wrapper on the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f'\nwhile [ "$SKIP_TESTS" -eq 0 ]; do\n  {ARCHITECTURE_COMMAND}\n'
+        '  check $? "backend architecture tests"\n  break\ndone\n',
+    ),
+    "`while` --skip-tests wrapper on the Trigger tsc": (
+        f'    {_TSC}\n    check $? "Trigger.dev tsc"\n',
+        f'    while [ "$SKIP_TESTS" -eq 0 ]; do\n    {_TSC}\n'
+        '    check $? "Trigger.dev tsc"\n    break\n    done\n',
+    ),
+    "`while false` around the Trigger node tests": (
+        '      step "Trigger.dev node tests (blocking)"\n',
+        '      step "Trigger.dev node tests (blocking)"\n      while false; do\n',
+    ),
+    # GOO-786: the gate's lines stay exact and unconditional, but they are
+    # never executed: swallowed by a heredoc, parked in a function nobody
+    # calls, inside a skipped `{ }` group, or behind an earlier clean exit.
+    "heredoc around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n: <<'DISABLED'\n{ARCHITECTURE_COMMAND}\n"
+        'check $? "backend architecture tests"\nDISABLED\n',
+    ),
+    "architecture step in a function that is never called": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n_architecture_gate() {{\n  {ARCHITECTURE_COMMAND}\n"
+        '  check $? "backend architecture tests"\n}\n',
+    ),
+    "`false && {` group around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\nfalse && {{\n{ARCHITECTURE_COMMAND}\n"
+        'check $? "backend architecture tests"\n}\n',
+    ),
+    "`true || exit 0` before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\ntrue || exit 0\nstep "Backend architecture tests',
+    ),
+    "`exit 0` inside an if before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\nif true; then\n  exit 0\nfi\nstep "Backend architecture tests',
+    ),
+    "bare `exit` early in the script": ("\nFAILED=()\n", "\nFAILED=()\nexit\n"),
+    "`exec` replaces the script before the Trigger tsc": (
+        f"    {_TSC}\n",
+        f"    exec true\n    {_TSC}\n",
+    ),
+    "`exit 0` in a function called before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\n_bail() {\n  exit 0\n}\n_bail\nstep "Backend architecture tests',
+    ),
+    "unterminated heredoc before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\ncat <<EOF\nstep "Backend architecture tests',
+    ),
+    # GOO-795: a trap whose action exits cleanly ends the run before a gate
+    # (DEBUG fires before the next command) or replaces its status (EXIT)...
+    "`trap 'exit 0' DEBUG` before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\ntrap 'exit 0' DEBUG\nstep \"Backend architecture tests",
+    ),
+    "`trap exit ERR` before the architecture step": (
+        '\nstep "Backend architecture tests',
+        '\ntrap exit ERR\nstep "Backend architecture tests',
+    ),
+    '`trap "exit 0" EXIT` replaces the run\'s status': (
+        '\nstep "Backend architecture tests',
+        '\ntrap "exit 0" EXIT\nstep "Backend architecture tests',
+    ),
+    # ...and the `<<-` heredoc form, whose terminator may be tab-indented,
+    # swallows a gate as `<<` does; a `<<` terminator indented at all does not
+    # end its heredoc, so the gate after it is swallowed too.
+    "`<<-` heredoc around the architecture step": (
+        f'\n{ARCHITECTURE_COMMAND}\ncheck $? "backend architecture tests"\n',
+        f"\n: <<-'DISABLED'\n\t{ARCHITECTURE_COMMAND}\n"
+        '\tcheck $? "backend architecture tests"\n\tDISABLED\n',
+    ),
+    "`<<` heredoc with an indented terminator before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\n: <<'DISABLED'\n  DISABLED\nstep \"Backend architecture tests",
+    ),
+    "`<<-` heredoc with a space-indented terminator before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\n: <<-'DISABLED'\n  DISABLED\nstep \"Backend architecture tests",
+    ),
+}
+# GOO-786 plants must be reported for their own reason, not for an unrelated
+# problem the plant happens to cause elsewhere.
+_PLANT_REASONS = {
+    "heredoc around the architecture step": "inside a heredoc",
+    "unterminated heredoc before the architecture step": "inside a heredoc",
+    "architecture step in a function that is never called": "must run at the top level",
+    "`false && {` group around the architecture step": "must run at the top level",
+    "`true || exit 0` before the architecture step": "('true || exit 0') can end the script",
+    "`exit 0` inside an if before the architecture step": "('exit 0') can end the script",
+    "`exit 0` in a function called before the architecture step": (
+        "('exit 0') can end the script"
+    ),
+    "bare `exit` early in the script": "('exit') can end the script",
+    "`trap 'exit 0' DEBUG` before the architecture step": "sets a trap on DEBUG",
+    "`trap exit ERR` before the architecture step": "sets a trap on ERR",
+    '`trap "exit 0" EXIT` replaces the run\'s status': "sets a trap on EXIT",
+    "`<<-` heredoc around the architecture step": "inside a heredoc",
+    "`<<` heredoc with an indented terminator before the architecture step": (
+        "inside a heredoc"
+    ),
+    "`<<-` heredoc with a space-indented terminator before the architecture step": (
+        "inside a heredoc"
+    ),
+    "`exec` replaces the script before the Trigger tsc": "('exec true') can end the script",
+}
+# Plants that open a block on their anchor and close it after this line.
+_CLOSE_AFTER = {
+    "Trigger tsc inside the --skip-tests gate": (
+        '    check $? "Trigger.dev tsc"\n',
+        "    fi\n",
+    ),
+    "`while false` around the Trigger node tests": (
+        '      check $? "Trigger.dev node tests"\n',
+        "      done\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SCRIPT_PLANTS))
+def test_a_planted_script_divergence_is_reported(name: str) -> None:
+    """Mutation guard for the script-side checks (GOO-764, GOO-782 and
+    GOO-786 review plants)."""
+    old, new = SCRIPT_PLANTS[name]
+    script = _script()
+    assert script.count(old) == 1, f"plant anchor for {name!r} is stale"
+    planted = script.replace(old, new, 1)
+    if name in _CLOSE_AFTER:
+        # Close the opened block right after the gate's status check.
+        check, closer = _CLOSE_AFTER[name]
+        assert planted.count(check) == 1, f"close anchor for {name!r} is stale"
+        planted = planted.replace(check, check + closer, 1)
+    problems = script_problems(_workflow(), planted)
+    assert problems, name
+    if name in _PLANT_REASONS:
+        assert any(_PLANT_REASONS[name] in p for p in problems), problems
+
+
+def test_a_dropped_local_variable_is_reported() -> None:
+    script = _script()
+    line = '    AZURE_OPENAI_CHAT_API_VERSION="2024-02-01" \\\n'
+    assert line in script
+    assert env_drift(_workflow(), script.replace(line, "", 1))
+
+
+def test_a_ci_only_reporting_change_is_not_drift() -> None:
+    workflow = copy.deepcopy(_workflow())
+    _plant_run("--cov-fail-under=35", "--cov-fail-under=40")(workflow)
+    assert env_drift(workflow, _script()) + pytest_drift(workflow, _script()) == []
+
+
+# GOO-795: the forms next to each trap and heredoc plant that must stay clean.
+CLEAN_SCRIPT_CHANGES: dict[str, tuple[str, str]] = {
+    "trap that exits non-zero on ERR": (
+        '\nstep "Backend architecture tests',
+        "\ntrap 'exit 1' ERR\ntrap - ERR\nstep \"Backend architecture tests",
+    ),
+    "trap that runs a cleanup function on EXIT": (
+        '\nstep "Backend architecture tests',
+        '\ntrap _cleanup EXIT\nstep "Backend architecture tests',
+    ),
+    "trap that exits on INT (only when interrupted)": (
+        '\nstep "Backend architecture tests',
+        "\ntrap 'exit 0' INT\nstep \"Backend architecture tests",
+    ),
+    "`<<-` heredoc closed by a tab-indented terminator": (
+        '\nstep "Backend architecture tests',
+        '\ncat <<-EOF\n\tnotes\n\tEOF\nstep "Backend architecture tests',
+    ),
+    "`<<` heredoc closed before the architecture step": (
+        '\nstep "Backend architecture tests',
+        "\ncat <<'EOF'\n  notes\nEOF\nstep \"Backend architecture tests",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(CLEAN_SCRIPT_CHANGES))
+def test_a_harmless_trap_or_heredoc_is_not_reported(name: str) -> None:
+    old, new = CLEAN_SCRIPT_CHANGES[name]
+    script = _script()
+    assert script.count(old) == 1, f"anchor for {name!r} is stale"
+    assert script_problems(_workflow(), script.replace(old, new, 1)) == []

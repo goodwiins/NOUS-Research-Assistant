@@ -10191,106 +10191,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/realtime/quality/cleanup": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Cleanup Old Data
-         * @description Clean up old evaluation data
-         */
-        delete: operations["cleanup_old_data_api_v2_realtime_quality_cleanup_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v2/realtime/quality/evaluate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Start Realtime Evaluation
-         * @description Start real-time quality evaluation for a query
-         */
-        post: operations["start_realtime_evaluation_api_v2_realtime_quality_evaluate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v2/realtime/quality/history/{query_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Query History
-         * @description Get historical metrics for a query
-         */
-        get: operations["get_query_history_api_v2_realtime_quality_history__query_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v2/realtime/quality/stats": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get System Stats
-         * @description Get system statistics
-         */
-        get: operations["get_system_stats_api_v2_realtime_quality_stats_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v2/realtime/quality/status/{query_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Query Status
-         * @description Get status of a query evaluation
-         */
-        get: operations["get_query_status_api_v2_realtime_quality_status__query_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v2/realtime/system/metrics": {
         parameters: {
             query?: never;
@@ -10478,6 +10378,8 @@ export interface paths {
         /**
          * List Threads
          * @description List threads in a conversation.
+         *
+         *     Returns 404 when the conversation is missing or not accessible.
          */
         get: operations["list_threads_api_v2_threads_get"];
         put?: never;
@@ -10569,7 +10471,13 @@ export interface paths {
         put?: never;
         /**
          * Bulk Summarize Threads
-         * @description Bulk trigger AI summarization for multiple threads.
+         * @description Bulk queue AI summarization for multiple threads.
+         *
+         *     Summarization runs asynchronously, so nothing is summarized when this
+         *     returns: each enqueued thread is reported with ``queued: true`` and
+         *     ``success: false``, ``succeeded`` is always 0, and ``queued`` counts the
+         *     enqueued threads. A ``threads_bulk_updated`` event with action
+         *     ``"summarize_queued"`` is broadcast for the enqueued threads only.
          *
          *     Rate limited to 5 operations per minute per user (heavy AI operations).
          */
@@ -13242,11 +13150,19 @@ export interface components {
         };
         /**
          * BulkThreadResponse
-         * @description Bulk thread operation response
+         * @description Bulk thread operation response.
+         *
+         *     ``failed`` is ``total - succeeded - queued``. ``queued`` counts threads
+         *     whose work was only enqueued (bulk summarize) and is 0 for the others.
          */
         BulkThreadResponse: {
             /** Failed */
             failed: number;
+            /**
+             * Queued
+             * @default 0
+             */
+            queued: number;
             /** Results */
             results: components["schemas"]["BulkThreadResult"][];
             /** Succeeded */
@@ -13256,11 +13172,19 @@ export interface components {
         };
         /**
          * BulkThreadResult
-         * @description Result for a single thread in bulk operation
+         * @description Result for a single thread in bulk operation.
+         *
+         *     ``queued`` is true when the work was only enqueued (bulk summarize); such
+         *     a result has ``success`` false because nothing completed in the request.
          */
         BulkThreadResult: {
             /** Error */
             error?: string | null;
+            /**
+             * Queued
+             * @default false
+             */
+            queued: boolean;
             /** Success */
             success: boolean;
             thread?: components["schemas"]["ThreadResponse"] | null;
@@ -15772,6 +15696,11 @@ export interface components {
             /** Processing Error */
             processing_error?: string | null;
             /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
+            /**
              * Processing Retry Count
              * @default 0
              */
@@ -15844,6 +15773,11 @@ export interface components {
             mime_type: string;
             /** Organization Id */
             organization_id: string;
+            /**
+             * Processing Partial
+             * @default false
+             */
+            processing_partial: boolean;
             processing_status: components["schemas"]["ApiDocumentStatus"];
             /** Tags */
             tags?: string[] | null;
@@ -22443,9 +22377,9 @@ export interface components {
             average_results_per_search: number;
             /**
              * Average Search Time Ms
-             * @description Average search time
+             * @description Average search time; null when no search was timed
              */
-            average_search_time_ms: number;
+            average_search_time_ms: number | null;
             /**
              * Most Common Queries
              * @description Most common search queries
@@ -23729,30 +23663,6 @@ export interface components {
              */
             thread_id: string;
         };
-        /** StartEvaluationRequest */
-        StartEvaluationRequest: {
-            /**
-             * Query
-             * @description The query to evaluate
-             */
-            query: string;
-            /**
-             * Websocket Channel
-             * @description WebSocket channel for updates
-             */
-            websocket_channel?: string | null;
-        };
-        /** StartEvaluationResponse */
-        StartEvaluationResponse: {
-            /** Message */
-            message: string;
-            /** Query Id */
-            query_id: string;
-            /** Success */
-            success: boolean;
-            /** Websocket Channel */
-            websocket_channel: string;
-        };
         /**
          * StatementBody
          * @description ``credit_roles`` are ``credit/1`` slugs; ``licenses.text`` an SPDX id.
@@ -24328,6 +24238,11 @@ export interface components {
             created_at: string;
             /** Created By Id */
             created_by_id?: string | null;
+            /**
+             * Has More Messages
+             * @default false
+             */
+            has_more_messages: boolean;
             /**
              * Id
              * Format: uuid
@@ -44133,154 +44048,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EnhancedDocumentStatus"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    cleanup_old_data_api_v2_realtime_quality_cleanup_delete: {
-        parameters: {
-            query?: {
-                max_age_hours?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    start_realtime_evaluation_api_v2_realtime_quality_evaluate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["StartEvaluationRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["StartEvaluationResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_query_history_api_v2_realtime_quality_history__query_id__get: {
-        parameters: {
-            query?: {
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                query_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_system_stats_api_v2_realtime_quality_stats_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_query_status_api_v2_realtime_quality_status__query_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                query_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

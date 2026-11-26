@@ -37,6 +37,12 @@ import { useCallback, useEffect, useState } from 'react';
 // Import enhanced components
 import { KeyboardShortcuts } from '@/components/dashboard/KeyboardShortcuts';
 import { QuickSearch } from '@/components/dashboard/QuickSearch';
+import {
+  NOT_MEASURED,
+  NOT_MEASURED_NOTE,
+  UNAVAILABLE_NOTE,
+  type NotMeasured,
+} from '@/utils/analyticsFigure';
 
 // Icon mapping for document types returned by the backend
 const DOC_TYPE_ICON_MAP: Record<string, typeof FileText> = {
@@ -47,8 +53,11 @@ const DOC_TYPE_ICON_MAP: Record<string, typeof FileText> = {
   audio: Music,
 };
 
-/** `undefined` while loading, `null` when the source failed. */
-type StatValue = number | null | undefined;
+/**
+ * `undefined` while loading, `null` when the source failed, `NOT_MEASURED`
+ * when the source loaded but has no measurement (GOO-768).
+ */
+type StatValue = number | NotMeasured | null | undefined;
 
 export default function DashboardPage() {
   const { isAuthenticated, isLoading: authLoading, user } = useAuth();
@@ -117,7 +126,13 @@ export default function DashboardPage() {
       .getCombinedSearchAnalytics()
       .then((data) => {
         setTotalSearches(data.totalSearches);
-        setAvgSearchTimeMs(Math.round(data.avgResponseTimeMs));
+        // null = no search was timed: "Not measured yet", never 0 and never
+        // an outage (GOO-768).
+        setAvgSearchTimeMs(
+          data.avgResponseTimeMs === null
+            ? NOT_MEASURED
+            : Math.round(data.avgResponseTimeMs)
+        );
       })
       .catch(() => {
         setTotalSearches(null);
@@ -328,7 +343,7 @@ export default function DashboardPage() {
                       aria-hidden="true"
                       className="block h-8 w-16 animate-pulse rounded bg-muted"
                     />
-                  ) : stat.value === null ? (
+                  ) : typeof stat.value !== 'number' ? (
                     '—'
                   ) : (
                     stat.value.toLocaleString()
@@ -340,7 +355,10 @@ export default function DashboardPage() {
                     <span className="sr-only"> loading</span>
                   )}
                   {stat.value === null && (
-                    <span className="block">Unavailable right now</span>
+                    <span className="block">{UNAVAILABLE_NOTE}</span>
+                  )}
+                  {stat.value === NOT_MEASURED && (
+                    <span className="block">{NOT_MEASURED_NOTE}</span>
                   )}
                 </div>
               </motion.div>

@@ -1,3 +1,9 @@
+-- LEGACY (GOO-655): written for the old docker-compose `ragdb` schema
+-- (documents.tenant_id, documents.content, vector_embeddings, entities, ...),
+-- not the Alembic-managed schema the live deployment uses. Do not apply it to
+-- that database; index changes belong in backend/alembic/versions. Whether to
+-- keep or delete this file is tracked with the legacy schema sources (GOO-579).
+--
 -- Performance optimization scripts for PostgreSQL database
 -- These scripts optimize the database for the Multimodal Enterprise RAG system
 
@@ -18,98 +24,98 @@
 -- 2. Index optimizations for document search
 
 -- Documents table indexes
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_title_gin
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_title_gin
 ON documents USING gin(to_tsvector('english', title));
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_content_gin
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_content_gin
 ON documents USING gin(to_tsvector('english', content));
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_document_type
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_document_type
 ON documents(document_type);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_created_at
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_created_at
 ON documents(created_at DESC);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_tenant_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_tenant_id
 ON documents(tenant_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_file_size
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_file_size
 ON documents(file_size);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_processing_status
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_processing_status
 ON documents(processing_status);
 
 -- Composite indexes for common query patterns
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_tenant_type_status
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_tenant_type_status
 ON documents(tenant_id, document_type, processing_status);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_documents_tenant_created
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_tenant_created
 ON documents(tenant_id, created_at DESC);
 
 -- 3. Search and vector-related indexes
 
 -- Search queries table
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_search_queries_session_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_search_queries_session_id
 ON search_queries(session_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_search_queries_created_at
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_search_queries_created_at
 ON search_queries(created_at DESC);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_search_queries_user_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_search_queries_user_id
 ON search_queries(user_id);
 
 -- Vector embeddings table (if exists)
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_vector_embeddings_document_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_vector_embeddings_document_id
 ON vector_embeddings(document_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_vector_embeddings_embedding_type
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_vector_embeddings_embedding_type
 ON vector_embeddings(embedding_type);
 
 -- 4. Knowledge graph and entity indexes
 
 -- Entities table
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_entities_name_trgm
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entities_name_trgm
 ON entities USING gin(name gin_trgm_ops);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_entities_type
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entities_type
 ON entities(entity_type);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_entities_tenant_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entities_tenant_id
 ON entities(tenant_id);
 
 -- Entity relationships table
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_entity_relationships_source_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entity_relationships_source_id
 ON entity_relationships(source_entity_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_entity_relationships_target_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entity_relationships_target_id
 ON entity_relationships(target_entity_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_entity_relationships_relation_type
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entity_relationships_relation_type
 ON entity_relationships(relation_type);
 
 -- 5. Analytics and metrics tables
 
 -- Quality metrics table
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_quality_metrics_document_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_quality_metrics_document_id
 ON quality_metrics(document_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_quality_metrics_metric_type
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_quality_metrics_metric_type
 ON quality_metrics(metric_type);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_quality_metrics_created_at
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_quality_metrics_created_at
 ON quality_metrics(created_at DESC);
 
 -- User behavior table
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_user_behavior_session_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_behavior_session_id
 ON user_behavior(session_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_user_behavior_user_id
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_behavior_user_id
 ON user_behavior(user_id);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_user_behavior_action_type
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_behavior_action_type
 ON user_behavior(action_type);
 
-CREATE INDEX IF NOT EXISTS CONCURRENTLY idx_user_behavior_created_at
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_behavior_created_at
 ON user_behavior(created_at DESC);
 
 -- 6. Partitioning for large tables (if needed)

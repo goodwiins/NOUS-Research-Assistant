@@ -602,11 +602,10 @@ async def test_internally_caught_step_errors_leak_nothing(
     results = await svc.process_document(doc, job)
 
     assert doc.processing_status == ProcessingStatus.COMPLETED
-    kg = results["knowledge_graph_storage"]
-    assert kg["errors"] == [
-        mps._KG_ENTITY_ERROR,
-        mps._KG_EXTRACTION_ERROR,
-    ]
+    # GOO-743: the KG step reports its failure instead of returning it.
+    assert "knowledge_graph_storage" not in results
+    assert results["warnings"] == ["Knowledge Graph Storage failed"]
+    assert doc.neo4j_index_status == "failed"
     assert results["quality_assessment"]["error"] == mps._QUALITY_ERROR
     _assert_no_secret(results, doc.get_metadata(), job.result, job.error_message)
 
@@ -633,7 +632,8 @@ async def test_a_knowledge_graph_crash_leaks_nothing(
 
     results = await svc.process_document(doc, job)
 
-    assert results["knowledge_graph_storage"]["errors"] == [mps._KG_STORAGE_ERROR]
+    assert results["warnings"] == ["Knowledge Graph Storage failed"]
+    assert doc.neo4j_index_status == "failed"
     _assert_no_secret(results, doc.get_metadata(), job.result)
 
 

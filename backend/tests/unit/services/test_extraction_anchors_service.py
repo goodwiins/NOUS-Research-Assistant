@@ -81,6 +81,7 @@ def world(monkeypatch: pytest.MonkeyPatch) -> _World:
         effective_roles=frozenset(
             {ResearchProjectRole.REVIEWER, ResearchProjectRole.ADJUDICATOR}
         ),
+        release_edges=None,
     )
     w = _World(
         db=db,

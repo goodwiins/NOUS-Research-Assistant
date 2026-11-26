@@ -19,6 +19,7 @@ interface BackendDocument {
   file_size?: number;
   processing_status?: string;
   processing_error?: string;
+  processing_partial?: boolean;
   created_at?: string;
   upload_timestamp?: string;
   processing_completed_at?: string;
@@ -111,6 +112,7 @@ const transformDocument = (backendDoc: BackendDocument): Document => {
     file_size: backendDoc.file_size_bytes || backendDoc.file_size || 0,
     processing_status: normalizeProcessingStatus(backendDoc.processing_status),
     processing_error: backendDoc.processing_error,
+    processing_partial: backendDoc.processing_partial === true,
     upload_timestamp:
       backendDoc.created_at ||
       backendDoc.upload_timestamp ||

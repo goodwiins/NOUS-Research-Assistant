@@ -52,6 +52,7 @@ from src.schemas.chat import ChatMessageUpdate
 from src.services.threads import workspace_access
 from src.services.threads.branch_reads import (
     MessagePageMetadata,
+    ThreadRead,
     read_thread,
     selected_page,
 )
@@ -84,6 +85,7 @@ async def list_messages(
     order: Literal["asc", "desc"] = "asc",
     selected_message_id: Optional[UUID] = None,
     branch_metadata: Optional[MessagePageMetadata] = None,
+    view: Optional[ThreadRead] = None,
 ) -> Optional[Tuple[List[ChatMessage], int, bool]]:
     """List messages in a thread.
 
@@ -100,14 +102,17 @@ async def list_messages(
     the sort direction and how ``has_more`` is computed: ``"asc"`` is
     offset/total-based (backward-compatible default); ``"desc"`` fetches
     ``limit + 1`` rows and trims, so a cursor page never needs the total.
+    ``view`` is a ``read_thread`` result the caller already holds for this
+    thread and user; passing it skips a second access check and lock.
     """
-    view = await read_thread(
-        db,
-        thread_id=thread_id,
-        actor_id=user_id,
-        conversation_id=conversation_id,
-        workspace_id=workspace_id,
-    )
+    if view is None:
+        view = await read_thread(
+            db,
+            thread_id=thread_id,
+            actor_id=user_id,
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+        )
     if view is None:
         return None
     thread = view.thread

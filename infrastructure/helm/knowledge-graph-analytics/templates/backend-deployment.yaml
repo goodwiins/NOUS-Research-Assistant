@@ -107,10 +107,7 @@ spec:
           image: {{ include "knowledge-graph-analytics.backendImage" . | quote }}
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
+            {{- include "knowledge-graph-analytics.containerSecurityContext" . | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.backend.service.targetPort }}

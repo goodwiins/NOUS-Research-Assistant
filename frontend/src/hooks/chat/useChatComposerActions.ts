@@ -14,7 +14,6 @@ import { useChatStore } from '@/store/chat-store';
 
 export interface UseChatComposerActionsParams {
   workspace: Workspace | null;
-  setInput: React.Dispatch<React.SetStateAction<string>>;
   handleSubmit: (
     contentOverride?: string,
     historyOverride?: ChatPageMessage[],
@@ -23,8 +22,9 @@ export interface UseChatComposerActionsParams {
     attachments?: MessageAttachment[],
     branchIntent?: PdfBranchIntent
   ) => Promise<void>;
-  isLoading: boolean;
-  storeIsStreaming: boolean;
+  /** useChatStreaming's `isBusy`: loading, streaming, a pending confirmation
+   * or an active harness run. */
+  isBusy: boolean;
   displayedMessages: ChatPageMessage[];
 }
 
@@ -93,10 +93,8 @@ function branchIntentFor(
  */
 export function useChatComposerActions({
   workspace,
-  setInput,
   handleSubmit,
-  isLoading,
-  storeIsStreaming,
+  isBusy,
   displayedMessages,
 }: UseChatComposerActionsParams): UseChatComposerActionsReturn {
   const isCurrentSession = useChatSessionGuard();
@@ -160,9 +158,11 @@ export function useChatComposerActions({
   // command and the ChatMessageList "Regenerate" action.
   const handleRegenerate = useCallback(
     (assistantMessageIndex: number) => {
-      // Bail before preparing a replacement turn if a stream is in flight;
-      // handleSubmit would otherwise reject it via its own single-flight guard.
-      if (!isCurrentSession() || isLoading || storeIsStreaming) return;
+      if (!isCurrentSession()) return;
+      if (isBusy) {
+        toast.error('Wait for the current reply to finish before retrying.');
+        return;
+      }
       let priorUserIndex = -1;
       for (let index = assistantMessageIndex - 1; index >= 0; index -= 1) {
         if (displayedMessages[index]?.role === 'user') {
@@ -173,9 +173,9 @@ export function useChatComposerActions({
       if (priorUserIndex < 0) return;
       const priorUser = displayedMessages[priorUserIndex];
       const regenerationHistory = displayedMessages.slice(0, priorUserIndex);
-      // Bug 2: pass the content explicitly. `handleSubmit` reads `input` from
-      // its closure, and `setInput` below only schedules a state update — the
-      // deferred `handleSubmit` would otherwise see the stale pre-setInput value.
+      // The content goes to handleSubmit explicitly. The composer draft is
+      // never touched: a regenerate doesn't own it, so the user's text stays
+      // whether the send is accepted or rejected (GOO-751).
       const contentToSend = priorUser.content;
       // Durable regenerate: name the turn being replaced so the server
       // tombstones it, exactly as edit-and-resend does. Without it the
@@ -188,9 +188,6 @@ export function useChatComposerActions({
         toast.error('Wait for this branch to load before retrying.');
         return;
       }
-      // Only replace the composer draft once the send is going ahead; a
-      // rejected retry must leave whatever the user was typing intact.
-      setInput(contentToSend);
       // Preserve attachments while fencing the deferred send to its account.
       const attachments = priorUser.attachments;
       const attachmentIds = attachments?.map((file) => file.document_id);
@@ -206,14 +203,7 @@ export function useChatComposerActions({
           );
       }, 0);
     },
-    [
-      displayedMessages,
-      handleSubmit,
-      isLoading,
-      storeIsStreaming,
-      setInput,
-      isCurrentSession,
-    ]
+    [displayedMessages, handleSubmit, isBusy, isCurrentSession]
   );
 
   // Edit a prior user message in place and re-send it. The history is
@@ -222,28 +212,39 @@ export function useChatComposerActions({
   // handleSubmit drops non-optimistic overlays from newMessages automatically.
   const handleEditUserMessage = useCallback(
     (userMessageIndex: number, newContent: string) => {
-      if (!isCurrentSession() || isLoading || storeIsStreaming) return;
+      if (!isCurrentSession()) return;
+      if (isBusy) {
+        toast.error('Wait for the current reply to finish before editing.');
+        return;
+      }
       const content = newContent.trim();
       if (!content) return;
       const edited = displayedMessages[userMessageIndex];
       if (!edited || edited.role !== 'user') return;
-      const editedHistory = displayedMessages.slice(0, userMessageIndex);
+      // A turn the server never accepted (GOO-772) left nothing to truncate:
+      // resend it with every other row on screen, so later turns, including
+      // later unsent ones, stay where they are. Otherwise the history stops
+      // just before the edited turn.
+      const editedHistory = edited.sendFailed
+        ? displayedMessages.filter((_, index) => index !== userMessageIndex)
+        : displayedMessages.slice(0, userMessageIndex);
       // Durable edit: name the turn being replaced so the server tombstones it
       // (and everything after it) instead of only truncating the request
       // context. Omitted when the edited turn has no persisted
       // client_message_id — a legacy row or one that never reached the server;
       // the FE-only truncation is then the same behaviour as before.
       const supersedes = edited.clientMessageId;
-      const branch = branchIntentFor(edited);
+      // It also has no row to branch from: it was a new turn, so it goes out
+      // again as one, on the current head.
+      const branch = edited.sendFailed ? undefined : branchIntentFor(edited);
       if (branch === null) {
         toast.error('Wait for this branch to load before editing.');
         return;
       }
-      setInput(content);
       const attachments = edited.attachments;
       const attachmentIds = attachments?.map((file) => file.document_id);
-      // Pass content explicitly — setInput only schedules an update, and the
-      // deferred handleSubmit would otherwise read the stale input value.
+      // The edited text goes to handleSubmit explicitly; the composer draft
+      // is left alone, as for regenerate.
       setTimeout(() => {
         if (isCurrentSession())
           void handleSubmit(
@@ -256,14 +257,7 @@ export function useChatComposerActions({
           );
       }, 0);
     },
-    [
-      displayedMessages,
-      handleSubmit,
-      isLoading,
-      storeIsStreaming,
-      setInput,
-      isCurrentSession,
-    ]
+    [displayedMessages, handleSubmit, isBusy, isCurrentSession]
   );
 
   // Regenerate the most recent assistant response (the /retry command).

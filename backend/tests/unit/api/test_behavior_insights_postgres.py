@@ -136,3 +136,43 @@ async def test_engagement_trends_count_only_the_orgs_own_events(
     [engagement] = trends["engagement_trends"]
     assert engagement["active_users"] == 2  # s-empty's user kept
     assert engagement["avg_satisfaction"] == pytest.approx(4.0)
+
+
+async def test_an_untimed_search_type_reports_no_response_time(
+    seeded: None,
+) -> None:
+    """GOO-761: no measurement is null, not 0 seconds."""
+    factory = svc_mod.get_db_sync
+    db = next(factory())
+    try:
+        db.execute(
+            text(
+                "INSERT INTO search_events VALUES ('e-untimed', 's-a', 'q-a', 'ua',"
+                " :a, 'beta', 'semantic', NULL, 0, 1, NULL, :t)"
+            ),
+            {"a": ORG_A, "t": datetime.utcnow() - timedelta(hours=1)},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    insights = await UserBehaviorService().get_behavioral_insights(ORG_A)
+    types = insights["search_types_distribution"]
+    assert types["semantic"]["avg_response_time"] is None
+    assert types["fulltext"]["avg_response_time"] == pytest.approx(100.0)
+
+
+async def test_a_period_without_timed_searches_reports_no_response_time(
+    seeded: None,
+) -> None:
+    factory = svc_mod.get_db_sync
+    db = next(factory())
+    try:
+        db.execute(text("UPDATE search_events SET response_time = NULL"))
+        db.commit()
+    finally:
+        db.close()
+
+    trends = await UserBehaviorService().get_behavior_trends(ORG_A, days_back=7)
+    [search] = trends["search_trends"]
+    assert search["avg_response_time"] is None

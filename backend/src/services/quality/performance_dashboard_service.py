@@ -617,7 +617,11 @@ class PerformanceDashboardService:
                         "name": f"{u.first_name} {u.last_name}",
                         "session_count": u.session_count,
                         "search_count": u.search_count,
-                        "avg_response_time": float(u.avg_response_time or 0),
+                        "avg_response_time": (
+                            float(u.avg_response_time)
+                            if u.avg_response_time is not None
+                            else None
+                        ),
                     }
                     for u in top_users
                 ],

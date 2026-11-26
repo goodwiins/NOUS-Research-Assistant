@@ -370,6 +370,26 @@ fail_after_postgres() {
     fi
 }
 
+# Print how many user objects ragdb holds: base and partitioned tables, plus
+# sequences, standalone composite types, enum/domain/range types, functions
+# and non-public schemas, since the plain dump's CREATE statements collide
+# with any of them. Views and extension-owned objects do not count.
+count_ragdb_objects() {
+    # \_ is LIKE's escaped, literal underscore (standard_conforming_strings is
+    # on by default). A bare _ is a wildcard: 'pg_temp%' would also skip a
+    # user schema such as pgxtemp and let the restore load over it.
+    local not_system="n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'"
+    local sql="SELECT (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'))"
+    sql+=" + (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('S', 'c') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.deptype = 'e' AND ((d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid) OR (d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = c.reltype))))"
+    sql+=" + (SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'd', 'r', 'm') AND $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e'))"
+    sql+=" + (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE $not_system AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'))"
+    sql+=" + (SELECT count(*) FROM pg_catalog.pg_namespace n WHERE $not_system AND n.nspname <> 'public' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'))"
+    local count
+    count=$(kubectl exec -n "$NAMESPACE" deployment/postgres -- \
+        psql -U raguser -d ragdb -tAc "$sql") || return 1
+    printf '%s' "${count//[[:space:]]/}"
+}
+
 # Restore from backup
 restore_backup() {
     local backup_id="$1"
@@ -409,7 +429,17 @@ restore_backup() {
         return 1
     fi
 
-    if ! find "$restore_dir" -type f -name "*_${backup_id}.*" | grep -q .; then
+    # Capture find's output, not `find | grep -q`: under pipefail, grep exiting
+    # early can SIGPIPE find and turn a match into a false "no match". The
+    # assignment keeps find's own status. The search walks the whole restore
+    # directory (no -quit), so a traversal error anywhere in it stops the
+    # restore here, before anything loads.
+    local matches first_match
+    if ! matches=$(find "$restore_dir" -type f -name "*_${backup_id}.*" -print); then
+        log_error "Could not search $restore_dir for backup $backup_id; nothing restored"
+        return 1
+    fi
+    if [ -z "$matches" ]; then
         log_error "No backup files match ID $backup_id in s3://$S3_BUCKET/backups/; nothing restored"
         return 1
     fi
@@ -417,7 +447,15 @@ restore_backup() {
     # A full backup has all three; say loudly which ones this one lacks.
     local component
     for component in postgres redis neo4j; do
-        if ! find "$restore_dir/$component" -type f -name "*_${backup_id}.*" 2>/dev/null | grep -q .; then
+        # An absent component directory is the normal "missing" case; any
+        # other search failure stops the restore.
+        first_match=""
+        if [ -d "$restore_dir/$component" ] &&
+            ! first_match=$(find "$restore_dir/$component" -type f -name "*_${backup_id}.*" -print -quit); then
+            log_error "Could not search $restore_dir/$component for backup $backup_id; nothing restored"
+            return 1
+        fi
+        if [ -z "$first_match" ]; then
             if [ "$component" = "neo4j" ]; then
                 log_warning "MISSING from backup $backup_id: neo4j (this script never restores neo4j; there is no dump to restore by hand either)"
             else
@@ -450,18 +488,14 @@ restore_backup() {
         fi
         # The dump is a plain pg_dump without --clean: loading it into a
         # populated database collides with existing objects. Require an empty
-        # target instead of guessing what to drop. Count base and partitioned
-        # tables only: views and extension-owned tables do not make it populated.
-        local table_count
-        if ! table_count=$(kubectl exec -n "$NAMESPACE" deployment/postgres -- \
-            psql -U raguser -d ragdb -tAc \
-            "SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')"); then
+        # target instead of guessing what to drop (see count_ragdb_objects).
+        local object_count
+        if ! object_count=$(count_ragdb_objects); then
             log_error "Cannot query the target PostgreSQL database; nothing restored"
             return 1
         fi
-        table_count="${table_count//[[:space:]]/}"
-        if [ "$table_count" != "0" ]; then
-            log_error "Target database ragdb is not empty ($table_count tables). The dump has no DROP statements: scale the backend, workers and migrate job to 0, drop and recreate ragdb (see RUNBOOKS.md), then re-run. Nothing restored."
+        if [ "$object_count" != "0" ]; then
+            log_error "Target database ragdb is not empty ($object_count tables, sequences, types, functions or schemas). The dump has no DROP statements: scale the backend, workers and migrate job to 0, drop and recreate ragdb (see RUNBOOKS.md), then re-run. Nothing restored."
             return 1
         fi
     fi
@@ -484,7 +518,16 @@ restore_backup() {
         log_info "Restoring PostgreSQL database..."
         if ! gunzip -c "$pg_file" | kubectl exec -i -n "$NAMESPACE" deployment/postgres -- \
             psql -U raguser -d ragdb -v ON_ERROR_STOP=1 --single-transaction; then
-            log_error "PostgreSQL restore failed; the transaction was rolled back"
+            # A dropped exec stream gives psql EOF, and --single-transaction
+            # then COMMITs what it loaded: check instead of assuming a rollback.
+            local after_count
+            if ! after_count=$(count_ragdb_objects); then
+                log_error "PostgreSQL restore failed, and ragdb could not be checked afterwards: it may be partially loaded. Check it before retrying."
+            elif [ "$after_count" != "0" ]; then
+                log_error "PostgreSQL restore failed, but ragdb now holds $after_count objects: it may be partially loaded. Check it (or drop and recreate it, see RUNBOOKS.md) before retrying."
+            else
+                log_error "PostgreSQL restore failed. ragdb shows no counted objects (tables, sequences, types, functions, schemas), but views or extension objects may still have been committed: inspect it before retrying."
+            fi
             return 1
         fi
         restored=$((restored + 1))

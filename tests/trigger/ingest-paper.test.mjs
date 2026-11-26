@@ -71,3 +71,26 @@ test("a document id is never polled as a processing job id", async () => {
   assert.deepEqual(out, { status: "accepted", paperId: "2301.07041" });
   assert.deepEqual(calls, ["POST /api/v1/arxiv/ingest"]);
 });
+
+// GOO-755: a failed ingest POST must reject the task. The task retry is the
+// only retry layer for this write (the client sends a POST once), so a task
+// that swallowed the error would report "accepted" for a paper the backend
+// never queued, and would never retry it.
+function stubStatus(status) {
+  calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(`${init?.method} ${new URL(url).pathname}`);
+    return new Response(JSON.stringify({ detail: "x" }), { status });
+  };
+}
+
+test("a 500 from the ingest POST rejects the task, sent once per attempt", async () => {
+  stubStatus(500);
+  await assert.rejects(ingestPaper.run(payload), (err) => err.status === 500);
+  assert.deepEqual(calls, ["POST /api/v1/arxiv/ingest"]);
+});
+
+test("a 4xx from the ingest POST rejects the task too", async () => {
+  stubStatus(422);
+  await assert.rejects(ingestPaper.run(payload), (err) => err.status === 422);
+});

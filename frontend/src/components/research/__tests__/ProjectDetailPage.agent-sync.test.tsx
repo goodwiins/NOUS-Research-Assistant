@@ -11,9 +11,10 @@ import { projectSkillService } from '@/services/projectSkillService';
 import toast from 'react-hot-toast';
 
 const mockPush = vi.fn();
+const mockParams: { id: string } = { id: 'proj-1' };
 
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ id: 'proj-1' }),
+  useParams: () => mockParams,
   useRouter: () => ({ push: mockPush }),
   useSearchParams: () => new URLSearchParams(window.location.search),
 }));
@@ -147,6 +148,7 @@ const mockClearError = vi.fn();
 
 describe('ProjectDetailPage agent sync', () => {
   beforeEach(() => {
+    mockParams.id = 'proj-1';
     window.history.replaceState(null, '', '/projects/proj-1');
     useAgentChatStore.getState().reset();
     vi.clearAllMocks();
@@ -377,6 +379,17 @@ describe('ProjectDetailPage agent sync', () => {
         'draft-1'
       );
     });
+  });
+
+  it('loads an uppercase-UUID project URL under the canonical lowercase id (GOO-778)', async () => {
+    const id = '0f8e2a1c-3b4d-4e5f-8a9b-0c1d2e3f4a5b';
+    mockParams.id = id.toUpperCase();
+
+    render(<ProjectDetailPage />);
+
+    await waitFor(() => expect(mockFetchProject).toHaveBeenCalledWith(id));
+    expect(mockFetchProjectDocuments).toHaveBeenCalledWith(id);
+    expect(mockFetchProjectNotes).toHaveBeenCalledWith(id);
   });
 
   it('refreshes project data when the refresh button is clicked', async () => {

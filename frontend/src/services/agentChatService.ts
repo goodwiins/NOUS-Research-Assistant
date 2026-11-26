@@ -55,6 +55,21 @@ function httpLocalFailure(status: number): AgentStreamLocalFailure | undefined {
   return undefined;
 }
 
+/**
+ * A new-stream request that never got a response (network down, DNS, CORS,
+ * a failed auth refresh). The server cannot have accepted the turn, so the
+ * chat keeps the user's text (GOO-772). `cause` holds the original error.
+ */
+export class AgentStreamRequestFailed extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'Stream request failed');
+    this.name = 'AgentStreamRequestFailed';
+    this.cause = cause;
+  }
+}
+
 function agentStreamUrl(
   path: 'stream' | 'stream/confirm' | `stream/cancel/${string}`
 ): string {
@@ -182,11 +197,16 @@ export interface AgentStreamCallbacks {
    * `error` frame; for a synthesized HTTP failure it is derived client-side
    * from the status, and is left `undefined` for 5xx/network — a transport
    * failure carries no server claim, so guessing one would be a lie.
+   *
+   * `rejectedStatus` is set only by streamMessage, and only for an HTTP-level
+   * failure: the stream never opened, so the server never accepted the turn
+   * (GOO-772). A failure after the stream opened leaves it `undefined`.
    */
   onError?: (
     error: string,
     category?: AgentErrorCategory,
-    localFailure?: AgentStreamLocalFailure
+    localFailure?: AgentStreamLocalFailure,
+    rejectedStatus?: number
   ) => void;
 }
 
@@ -849,7 +869,9 @@ class AgentChatService {
         );
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
-        throw err;
+        // An abort with a custom reason (account switch) is not a failed send.
+        if (signal.aborted) throw err;
+        throw new AgentStreamRequestFailed(err);
       }
 
       if (!response.ok || !response.body) {
@@ -860,7 +882,8 @@ class AgentChatService {
             ? `Stream failed (${response.status}): ${backendMessage}`
             : `Stream failed: ${response.status}`,
           httpFailureCategory(response.status),
-          httpLocalFailure(response.status)
+          httpLocalFailure(response.status),
+          response.status
         );
         return;
       }
@@ -1143,7 +1166,9 @@ class AgentChatService {
     signal.throwIfAborted();
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Failed to get run status: ${text}`);
+      throw Object.assign(new Error(`Failed to get run status: ${text}`), {
+        status: res.status,
+      });
     }
     const data = await res.json();
     signal.throwIfAborted();
@@ -1168,7 +1193,9 @@ class AgentChatService {
     signal.throwIfAborted();
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Failed to confirm: ${text}`);
+      throw Object.assign(new Error(`Failed to confirm: ${text}`), {
+        status: res.status,
+      });
     }
   }
 

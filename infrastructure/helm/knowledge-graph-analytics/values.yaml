@@ -229,6 +229,15 @@ celeryWorker:
 
   command: ["celery", "-A", "src.tasks.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
 
+  # Local-node `celery inspect ping` without the app import; gates rollout
+  # availability and the PDB.
+  readinessProbe:
+    commandTimeout: 30
+    initialDelaySeconds: 30
+    periodSeconds: 60
+    timeoutSeconds: 45
+    failureThreshold: 3
+
   resources:
     limits:
       cpu: 2000m

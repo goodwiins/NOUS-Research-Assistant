@@ -34,6 +34,7 @@ import {
   listMatrices,
 } from '@/services/scispaceService';
 import { APIErrorClass } from '@/types/api';
+import { extractionCellText } from '@/utils/extractionCellText';
 import type {
   ApiClaimAssessmentStance,
   ApiClaimLink,
@@ -601,7 +602,9 @@ async function loadLinkTargets(projectId: string): Promise<LinkTarget[]> {
         documentId: cell.document_id,
         fieldId: cell.field_id as string,
         label: `${grid.name} · ${cell.column_name}: ${
-          cell.value ?? cell.missingness ?? '—'
+          cell.value == null
+            ? (cell.missingness ?? '—')
+            : extractionCellText(cell.value)
         }`,
       }))
   );

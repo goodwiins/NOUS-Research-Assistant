@@ -76,8 +76,14 @@ apply_database_optimizations() {
 
     # Apply performance optimization SQL
     if [ -f "$RAG_DIR/database/performance_optimization.sql" ]; then
-        docker exec -i rag-postgres psql -U raguser -d ragdb < "$RAG_DIR/database/performance_optimization.sql"
-        log_success "PostgreSQL optimizations applied"
+        # ON_ERROR_STOP makes psql exit non-zero on the first failed
+        # statement. Without it every error was skipped and success logged.
+        if docker exec -i rag-postgres psql -v ON_ERROR_STOP=1 -U raguser -d ragdb < "$RAG_DIR/database/performance_optimization.sql"; then
+            log_success "PostgreSQL optimizations applied"
+        else
+            log_error "PostgreSQL optimization script failed; see psql output above"
+            return 1
+        fi
     else
         log_warning "PostgreSQL optimization script not found"
     fi

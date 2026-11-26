@@ -1,5 +1,6 @@
 'use client';
 
+import { toCsv } from '@/utils/csv';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -41,6 +42,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { AnalyticsChart } from './AnalyticsChart';
 import { AnalyticsOverview, type AnalyticsOverviewData } from './AnalyticsOverview';
+import { NOT_MEASURED } from '@/utils/analyticsFigure';
 import {
   AnalyticsTable,
   createDocumentAnalyticsTable,
@@ -191,7 +193,12 @@ export async function fetchAnalyticsDashboard(
       overview: {
         documentsIndexed,
         searches24h: overview ? overview.totalSearches : null,
-        avgSearchTimeMs24h: overview ? overview.avgSearchTimeMs : null,
+        // null from a loaded overview = no search was timed, not an outage.
+        avgSearchTimeMs24h: overview
+          ? overview.avgSearchTimeMs === null
+            ? NOT_MEASURED
+            : overview.avgSearchTimeMs
+          : null,
         activeUsers24h: adminFigure(overview?.engagement?.activeUsers),
         searchSessions24h: adminFigure(overview?.engagement?.searchSessions),
       },
@@ -253,20 +260,13 @@ export function AnalyticsDashboard({ className }: AnalyticsDashboardProps) {
     if (rows.length === 0) return;
 
     const headers = ['Filename', 'Type', 'Size (bytes)', 'Uploaded', 'Status'];
-    const escape = (value: unknown) => {
-      const str = String(value ?? '');
-      return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-    };
-    const lines = [
-      headers.join(','),
-      ...rows.map((row) =>
-        [row.filename, row.type, row.size, row.uploadedAt, row.status]
-          .map(escape)
-          .join(',')
-      ),
-    ];
+    // Filenames are user-chosen: neutralise formulas (GOO-666 FR-15).
+    const csv = toCsv([
+      headers,
+      ...rows.map((row) => [row.filename, row.type, row.size, row.uploadedAt, row.status]),
+    ]);
 
-    const blob = new Blob([lines.join('\n')], {
+    const blob = new Blob([csv], {
       type: 'text/csv;charset=utf-8;',
     });
     const url = URL.createObjectURL(blob);

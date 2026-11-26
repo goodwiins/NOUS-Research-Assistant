@@ -1,10 +1,5 @@
 import React from 'react';
-import {
-  ExclamationTriangleIcon,
-  XCircleIcon,
-  InformationCircleIcon,
-  XMarkIcon,
-} from '@heroicons/react/24/outline';
+import { AlertTriangle, XCircle, Info, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export type ErrorSeverity = 'error' | 'warning' | 'info';
@@ -57,13 +52,13 @@ const getErrorIcon = (severity: ErrorSeverity) => {
 
   switch (severity) {
     case 'error':
-      return <XCircleIcon className={cn(iconClass, "text-destructive")} />;
+      return <XCircle className={cn(iconClass, "text-destructive")} />;
     case 'warning':
-      return <ExclamationTriangleIcon className={cn(iconClass, "text-yellow-600")} />;
+      return <AlertTriangle className={cn(iconClass, "text-yellow-600")} />;
     case 'info':
-      return <InformationCircleIcon className={cn(iconClass, "text-blue-600")} />;
+      return <Info className={cn(iconClass, "text-blue-600")} />;
     default:
-      return <XCircleIcon className={cn(iconClass, "text-destructive")} />;
+      return <XCircle className={cn(iconClass, "text-destructive")} />;
   }
 };
 
@@ -195,7 +190,7 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
             )}
             aria-label="Dismiss"
           >
-            <XMarkIcon className="h-4 w-4" />
+            <X className="h-4 w-4" />
           </button>
         )}
       </div>
@@ -255,7 +250,7 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
             )}
             aria-label="Dismiss"
           >
-            <XMarkIcon className="h-5 w-5" />
+            <X className="h-5 w-5" />
           </button>
         )}
       </div>

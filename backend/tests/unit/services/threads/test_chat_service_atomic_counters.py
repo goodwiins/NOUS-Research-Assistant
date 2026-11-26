@@ -122,3 +122,50 @@ async def test_user_and_assistant_writers_increment_db_counters(
     assert row.message_count == 4
     assert row.token_count > 17
     enqueue.assert_called_once_with(thread_id)
+
+
+@pytest.mark.asyncio
+async def test_assistant_message_citation_failure_persists_nothing(
+    db: tuple[AsyncSession, uuid.UUID, uuid.UUID],
+) -> None:
+    """A citation that cannot be built fails the whole write (B8-S9).
+
+    The error used to be logged and swallowed, so the message committed
+    without its citations. It now propagates before commit; once the session
+    owner rolls back, neither the message nor the counter bump remains.
+    """
+    session, _user_id, thread_id = db
+    service = ChatService(session)
+
+    with (
+        patch(
+            "src.services.threads.chat_service.Citation",
+            side_effect=RuntimeError("citation boom"),
+        ),
+        patch(
+            "src.services.threads.thread_summarization_service.enqueue_summarization"
+        ) as enqueue,
+    ):
+        with pytest.raises(RuntimeError, match="citation boom"):
+            await service.create_assistant_message(
+                thread_id=thread_id,
+                content="answer",
+                token_count=7,
+                citations=[{"snippet": "cited text", "chunk_index": 0}],
+            )
+    await session.rollback()
+
+    messages = (
+        (
+            await session.execute(
+                select(ChatMessage).where(ChatMessage.thread_id == thread_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert messages == []
+    row = await _thread_row(session, thread_id)
+    assert row.message_count == 2
+    assert row.token_count == 10
+    enqueue.assert_not_called()

@@ -24,7 +24,7 @@ After a green Test Pipeline on `develop`, `.github/workflows/release-dev.yml` bu
 
 ## Workflows (`.github/workflows/`, 11 files)
 
-`agent-eval.yml`, `docker-build.yml`, `helm-validate.yml`, `opencode.yml`, `release-dev.yml`, `secret-scan.yml`, `supabase-migrations.yml`, `test-pipeline.yml`, `trigger-deploy.yml`, `workflow-lint.yml`, plus `README.md`.
+`agent-eval.yml`, `docker-build.yml`, `helm-validate.yml`, `opencode.yml`, `release-dev.yml`, `secret-scan.yml`, `supabase-migrations.yml`, `test-pipeline.yml`, `verify-dev-health.yml`, `workflow-lint.yml`, plus `README.md`.
 
 ## Helm and Kubernetes
 

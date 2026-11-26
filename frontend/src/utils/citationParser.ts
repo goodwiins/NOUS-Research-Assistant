@@ -259,6 +259,11 @@ type MarkdownNode = {
   children?: MarkdownNode[];
 };
 
+// Enough for every committed message of a long thread across its consumers
+// (transcript bubbles and the context rail) without holding unbounded text.
+const RENDERED_INDEX_CACHE_LIMIT = 128;
+const renderedIndexCache = new Map<string, Map<number, readonly number[]>>();
+
 /**
  * Citation indices CitationRenderer draws as badges for this content.
  *
@@ -269,8 +274,34 @@ type MarkdownNode = {
  * keeps source selection in step with the transcript; scanning the raw string
  * cannot, because only a Markdown parser knows where code and math begin and
  * end.
+ *
+ * Committed content only: a full Markdown parse costs about 2 ms per KB, so
+ * calling this per streamed token would re-parse the whole message each time.
+ * Results are cached per content and `citationCount`, because every store
+ * update rebuilds the message and citation arrays that callers pass in.
  */
 function extractRenderedCitationIndices(
+  content: string,
+  citationCount: number
+): readonly number[] {
+  const byCount =
+    renderedIndexCache.get(content) ?? new Map<number, readonly number[]>();
+  let indices = byCount.get(citationCount);
+  if (!indices) {
+    indices = parseRenderedCitationIndices(content, citationCount);
+    byCount.set(citationCount, indices);
+  }
+  // Re-insert so Map order tracks recency, then drop the oldest entry.
+  renderedIndexCache.delete(content);
+  renderedIndexCache.set(content, byCount);
+  if (renderedIndexCache.size > RENDERED_INDEX_CACHE_LIMIT) {
+    const oldest = renderedIndexCache.keys().next().value;
+    if (oldest !== undefined) renderedIndexCache.delete(oldest);
+  }
+  return indices;
+}
+
+function parseRenderedCitationIndices(
   content: string,
   citationCount: number
 ): number[] {
@@ -316,6 +347,10 @@ export function getReferencedItemsByCitationIndex<T>(
   content: string,
   items: T[]
 ): T[] {
+  // Nothing can resolve against an empty list, so skip the parse. Callers
+  // such as ChatBubble pass a fresh `[]` on every render.
+  if (items.length === 0) return [];
+
   const indices = extractRenderedCitationIndices(content, items.length);
 
   if (indices.length === 0) {

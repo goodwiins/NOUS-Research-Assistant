@@ -3,12 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { THEME } from '@/theme/constants';
-import {
-  ArrowTrendingDownIcon,
-  ArrowTrendingUpIcon,
-  ChartBarIcon,
-  MinusIcon,
-} from '@heroicons/react/24/outline';
+import { TrendingDown, TrendingUp, BarChart3, Minus } from 'lucide-react';
 import React from 'react';
 import {
   Bar,
@@ -70,11 +65,11 @@ export const RAGTriadMetricsDisplay: React.FC<RAGTriadMetricsDisplayProps> = ({
   const getTrendIcon = (trend: string) => {
     switch (trend) {
       case 'up':
-        return ArrowTrendingUpIcon;
+        return TrendingUp;
       case 'down':
-        return ArrowTrendingDownIcon;
+        return TrendingDown;
       default:
-        return MinusIcon;
+        return Minus;
     }
   };
 
@@ -369,7 +364,7 @@ export const RAGTriadMetricsDisplay: React.FC<RAGTriadMetricsDisplayProps> = ({
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center">
-            <ChartBarIcon className="h-4 w-4 mr-2" />
+            <BarChart3 className="h-4 w-4 mr-2" />
             RAG Triad Metrics - Historical Trends ({timeRange})
           </CardTitle>
         </CardHeader>

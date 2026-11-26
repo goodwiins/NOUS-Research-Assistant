@@ -112,21 +112,91 @@ describe('math, links and source count', () => {
       'a',
     ]);
   });
+
+  it('re-reads cached content when the source count grows', () => {
+    // The parse cache is keyed by content AND count: with two sources the
+    // bare group [1, 3] is out of range and selects nothing; once a third
+    // source arrives the same committed text selects the first and third.
+    const content = 'Count-keyed cache check [1, 3].';
+
+    expect(getReferencedItemsByCitationIndex(content, ['a', 'b'])).toEqual([]);
+    expect(
+      getReferencedItemsByCitationIndex(content, ['a', 'b', 'c'])
+    ).toEqual(['a', 'c']);
+  });
 });
 
 describe('performance', () => {
   // One Markdown parse, the same one the renderer already pays for this
-  // message. The bound is loose enough for a loaded CI runner and still far
-  // below the 5.8 s a quadratic scanner took at this size.
-  it('scans a 400 KB message dense with code and markers within 3 seconds', () => {
-    const unit =
-      'Claim with `a[1]` inline and [2] cited.\n\n```\nx[1]\n```\n\n- item [3]\n\n';
-    const content = unit.repeat(Math.ceil(400_000 / unit.length));
-    const start = performance.now();
-    const result = referenced(content);
-    const elapsed = performance.now() - start;
+  // message. A wall-clock bound flakes on loaded CI runners (400 KB took
+  // 4.2-4.6 s there, 0.9 s locally), so this pins the growth instead. 16x the
+  // input costs 16-21x the time, quiet or under 4 parallel coverage runs; a
+  // quadratic scanner costs about 256x (a mutant with an O(n^2) pre-scan
+  // measured over 60x). The bound sits between. Small and large runs
+  // alternate, so a load spike lands on both sizes rather than on one.
+  // The input is block-structured, as real answers are; micromark itself is
+  // superlinear on one giant paragraph.
+  const unit =
+    'Claim with `a[1]` inline and [2] cited.\n\n```\nx[1]\n```\n\n- item [3]\n\n';
+  const message = (bytes: number): string =>
+    unit.repeat(Math.ceil(bytes / unit.length));
 
-    expect(result).toEqual([2, 3]);
-    expect(elapsed).toBeLessThan(3_000);
+  // Results are cached per content, so every timed run gets its own text.
+  let variant = 0;
+  const fresh = (content: string): string =>
+    `Run ${(variant += 1)}.\n\n${content}`;
+
+  function parseMs(content: string): number {
+    const start = performance.now();
+    expect(referenced(content)).toEqual([2, 3]);
+    return performance.now() - start;
+  }
+
+  const median = (values: number[]): number =>
+    [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+
+  it('scales linearly with message size on code- and marker-dense input', () => {
+    referenced(fresh(message(20_000))); // warm the parser before timing
+    const small: number[] = [];
+    const large: number[] = [];
+    for (let pair = 0; pair < 5; pair += 1) {
+      small.push(parseMs(fresh(message(12_500))));
+      large.push(parseMs(fresh(message(200_000))));
+    }
+
+    expect(median(large) / median(small)).toBeLessThan(40);
+  }, 60_000);
+
+  it('parses a committed message once, however often it is asked again', () => {
+    const content = fresh(message(200_000));
+    const first = parseMs(content);
+    // A store update rebuilds the citation array; the content is unchanged.
+    const again = parseMs(content.slice());
+
+    expect(again).toBeLessThan(first / 10);
+  });
+
+  it('keeps the 128 most recently used messages and drops older ones', () => {
+    // Fill the cache, so each new entry below evicts exactly one old one.
+    for (let other = 0; other < 128; other += 1) referenced(fresh('[1]'));
+    const kept = fresh(message(50_000));
+    const dropped = fresh(message(50_000));
+    const keptFirst = parseMs(kept);
+    const droppedFirst = parseMs(dropped);
+    // `kept` is used again, so `dropped` is now the oldest entry.
+    parseMs(kept);
+    for (let other = 0; other < 127; other += 1) referenced(fresh('[1]'));
+
+    expect(parseMs(kept)).toBeLessThan(keptFirst / 10);
+    expect(parseMs(dropped)).toBeGreaterThan(droppedFirst / 10);
+  });
+
+  it('skips the parse when there are no sources to select from', () => {
+    const content = fresh(message(200_000));
+    const start = performance.now();
+    expect(getReferencedItemsByCitationIndex(content, [])).toEqual([]);
+    const empty = performance.now() - start;
+
+    expect(empty).toBeLessThan(parseMs(content) / 10);
   });
 });
