@@ -48,6 +48,8 @@ spec:
         - name: celery-worker
           image: {{ include "knowledge-graph-analytics.backendImage" . | quote }}
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          securityContext:
+            {{- include "knowledge-graph-analytics.containerSecurityContext" . | nindent 12 }}
           command:
             - celery
             - -A
@@ -114,4 +116,22 @@ spec:
             periodSeconds: {{ .Values.celeryWorker.livenessProbe.periodSeconds | default 180 }}
             timeoutSeconds: {{ .Values.celeryWorker.livenessProbe.timeoutSeconds | default 90 }}
             failureThreshold: {{ .Values.celeryWorker.livenessProbe.failureThreshold | default 10 }}
+          # Same local-node ping as liveness (a stuck consumer stops answering), but
+          # with -b "$REDIS_URL" instead of -A: no app import. `-A src.tasks.celery_app`
+          # runs src/tasks/__init__.py, which loads the task modules, models and DB
+          # engine: several hundred MB and seconds of CPU per probe, too much to add
+          # every minute to a pod sized close to its memory limit. A rediss:// broker
+          # gets the same no-verify TLS the app sets (Kombu's default for the scheme).
+          # Gates rollout availability and the worker PDB; the worker has no Service.
+          # It depends on the broker: an outage marks every worker not ready.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - celery -b "$REDIS_URL" inspect ping -d celery@$HOSTNAME --timeout={{ .Values.celeryWorker.readinessProbe.commandTimeout | default 30 }}
+            initialDelaySeconds: {{ .Values.celeryWorker.readinessProbe.initialDelaySeconds | default 30 }}
+            periodSeconds: {{ .Values.celeryWorker.readinessProbe.periodSeconds | default 60 }}
+            timeoutSeconds: {{ .Values.celeryWorker.readinessProbe.timeoutSeconds | default 45 }}
+            failureThreshold: {{ .Values.celeryWorker.readinessProbe.failureThreshold | default 3 }}
 {{- end }}

@@ -175,6 +175,71 @@ class DeploymentConsistency(unittest.TestCase):
                 seen.add(container["name"])
         self.assertEqual(seen, wanted)
 
+    def test_backend_image_containers_share_container_security_context(
+        self,
+    ) -> None:
+        """GOO-535: every backend-image container drops privileges like the API."""
+        wanted = {
+            "backend",
+            "celery-worker",
+            "celery-beat",
+            "migrations",
+            "synthetic-traffic",
+        }
+        seen = set()
+        for doc, pod in pod_specs(render()):
+            component = doc["metadata"]["labels"].get("app.kubernetes.io/component")
+            if component not in wanted:
+                continue
+            self.assertEqual(
+                pod["containers"][0].get("securityContext"),
+                {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
+                component,
+            )
+            seen.add(component)
+        self.assertEqual(seen, wanted)
+
+    def test_worker_readiness_and_beat_liveness_detect_stalls(self) -> None:
+        """GOO-535: worker readiness pings its own node; beat liveness watches
+        the schedule file instead of a pgrep that PID 1 always satisfies."""
+        containers = {
+            doc["metadata"]["labels"].get("app.kubernetes.io/component"): pod[
+                "containers"
+            ][0]
+            for doc, pod in pod_specs(render())
+            if doc["kind"] == "Deployment"
+        }
+        worker = containers["celery-worker"]
+        readiness = " ".join(worker["readinessProbe"]["exec"]["command"])
+        self.assertIn("inspect ping -d celery@$HOSTNAME", readiness)
+        # Readiness must not import the app (src.tasks loads the whole task
+        # graph); it reaches the broker through the container's REDIS_URL.
+        self.assertNotIn("src.tasks", readiness)
+        self.assertIn('-b "$REDIS_URL"', readiness)
+        self.assertIn("--timeout=30", readiness)
+        self.assertEqual(
+            {
+                key: worker["readinessProbe"][key]
+                for key in (
+                    "initialDelaySeconds",
+                    "periodSeconds",
+                    "timeoutSeconds",
+                    "failureThreshold",
+                )
+            },
+            {
+                "initialDelaySeconds": 30,
+                "periodSeconds": 60,
+                "timeoutSeconds": 45,
+                "failureThreshold": 3,
+            },
+        )
+        beat = containers["celery-beat"]
+        probe = " ".join(beat["livenessProbe"]["exec"]["command"])
+        self.assertNotIn("pgrep", probe)
+        self.assertIn("celerybeat-schedule", probe)
+        self.assertIn("--schedule=/app/celerybeat-schedule", beat["command"])
+
 
 if __name__ == "__main__":
     unittest.main()
