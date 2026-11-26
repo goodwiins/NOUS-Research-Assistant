@@ -196,8 +196,8 @@ workspace list, and the owner-only `GET /api/v1/agent/threads/{id}/messages`.
 | Row | Caller → target | Expected | Status |
 | --- | --- | --- | --- |
 | W1 | B → own workspace `b` | 200 with content | pass |
-| W2 | A (other org) → `b` | 404 / empty, no canary | pass |
-| W3 | C (same org, nonmember) → `b` | 404 / empty, no canary | pass |
+| W2 | A (other org) → `b` | 404, no canary | pass |
+| W3 | C (same org, nonmember) → `b` | 404, no canary | pass |
 | W4 | C invited as member → `b` | 200 with content (agent history stays owner-only) | pass |
 | W5 | A → public workspace `b-pub` | 200 with content | pass |
 | W6 | C member, after soft-deleting workspace / conversation / thread | 404 on thread, message, context | pass |

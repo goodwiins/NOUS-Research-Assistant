@@ -86,6 +86,9 @@ if [ "$1" = "s3" ] && [ "$2" = "sync" ]; then
             badredis) mkdir -p "$d/redis"
                 printf 'not gzip' > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
             lockedredis) mkdir -p "$d/redis"; chmod 000 "$d/redis" ;;
+            lockedk8s) mkdir -p "$d/kubernetes"
+                printf x | gzip > "$d/kubernetes/k8s_configs_${STUB_BACKUP_ID}.tar.gz"
+                chmod 000 "$d/kubernetes" ;;
             neo4j) mkdir -p "$d/neo4j"
                 printf 'dump' | gzip > "$d/neo4j/neo4j_backup_${STUB_BACKUP_ID}.dump.gz" ;;
         esac
@@ -192,6 +195,21 @@ def test_unreadable_component_dir_fails_the_restore(tmp_path: Path) -> None:
             locked.chmod(0o700)
     assert result.returncode != 0, output
     assert "Could not search" in output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_unreadable_kubernetes_dir_stops_the_restore_before_loading(
+    tmp_path: Path,
+) -> None:
+    # The top-level search walks every directory, not only the components.
+    try:
+        result, _calls, output = _restore(tmp_path, "postgres lockedk8s")
+    finally:
+        for locked in tmp_path.rglob("kubernetes"):
+            locked.chmod(0o700)
+    assert result.returncode != 0, output
+    assert "Could not search" in output
+    assert "PostgreSQL restore completed" not in output
     assert _psql_stdin(tmp_path) is None
 
 

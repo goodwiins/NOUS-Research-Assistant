@@ -17,6 +17,9 @@ def test_thread_context_route_unwraps_service_shape() -> None:
     assert "metadata.get(" in blk[:1400]
     svc = _read("src/services/threads/chat_service.py")
     ctx = svc[svc.find("async def get_thread_context") :]
+    # Not-found/no-access (``list_messages`` returned None) exits before any
+    # message is built.
+    assert "if result is None:" in ctx
     assert "return None\n\n        messages = []" in ctx
 
 

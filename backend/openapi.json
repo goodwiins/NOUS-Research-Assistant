@@ -4362,10 +4362,15 @@
         "type": "object"
       },
       "BulkThreadResponse": {
-        "description": "Bulk thread operation response",
+        "description": "Bulk thread operation response.\n\n``failed`` is ``total - succeeded - queued``. ``queued`` counts threads\nwhose work was only enqueued (bulk summarize) and is 0 for the others.",
         "properties": {
           "failed": {
             "title": "Failed",
+            "type": "integer"
+          },
+          "queued": {
+            "default": 0,
+            "title": "Queued",
             "type": "integer"
           },
           "results": {
@@ -4394,7 +4399,7 @@
         "type": "object"
       },
       "BulkThreadResult": {
-        "description": "Result for a single thread in bulk operation",
+        "description": "Result for a single thread in bulk operation.\n\n``queued`` is true when the work was only enqueued (bulk summarize); such\na result has ``success`` false because nothing completed in the request.",
         "properties": {
           "error": {
             "anyOf": [
@@ -4406,6 +4411,11 @@
               }
             ],
             "title": "Error"
+          },
+          "queued": {
+            "default": false,
+            "title": "Queued",
+            "type": "boolean"
           },
           "success": {
             "title": "Success",
@@ -30470,6 +30480,11 @@
               }
             ],
             "title": "Created By Id"
+          },
+          "has_more_messages": {
+            "default": false,
+            "title": "Has More Messages",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -65999,7 +66014,7 @@
     },
     "/api/v2/threads": {
       "get": {
-        "description": "List threads in a conversation.",
+        "description": "List threads in a conversation.\n\nReturns 404 when the conversation is missing or not accessible.",
         "operationId": "list_threads_api_v2_threads_get",
         "parameters": [
           {
@@ -66277,7 +66292,7 @@
     },
     "/api/v2/threads/bulk/summarize": {
       "post": {
-        "description": "Bulk trigger AI summarization for multiple threads.\n\nRate limited to 5 operations per minute per user (heavy AI operations).",
+        "description": "Bulk queue AI summarization for multiple threads.\n\nSummarization runs asynchronously, so nothing is summarized when this\nreturns: each enqueued thread is reported with ``queued: true`` and\n``success: false``, ``succeeded`` is always 0, and ``queued`` counts the\nenqueued threads. A ``threads_bulk_updated`` event with action\n``\"summarize_queued\"`` is broadcast for the enqueued threads only.\n\nRate limited to 5 operations per minute per user (heavy AI operations).",
         "operationId": "bulk_summarize_threads_api_v2_threads_bulk_summarize_post",
         "requestBody": {
           "content": {

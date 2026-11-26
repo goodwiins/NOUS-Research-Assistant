@@ -11,6 +11,7 @@ import {
   loadBranches,
   saveBranches,
   request,
+  HttpError,
   type BranchHistory,
   type TerminalMessage,
   type Message,
@@ -71,6 +72,41 @@ export function reconcileHistory(
     parentId = runtimeId;
   });
   return { headId: parentId, nodes: [...nodes.values()] };
+}
+
+/** Startup view of the saved thread. A 404 means the thread was deleted or is no
+ * longer accessible, so it is unselected instead of reported as a connection problem. */
+export async function openSavedThread(threadId: string | null): Promise<{
+  messages: TerminalMessage[];
+  history: BranchHistory;
+  notice: string;
+}> {
+  const saved = threadId ? await loadBranches(threadId) : undefined;
+  try {
+    const messages = threadId ? await loadTranscript(threadId) : [];
+    return {
+      messages,
+      history: reconcileHistory(messages, saved, threadId),
+      notice: "",
+    };
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) {
+      const config = loadConfig();
+      if (config) saveConfig({ ...config, thread_id: null });
+      return {
+        messages: [],
+        history: fromMessages([]),
+        notice:
+          "The saved thread was deleted or is no longer available. Starting a new thread.",
+      };
+    }
+    return {
+      messages: [],
+      history: reconcileHistory(undefined, saved, threadId),
+      notice:
+        "Could not refresh thread history. Showing saved local history; check your connection or select another thread.",
+    };
+  }
 }
 
 /** One application-owned branch graph. The backend owns each branch's transcript. */

@@ -2,16 +2,18 @@
 
 import type { ReactElement } from 'react';
 import {
-  useAssistantToolUI,
+  AuiConfig,
+  Tools,
   type ToolCallMessagePartProps,
+  type Toolkit,
 } from '@assistant-ui/react';
 import { FileSearch } from 'lucide-react';
 
 import { HitlApprovalRenderer, HITL_APPROVAL_TOOL } from './HitlApprovalToolUI';
 
 /**
- * Declarative per-tool renderers (P2). Each is registered by
- * `toolName` via `useAssistantToolUI`; a matching tool-call part then routes
+ * Declarative per-tool renderers (P2). Each is registered by tool name as a
+ * render-only `backend` toolkit entry; a matching tool-call part then routes
  * to it instead of the generic `ToolFallback`. Renderers branch on
  * `status.type` (running → skeleton, incomplete → error, complete → result)
  * and read the structured (backend-redacted) `args` threaded through
@@ -89,20 +91,23 @@ export function SearchDocumentsToolRenderer({
   );
 }
 
-const searchDocumentsUI = {
-  toolName: 'search_documents',
-  render: SearchDocumentsToolRenderer,
-};
+/** Render-only toolkit for backend-owned tools: `type: 'backend'` entries carry
+ * no description, parameters or executor, so model context gets inert
+ * `{ type: 'backend' }` entries and the runtime never executes them. */
+const NOUS_TOOLKIT = {
+  search_documents: {
+    type: 'backend',
+    render: SearchDocumentsToolRenderer,
+  },
+  [HITL_APPROVAL_TOOL]: {
+    type: 'backend',
+    display: 'standalone',
+    render: HitlApprovalRenderer,
+  },
+} satisfies Toolkit;
 
-const hitlApprovalUI = {
-  toolName: HITL_APPROVAL_TOOL,
-  display: 'standalone' as const,
-  render: HitlApprovalRenderer,
-};
-
-/** Registers the web renderers for backend-owned tools. */
-export function NousToolUIs(): null {
-  useAssistantToolUI(searchDocumentsUI);
-  useAssistantToolUI(hitlApprovalUI);
-  return null;
-}
+/** Registers the web renderers for backend-owned tools on the runtime's
+ * `tools` scope (pass as `AssistantRuntimeProvider`'s `config`). */
+export const NOUS_TOOLS_CONFIG = AuiConfig({
+  tools: Tools({ toolkit: NOUS_TOOLKIT }),
+});

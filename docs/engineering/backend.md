@@ -92,12 +92,43 @@ Keep a compatibility export until every caller has migrated (see
 `backend/src/api/threads/workspaces.py`); removing one is a separate,
 deliberate change, not a side effect of an unrelated refactor.
 
+## Thread message reads
+
+These two chat reads load a bounded page of a thread's messages, not the
+whole thread:
+
+- `GET /api/v2/threads/{thread_id}` returns at most the newest 500 live
+  messages (`THREAD_DETAIL_MAX_MESSAGES` in `thread_service.py`), oldest
+  first. `has_more_messages` is `true` when older live messages exist; page
+  them through `GET /api/v2/threads/{thread_id}/messages?order=desc&before_id=<oldest returned id>`.
+  On a branched thread (`message_branching: true`), also pass the
+  `selected_message_id` the detail response returned; without it, or with a
+  stale one, `/messages` answers 409.
+- `ChatService.get_thread_context` reads only the newest `max_messages`
+  live rows (`message_service.list_messages(order="desc", limit=...)`), and
+  takes `total_messages` from that query's count.
+
+The nested `GET /api/v2/workspaces/{ws}/conversations/{c}/threads/{id}`
+route (`workspace_routes/threads.py`) and `ChatService.get_thread(include_messages=True)`
+still load every message of the thread (the whole selected path on a
+branched thread); that nested route always reports
+`has_more_messages: false`.
+
 ## Ratchets
 
 - **Ruff `F821`/`F823`** (undefined name / used-before-assignment) are
   blocking, repo-wide: `ruff check backend/src`. These are latent
   `NameError`s, not style — the rest of the default rule set is either
   ignored (see `pyproject.toml`'s `[tool.ruff.lint]`) or advisory.
+- **Import direction** (blocking): no module under `backend/src/services/`
+  or `backend/src/tasks/` may import `src.api` — top-level or deferred,
+  absolute or relative. Enforced by
+  `backend/tests/unit/test_import_direction.py`, whose services allowlist is
+  empty and may only stay that way. When a service or task needs code that
+  lives in a router or API schema module, move it into the service layer
+  (e.g. `src/services/evidence/schemas.py`,
+  `src/services/research_engine/run_connectors.py`) and keep a re-export at
+  the old API path while callers still use it.
 - **Changed-file gate** (CI `lint-backend`, blocking): every changed
   `.py` file (`scripts/ci/changed_source_files.py --kind python`) must pass
   `ruff check`, `black --check`, `isort --check-only`. *Added* files only

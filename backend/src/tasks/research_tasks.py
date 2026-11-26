@@ -164,7 +164,7 @@ def _build_connectors(organization_id: Optional[str] = None) -> dict:
 
     ``organization_id`` (the run owner's) is bound into the rag_store search so
     the local-index connector only ever returns this tenant's documents —
-    mirrors ``api/research_engine/runs.py::_build_connectors``.
+    mirrors ``services/research_engine/run_connectors.py::build_run_connectors``.
     """
     rag_search = functools.partial(_search_rag_store, organization_id=organization_id)
     return build_connectors(rag_search)

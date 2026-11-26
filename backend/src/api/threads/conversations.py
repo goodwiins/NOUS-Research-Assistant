@@ -308,9 +308,11 @@ async def list_conversations(
 ):
     """
     List conversations in a workspace.
+
+    Returns 404 when the workspace is missing or not accessible.
     """
     service = get_chat_service(db)
-    conversations, total = await service.list_conversations(
+    listed = await service.list_conversations(
         workspace_id=workspace_id,
         user_id=current_user.id,
         include_archived=include_archived,
@@ -318,6 +320,13 @@ async def list_conversations(
         limit=limit,
         offset=offset,
     )
+    if listed is None:
+        # Missing and forbidden answer alike (no existence oracle), as /context.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found or access denied",
+        )
+    conversations, total = listed
 
     page = (offset // limit) + 1 if limit > 0 else 1
     has_more = (offset + len(conversations)) < total

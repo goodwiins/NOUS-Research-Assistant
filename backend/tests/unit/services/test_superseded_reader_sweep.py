@@ -322,13 +322,22 @@ def test_get_thread_context_skips_superseded() -> None:
     """Model context: skip a superseded turn exactly like a soft-deleted one."""
     import inspect
 
+    from src.services.threads import message_service
     from src.services.threads.chat_service import ChatService
 
     src = inspect.getsource(ChatService.get_thread_context)
     # The per-message skip inside the token-budget loop...
     assert "msg.superseded_by_message_id is not None" in src
-    # ...and the reported total, which must not count what it excludes.
-    assert "m.superseded_by_message_id is None" in src
+    # ...and the reported total, which must not count what it excludes: it is
+    # the ``total`` of the bounded ``list_messages`` page (GOO-712), whose
+    # count shares the page's deleted/superseded predicates.
+    assert "message_service.list_messages(" in src
+    assert "all_message_count, _has_more = result" in src
+    page = inspect.getsource(message_service.list_messages)
+    base = page[page.find("base_conditions = [") :]
+    base = base[: base.find("]") + 1]
+    assert "ChatMessage.is_deleted == False" in base
+    assert "ChatMessage.superseded_by_message_id.is_(None)" in base
 
     # And the predicate itself behaves: live in, tombstoned out.
     live, doomed = _msg(superseded=False), _msg(superseded=True)
