@@ -261,8 +261,12 @@ export function BlueprintEditor({
         onBlueprintSaved?.(bp.id, bp.template_source ?? null);
       }
       // The server saved this brief even when newer local edits keep the
-      // editor dirty, so its protocol draft is still created.
+      // editor dirty, so the workflow learns of it and its protocol draft is
+      // still created.
       if (bp?.template_source === DAILY_BRIEF_TEMPLATE_SOURCE) {
+        if (topologyRevisionRef.current !== topologyRevisionAtSave) {
+          onBlueprintSaved?.(bp.id, bp.template_source);
+        }
         savedBrief = bp;
       }
     } catch {
@@ -301,11 +305,31 @@ export function BlueprintEditor({
     if (failedProtocolSync) {
       setFailedProtocolSync(null);
       setSaving(true);
-      await runProtocolSync(
-        failedProtocolSync.blueprintId,
-        failedProtocolSync.parameters
-      );
-      setSaving(false);
+      try {
+        // A newer save (for example in another tab) owns the protocol draft
+        // now; amending it for this older blueprint would displace it.
+        const current = (await getProject(projectId)) as EditorProject;
+        if (current.blueprint_id !== failedProtocolSync.blueprintId) {
+          setError(
+            'This brief was saved again since this attempt. Retry to load the latest brief.'
+          );
+          return;
+        }
+        await runProtocolSync(
+          failedProtocolSync.blueprintId,
+          failedProtocolSync.parameters
+        );
+      } catch (err) {
+        setFailedProtocolSync(failedProtocolSync);
+        setError(
+          getApiErrorMessage(
+            err,
+            'The brief was saved, but its protocol draft could not be created.'
+          )
+        );
+      } finally {
+        setSaving(false);
+      }
       return;
     }
     setLoading(true);

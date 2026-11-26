@@ -510,6 +510,64 @@ describe('ProtocolPanel', () => {
     expect(screen.getByText('Approved version 1')).toBeInTheDocument();
   });
 
+  it('shows the stored snapshot of a first brief draft for review', () => {
+    arrange(true);
+    const singleDraft = {
+      ...draftVersion,
+      parent_version_id: null,
+      can_approve: true,
+    };
+    vi.mocked(useResearchProtocols).mockReturnValue({
+      data: [
+        {
+          id: 'protocol-1',
+          project_id: 'collection-1',
+          name: 'Daily Research Brief protocol',
+          current_draft_version_id: singleDraft.id,
+          current_approved_version_id: null,
+          versions: [singleDraft],
+          can_edit: true,
+          can_manage: true,
+          can_approve: true,
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-02T00:00:00Z',
+        },
+      ],
+      isLoading: false,
+      error: null,
+    } as ReturnType<typeof useResearchProtocols>);
+    const rendered = render(
+      <ProtocolPanel
+        projectId="collection-1"
+        blueprintId="blueprint-1"
+        dailyBrief
+        readOnly={false}
+        onApprovedVersionChange={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByText('Compare snapshot'));
+    expect(
+      screen.getByText(/Question version question-version-2/)
+    ).toBeInTheDocument();
+    expect(screen.getByText('eligibility')).toBeInTheDocument();
+    expect(screen.getByText('reviewer_mode')).toBeInTheDocument();
+    expect(screen.getByText(/Adults over 50/)).toBeInTheDocument();
+    expect(screen.getByText('Execution plan')).toBeInTheDocument();
+
+    rendered.rerender(
+      <ProtocolPanel
+        projectId="collection-1"
+        blueprintId="blueprint-1"
+        readOnly={false}
+        onApprovedVersionChange={vi.fn()}
+      />
+    );
+    expect(
+      screen.queryByText(/Question version question-version-2/)
+    ).not.toBeInTheDocument();
+  });
+
   it('requires an explicit protocol selection when multiple records exist', () => {
     arrange(false, [
       {

@@ -143,10 +143,45 @@ function snapshotDraft(
 function VersionDiff({
   current,
   parent,
+  showInitialSnapshot = false,
 }: {
   current: ResearchProtocolVersionResponse;
   parent?: ResearchProtocolVersionResponse;
+  showInitialSnapshot?: boolean;
 }): ReactElement {
+  if (!parent && showInitialSnapshot) {
+    // A brief hides the snapshot form, so the supervisor reviews the stored
+    // methods of the first version here.
+    return (
+      <div className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          Initial protocol version. Question version{' '}
+          {current.question_version_id}.
+        </p>
+        {SNAPSHOT_SECTIONS.map((section) => (
+          <details
+            key={section}
+            className="rounded-md border border-border p-3"
+          >
+            <summary className="cursor-pointer text-sm font-medium">
+              {section}
+            </summary>
+            <pre className="mt-3 overflow-auto rounded bg-muted p-3 text-xs">
+              {JSON.stringify(current.snapshot[section], null, 2)}
+            </pre>
+          </details>
+        ))}
+        <details className="rounded-md border border-border p-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            Execution plan
+          </summary>
+          <pre className="mt-3 overflow-auto rounded bg-muted p-3 text-xs">
+            {JSON.stringify(current.execution_plan, null, 2)}
+          </pre>
+        </details>
+      </div>
+    );
+  }
   if (!parent) {
     return (
       <p className="text-sm text-muted-foreground">Initial protocol version.</p>
@@ -715,7 +750,11 @@ function ProtocolPanelContent({
                       Compare snapshot
                     </summary>
                     <div className="mt-2">
-                      <VersionDiff current={version} parent={parent} />
+                      <VersionDiff
+                        current={version}
+                        parent={parent}
+                        showInitialSnapshot={dailyBrief}
+                      />
                     </div>
                   </details>
                 </li>

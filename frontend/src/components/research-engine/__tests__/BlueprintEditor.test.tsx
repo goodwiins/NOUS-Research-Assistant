@@ -103,7 +103,11 @@ const CAPABILITIES = [
 
 function renderEditor(
   projectId = 'project-1',
-  approvedProtocolVersionId: string | null = 'protocol-version-2'
+  approvedProtocolVersionId: string | null = 'protocol-version-2',
+  onBlueprintSaved?: (
+    blueprintId: string,
+    templateSource: string | null
+  ) => void
 ): ReturnType<typeof render> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -113,6 +117,7 @@ function renderEditor(
       <BlueprintEditor
         projectId={projectId}
         approvedProtocolVersionId={approvedProtocolVersionId ?? undefined}
+        onBlueprintSaved={onBlueprintSaved}
       />
     </QueryClientProvider>
   );
@@ -855,7 +860,8 @@ describe('BlueprintEditor Daily Research Brief protocol flow', () => {
       BRIEF_PROTOCOL as never
     );
 
-    renderEditor();
+    const onBlueprintSaved = vi.fn();
+    renderEditor('project-1', 'protocol-version-2', onBlueprintSaved);
     fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Notes' }), {
       target: { value: 'Added while saving' },
@@ -871,6 +877,10 @@ describe('BlueprintEditor Daily Research Brief protocol flow', () => {
         blueprint_id: 'blueprint-2',
         snapshot: EXPECTED_SNAPSHOT,
       })
+    );
+    expect(onBlueprintSaved).toHaveBeenLastCalledWith(
+      'blueprint-2',
+      'daily_research_brief'
     );
     expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
     expect(
@@ -896,6 +906,18 @@ describe('BlueprintEditor Daily Research Brief protocol flow', () => {
       )
       .mockResolvedValueOnce(BRIEF_PROTOCOL as never);
 
+    vi.mocked(getProject)
+      .mockResolvedValueOnce({
+        id: 'project-1',
+        name: 'Research',
+        blueprint_id: 'blueprint-1',
+      })
+      .mockResolvedValue({
+        id: 'project-1',
+        name: 'Research',
+        blueprint_id: 'blueprint-2',
+      });
+
     renderEditor();
     fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -920,6 +942,55 @@ describe('BlueprintEditor Daily Research Brief protocol flow', () => {
     await waitFor(() =>
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     );
+  });
+
+  it('drops a protocol retry once a newer save owns the brief', async () => {
+    vi.mocked(createBlueprint).mockResolvedValue(
+      savedBriefResponse('blueprint-2')
+    );
+    vi.mocked(researchProtocolService.listProtocols).mockResolvedValue([]);
+    vi.mocked(researchProtocolService.createQuestion).mockResolvedValue(
+      questionRecord('What changed?', 'question-version-new')
+    );
+    vi.mocked(researchProtocolService.createProtocol).mockRejectedValueOnce(
+      new APIErrorClass({
+        message: 'Protocol service unavailable',
+        status_code: 503,
+        type: 'http_error',
+      })
+    );
+    vi.mocked(getProject)
+      .mockResolvedValueOnce({
+        id: 'project-1',
+        name: 'Research',
+        blueprint_id: 'blueprint-1',
+      })
+      .mockResolvedValue({
+        id: 'project-1',
+        name: 'Research',
+        blueprint_id: 'blueprint-3',
+      });
+
+    renderEditor();
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Protocol service unavailable'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This brief was saved again since this attempt.'
+    );
+    expect(researchProtocolService.createProtocol).toHaveBeenCalledTimes(1);
+    expect(
+      researchProtocolService.createProtocolVersion
+    ).not.toHaveBeenCalled();
+    expect(getBlueprint).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(getBlueprint).toHaveBeenCalledTimes(2));
+    expect(getBlueprint).toHaveBeenLastCalledWith('blueprint-3');
+    expect(researchProtocolService.createProtocol).toHaveBeenCalledTimes(1);
   });
 
   it('makes no protocol calls when a non-brief blueprint is saved', async () => {

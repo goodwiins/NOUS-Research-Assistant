@@ -75,27 +75,26 @@ vi.mock('../BlueprintEditor', () => ({
     </div>
   ),
 }));
-vi.mock('../ProtocolPanel', () => ({
-  ProtocolPanel: ({
-    projectId,
-    blueprintId,
-    dailyBrief,
-  }: {
-    projectId: string;
-    blueprintId?: string;
-    dailyBrief?: boolean;
-  }) => (
-    <div>
-      Protocol for {projectId}
-      <span>Protocol blueprint {blueprintId ?? 'none'}</span>
-      {dailyBrief ? (
-        <span>Question fieldset hidden</span>
-      ) : (
-        <span>Question fieldset shown</span>
-      )}
-    </div>
-  ),
-}));
+// The real ProtocolPanel renders against empty protocol data, so the wiring
+// test can assert on its actual question fieldset.
+vi.mock('@/hooks/useResearchProtocols', () => {
+  const idle = { mutate: vi.fn(), isPending: false, error: null };
+  return {
+    useResearchQuestions: () => ({ data: [], isLoading: false, error: null }),
+    useResearchProtocols: () => ({ data: [], isLoading: false, error: null }),
+    useProtocolActions: () => ({
+      createQuestion: idle,
+      createQuestionVersion: idle,
+      createProtocol: idle,
+      createVersion: idle,
+      approve: idle,
+      register: idle,
+      recordDeviation: idle,
+    }),
+    useProtocolRegistrations: () => ({ data: [] }),
+    useProtocolDeviations: () => ({ data: [] }),
+  };
+});
 vi.mock('../ReportIdentityPanel', () => ({
   ReportIdentityPanel: ({ projectId }: { projectId: string }) => (
     <div>Reports for {projectId}</div>
@@ -569,22 +568,25 @@ describe('ProjectWorkflow', () => {
       </QueryClientProvider>
     );
 
-    expect(screen.getByText('Question fieldset shown')).toBeInTheDocument();
+    const setupLine = /created from the Daily Research Brief setup/;
+    expect(
+      screen.getByRole('textbox', { name: 'Research question' })
+    ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole('button', { name: 'Save brief blueprint' })
     );
     expect(
-      screen.getByText('Protocol blueprint blueprint-brief')
-    ).toBeInTheDocument();
-    expect(screen.getByText('Question fieldset hidden')).toBeInTheDocument();
+      screen.queryByRole('textbox', { name: 'Research question' })
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(setupLine)).toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole('button', { name: 'Save custom blueprint' })
     );
     expect(
-      screen.getByText('Protocol blueprint blueprint-custom')
+      screen.getByRole('textbox', { name: 'Research question' })
     ).toBeInTheDocument();
-    expect(screen.getByText('Question fieldset shown')).toBeInTheDocument();
+    expect(screen.queryByText(setupLine)).not.toBeInTheDocument();
   });
 
   it('renders the corpus panel read-only for an archived project', async () => {
