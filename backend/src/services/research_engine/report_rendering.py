@@ -451,8 +451,40 @@ def build_report(context: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _weak_support_marker(claim: dict[str, Any], evidence_levels: dict[str, str]) -> str:
+    """Return the Markdown prefix for a claim supported only by weak evidence."""
+    levels = [
+        (
+            evidence_levels.get(item["evidence_id"], "metadata_only")
+            if isinstance(item.get("evidence_id"), str)
+            else "metadata_only"
+        )
+        for item in claim.get("evidence", [])
+        if isinstance(item, dict) and item.get("relation") == "supports"
+    ]
+    if not levels or any(
+        level in {"full_text", "workspace_document"} for level in levels
+    ):
+        return ""
+    if "abstract" in levels:
+        return "**Abstract-only evidence:** "
+    return "**Metadata-only evidence:** "
+
+
 def render_markdown(report: dict[str, Any]) -> str:
-    """Render a complete escaped Markdown report without source-supplied HTML."""
+    """Render a complete escaped Markdown report without source-supplied HTML.
+
+    Sections follow the brief's reading order: title, status banners with the
+    verification line and failed checks, research question, findings,
+    uncertainty, method and coverage, limitations, references, provenance,
+    then the screening and extracted-evidence audit appendix.
+
+    A finding whose supporting references (``relation == "supports"``) exist
+    but include no ``full_text`` or ``workspace_document`` evidence is marked
+    ``**Abstract-only evidence:**`` when any support is an abstract, otherwise
+    ``**Metadata-only evidence:**``. Levels come from ``report["evidence"]``;
+    an unknown evidence id counts as metadata only.
+    """
     title = (
         "Daily Research Brief" if report.get("artifact_version") else "Research report"
     )
@@ -507,11 +539,51 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
         lines.append("")
     if report.get("query"):
-        lines.extend(["## Query and method", "", _plain(report["query"]), ""])
+        lines.extend(["## Research question", "", _plain(report["query"]), ""])
+
+    evidence_levels: dict[str, str] = {}
+    for item in report.get("evidence") or []:
+        if isinstance(item, dict) and isinstance(item.get("evidence_id"), str):
+            evidence_levels.setdefault(
+                item["evidence_id"],
+                normalize_evidence_level(item.get("evidence_level")),
+            )
+    weak_claims = 0
+    total_claims = 0
+    synthesis = report.get("synthesis") or {}
+    sections = synthesis.get("sections", []) if isinstance(synthesis, dict) else []
+    if sections:
+        lines.extend(["## Findings", ""])
+        for section in sections:
+            lines.extend([f"### {_plain(section.get('heading'))}", ""])
+            for claim in section.get("claims", []):
+                references = ", ".join(
+                    f"`{_plain(item.get('evidence_id'))}` ({_plain(item.get('relation'))})"
+                    for item in claim.get("evidence", [])
+                )
+                marker = _weak_support_marker(claim, evidence_levels)
+                total_claims += 1
+                if marker:
+                    weak_claims += 1
+                lines.append(
+                    f"- {marker}{_plain(claim.get('claim_text'))} [{references}]"
+                )
+            lines.append("")
+
+    lines.extend(
+        [
+            "## Uncertainty",
+            "",
+            "- Findings supported only by abstract or metadata evidence: "
+            f"{weak_claims} of {total_claims}",
+            f"- Claims not confirmed by verification: {len(failed_checks)}",
+            "",
+        ]
+    )
+
+    lines.extend(["## Method and coverage", ""])
     if report.get("method"):
         lines.extend([_plain(report["method"]), ""])
-
-    lines.extend(["## Source coverage", ""])
     coverage = report.get("search_coverage") or {}
     lines.append(f"- Exhaustive search: {_plain(coverage.get('exhaustive', False))}")
     lines.append(
@@ -519,6 +591,54 @@ def render_markdown(report: dict[str, Any]) -> str:
     )
     lines.append(f"- Sources returned: {len(report.get('sources') or [])}")
     lines.append("")
+
+    lines.extend(["## Limitations", ""])
+    limitations = report.get("limitations") or [
+        "Bounded provider search; results are not exhaustive."
+    ]
+    for limitation in limitations:
+        lines.append(f"- {_plain(limitation)}")
+    lines.append("")
+
+    if report.get("sources"):
+        lines.extend(["## References", ""])
+        for source in report["sources"]:
+            title = _plain(source.get("title"))
+            url = _safe_url(source.get("url"))
+            label = f"[{title}]({url})" if url else title
+            bibliography = "; ".join(
+                value
+                for value in (
+                    ", ".join(_plain(author) for author in source.get("authors") or []),
+                    _plain(source.get("publication_year")),
+                    _plain(source.get("journal")),
+                    (f"DOI: {_plain(source.get('doi'))}" if source.get("doi") else ""),
+                )
+                if value
+            )
+            details = f" — {bibliography}" if bibliography else ""
+            lines.append(
+                f"- `{_plain(source.get('source_id'))}` — {label}{details} "
+                f"({_plain(source.get('evidence_level'))})"
+            )
+        lines.append("")
+
+    lines.extend(["## Provenance", ""])
+    run = report.get("run") or {}
+    blueprint = report.get("blueprint") or {}
+    template = report.get("template") or {}
+    timestamps = report.get("timestamps") or {}
+    lines.extend(
+        [
+            f"- Run: `{_plain(run.get('id'))}`",
+            f"- Blueprint: `{_plain(blueprint.get('id'))}` version {_plain(blueprint.get('version'))}",
+            f"- Template: `{_plain(template.get('source'))}` contract {_plain(template.get('contract_version'))}",
+            f"- Generated: {_plain(timestamps.get('generated_at'))}",
+            f"- Artifact status: {_plain(report.get('final_status'))}",
+            "- Search exhaustive: false",
+            "",
+        ]
+    )
 
     screening = report.get("screening") or []
     if screening:
@@ -548,68 +668,6 @@ def render_markdown(report: dict[str, Any]) -> str:
                     f"- `{_plain(evidence.get('pointer'))}`: “{_plain(evidence.get('quote'))}”"
                 )
             lines.append("")
-
-    synthesis = report.get("synthesis") or {}
-    sections = synthesis.get("sections", []) if isinstance(synthesis, dict) else []
-    if sections:
-        lines.extend(["## Findings", ""])
-        for section in sections:
-            lines.extend([f"### {_plain(section.get('heading'))}", ""])
-            for claim in section.get("claims", []):
-                references = ", ".join(
-                    f"`{_plain(item.get('evidence_id'))}` ({_plain(item.get('relation'))})"
-                    for item in claim.get("evidence", [])
-                )
-                lines.append(f"- {_plain(claim.get('claim_text'))} [{references}]")
-            lines.append("")
-
-    if report.get("sources"):
-        lines.extend(["## References", ""])
-        for source in report["sources"]:
-            title = _plain(source.get("title"))
-            url = _safe_url(source.get("url"))
-            label = f"[{title}]({url})" if url else title
-            bibliography = "; ".join(
-                value
-                for value in (
-                    ", ".join(_plain(author) for author in source.get("authors") or []),
-                    _plain(source.get("publication_year")),
-                    _plain(source.get("journal")),
-                    (f"DOI: {_plain(source.get('doi'))}" if source.get("doi") else ""),
-                )
-                if value
-            )
-            details = f" — {bibliography}" if bibliography else ""
-            lines.append(
-                f"- `{_plain(source.get('source_id'))}` — {label}{details} "
-                f"({_plain(source.get('evidence_level'))})"
-            )
-        lines.append("")
-
-    lines.extend(["## Limitations", ""])
-    limitations = report.get("limitations") or [
-        "Bounded provider search; results are not exhaustive."
-    ]
-    for limitation in limitations:
-        lines.append(f"- {_plain(limitation)}")
-    lines.append("")
-
-    lines.extend(["## Provenance", ""])
-    run = report.get("run") or {}
-    blueprint = report.get("blueprint") or {}
-    template = report.get("template") or {}
-    timestamps = report.get("timestamps") or {}
-    lines.extend(
-        [
-            f"- Run: `{_plain(run.get('id'))}`",
-            f"- Blueprint: `{_plain(blueprint.get('id'))}` version {_plain(blueprint.get('version'))}",
-            f"- Template: `{_plain(template.get('source'))}` contract {_plain(template.get('contract_version'))}",
-            f"- Generated: {_plain(timestamps.get('generated_at'))}",
-            f"- Artifact status: {_plain(report.get('final_status'))}",
-            "- Search exhaustive: false",
-            "",
-        ]
-    )
     return "\n".join(lines).rstrip() + "\n"
 
 
