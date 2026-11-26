@@ -65,13 +65,6 @@ scrape_configs:
     static_configs:
       - targets: ['docker-exporter:9323']
 
-  # Custom Business Metrics
-  - job_name: 'business-metrics'
-    static_configs:
-      - targets: ['backend:8000']
-    metrics_path: '/business-metrics'
-    scrape_interval: 60s
-
 # Remote write configuration for long-term storage
 # SECURITY NOTE: Credentials must be provided via environment variables
 # Set PROMETHEUS_REMOTE_WRITE_USERNAME and PROMETHEUS_REMOTE_WRITE_PASSWORD

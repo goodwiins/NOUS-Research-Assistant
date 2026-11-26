@@ -9,6 +9,11 @@
 > Unconsumed legacy cluster manifests live in
 > [`deployment/monitoring/`](../deployment/monitoring/README.md). Same-named
 > files across these trees are not shared copies.
+>
+> The backend exports no Prometheus metrics, so the compose alerting and
+> recording rules here only cover exporter metrics (node-exporter, cAdvisor,
+> Postgres, Redis, Neo4j, Kubernetes). Backend metric alerting would need a
+> served `/metrics` endpoint first (GOO-451).
 
 ## Security-First Setup
 
