@@ -70,7 +70,7 @@ async def test_do_kb_retrieve_reports_runtime_unavailable_when_db_is_none() -> N
 
     with patch(
         "src.core.config.settings",
-        MagicMock(DO_KB_ENABLED=True, BEDROCK_KB_ID=""),
+        MagicMock(DO_KB_ENABLED=True, BEDROCK_KB_ID="", DO_KB_DEFAULT_TOP_K=8),
     ):
         result = await _tool_do_kb_retrieve({"query": "attention"}, None, user)
 
@@ -93,7 +93,7 @@ async def test_do_kb_retrieve_still_reports_not_provisioned_when_db_present_with
 
     with patch(
         "src.core.config.settings",
-        MagicMock(DO_KB_ENABLED=True, BEDROCK_KB_ID=""),
+        MagicMock(DO_KB_ENABLED=True, BEDROCK_KB_ID="", DO_KB_DEFAULT_TOP_K=8),
     ):
         result = await _tool_do_kb_retrieve({"query": "attention"}, db, user)
 
