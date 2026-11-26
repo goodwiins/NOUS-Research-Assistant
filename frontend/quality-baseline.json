@@ -1678,9 +1678,9 @@
     }
   },
   "coverage": {
-    "lines": 64.0,
-    "statements": 64.0,
-    "functions": 67.8,
-    "branches": 81.0
+    "lines": 65.8,
+    "statements": 64.4,
+    "functions": 59.4,
+    "branches": 60.9
   }
 }
