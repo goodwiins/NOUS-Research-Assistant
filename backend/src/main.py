@@ -408,6 +408,14 @@ async def lifespan(app: FastAPI):
         from src.api.compat.alphaxiv_live import shutdown_live_producers
 
         await shutdown_live_producers()
+        # Producers above can dispatch background memory writes; drain them
+        # (bounded) before the memory store and LangGraph pools close below.
+        try:
+            from src.services.agent._nodes_memory import drain_memory_persist_tasks
+
+            await drain_memory_persist_tasks()
+        except Exception as exc:
+            logger.warning("Memory persist drain failed (%s)", type(exc).__name__)
         try:
             await close_typesafe_client()
         except Exception as exc:

@@ -383,6 +383,15 @@ try:
         ["outcome"],  # "hit" | "miss"
     )
 
+    # Background memory writes lost before they reached the store: dropped
+    # because the in-flight cap was full, or cancelled (shutdown drain
+    # timeout, loop teardown). See _nodes_memory.memory_save_node.
+    AGENT_MEMORY_PERSIST_DROPPED = _get_or_create_counter(
+        "agent_memory_persist_dropped_total",
+        "Background memory writes dropped before persisting",
+        ["reason"],  # "cap_full" | "cancelled"
+    )
+
     # Background assistant-row persistence failures — Task 5 of
     # docs/plans/2026-05-13-agent-persist-perf.md. Bumped by the safe
     # wrapper around _persist_assistant_message when the deferred commit
@@ -782,6 +791,13 @@ def record_memory_recall(hit: bool, max_score: float | None = None) -> None:
 
 # Backwards-compat alias — earlier code paths referenced the old name.
 record_memory_retrieval = record_memory_recall
+
+
+def record_memory_persist_dropped(reason: str) -> None:
+    """Record one background memory write lost before persisting."""
+    if not _METRICS_AVAILABLE:
+        return
+    AGENT_MEMORY_PERSIST_DROPPED.labels(reason=reason).inc()
 
 
 @asynccontextmanager
