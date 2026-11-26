@@ -42,7 +42,8 @@ exit 0
 
 # kubectl stub:
 # - `get pods -l app=redis` prints $STUB_REDIS_POD;
-# - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT;
+# - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT, or
+#   $STUB_COUNT_AFTER_LOAD (when set) once the load has run;
 # - any other psql call stores its stdin in $STUB_PSQL_STDIN;
 # - `cp` copies its source to $STUB_CP_OUT.
 # - `get externalsecret aws-database-credentials` succeeds only when $STUB_RDS=1;
@@ -55,7 +56,13 @@ case "$*" in
     *"get externalsecret aws-database-credentials"*) [ "${STUB_RDS:-0}" = 1 ]; exit $? ;;
     *"get deployment postgres"*) [ "${STUB_NO_PG_DEPLOY:-0}" != 1 ]; exit $? ;;
     *"get pods"*"app=redis"*) printf '%s' "${STUB_REDIS_POD:-}"; exit 0 ;;
-    *psql*-tAc*) fails probe && exit 1; echo "${STUB_TABLE_COUNT:-0}"; exit 0 ;;
+    *psql*-tAc*) fails probe && exit 1
+        if [ -f "$STUB_PSQL_STDIN" ] && [ -n "${STUB_COUNT_AFTER_LOAD:-}" ]; then
+            echo "$STUB_COUNT_AFTER_LOAD"
+        else
+            echo "${STUB_TABLE_COUNT:-0}"
+        fi
+        exit 0 ;;
     *psql*) cat > "$STUB_PSQL_STDIN"; fails load && exit 1; exit 0 ;;
     cp\\ *) fails cp && exit 1; cp "$2" "$STUB_CP_OUT"; exit 0 ;;
 esac
@@ -78,6 +85,10 @@ if [ "$1" = "s3" ] && [ "$2" = "sync" ]; then
                 printf 'REDIS0011' | gzip > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
             badredis) mkdir -p "$d/redis"
                 printf 'not gzip' > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
+            lockedredis) mkdir -p "$d/redis"; chmod 000 "$d/redis" ;;
+            lockedk8s) mkdir -p "$d/kubernetes"
+                printf x | gzip > "$d/kubernetes/k8s_configs_${STUB_BACKUP_ID}.tar.gz"
+                chmod 000 "$d/kubernetes" ;;
             neo4j) mkdir -p "$d/neo4j"
                 printf 'dump' | gzip > "$d/neo4j/neo4j_backup_${STUB_BACKUP_ID}.dump.gz" ;;
         esac
@@ -175,6 +186,33 @@ def test_restore_fails_when_no_backup_matches(tmp_path: Path) -> None:
     assert "kubectl exec" not in calls
 
 
+def test_unreadable_component_dir_fails_the_restore(tmp_path: Path) -> None:
+    # find's own failure must stop the restore, not read as "MISSING".
+    try:
+        result, _calls, output = _restore(tmp_path, "postgres lockedredis")
+    finally:
+        for locked in tmp_path.rglob("redis"):
+            locked.chmod(0o700)
+    assert result.returncode != 0, output
+    assert "Could not search" in output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_unreadable_kubernetes_dir_stops_the_restore_before_loading(
+    tmp_path: Path,
+) -> None:
+    # The top-level search walks every directory, not only the components.
+    try:
+        result, _calls, output = _restore(tmp_path, "postgres lockedk8s")
+    finally:
+        for locked in tmp_path.rglob("kubernetes"):
+            locked.chmod(0o700)
+    assert result.returncode != 0, output
+    assert "Could not search" in output
+    assert "PostgreSQL restore completed" not in output
+    assert _psql_stdin(tmp_path) is None
+
+
 def test_restore_syncs_only_the_keys_for_the_id(tmp_path: Path) -> None:
     result, calls, output = _restore(tmp_path, "postgres")
     assert result.returncode == 0, output
@@ -193,11 +231,18 @@ def test_restore_pipes_the_dump_into_psql_with_on_error_stop(tmp_path: Path) -> 
     assert "ON_ERROR_STOP=1" in load[0] and "--single-transaction" in load[0]
 
 
-def test_emptiness_probe_counts_only_base_tables(tmp_path: Path) -> None:
+def test_emptiness_probe_counts_tables_and_other_user_objects(tmp_path: Path) -> None:
     _result, calls, _output = _restore(tmp_path, "postgres")
     probe = next(line for line in calls.splitlines() if "-tAc" in line)
-    # Views and extension-owned tables must not make a fresh DB look populated.
+    # Views and extension-owned objects must not make a fresh DB look populated.
     assert "relkind IN ('r', 'p')" in probe and "deptype = 'e'" in probe
+    # Sequences, composite/enum/domain types, functions and schemas collide
+    # with the dump's CREATE statements too, so they count.
+    assert "relkind IN ('S', 'c')" in probe
+    # Extension-owned composite types record membership on pg_type.
+    assert "d.objid = c.reltype" in probe
+    assert "typtype IN ('e', 'd', 'r', 'm')" in probe
+    assert "pg_catalog.pg_proc" in probe and "nspname <> 'public'" in probe
 
 
 def test_failed_psql_load_fails_the_restore(tmp_path: Path) -> None:
@@ -205,6 +250,24 @@ def test_failed_psql_load_fails_the_restore(tmp_path: Path) -> None:
     assert result.returncode != 0, output
     assert "PostgreSQL restore failed" in output
     assert "Restored 1 component" not in output
+
+
+def test_failed_load_that_left_objects_says_partially_loaded(tmp_path: Path) -> None:
+    result, _calls, output = _restore(
+        tmp_path, "postgres", STUB_FAIL="load", STUB_COUNT_AFTER_LOAD="7"
+    )
+    assert result.returncode != 0, output
+    assert "may be partially loaded" in output
+    assert "rolled back" not in output
+
+
+def test_failed_load_with_zero_count_still_says_to_inspect(tmp_path: Path) -> None:
+    # The count skips views and extension objects, so 0 proves nothing.
+    result, _calls, output = _restore(tmp_path, "postgres", STUB_FAIL="load")
+    assert result.returncode != 0, output
+    assert "shows no counted objects" in output
+    assert "inspect it before retrying" in output
+    assert "nothing was committed" not in output
 
 
 def test_failed_emptiness_probe_restores_nothing(tmp_path: Path) -> None:
