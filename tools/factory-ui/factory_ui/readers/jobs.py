@@ -21,6 +21,18 @@ from . import as_dict, as_list, loads, reviews
 HIDDEN_TOP = ("write_token", "docs")
 FINISHED_PHASES = ("merged", "closed", "abandoned")
 STANDARD_KEYS = ("spec", "build", "decision", "pr-body", "related-tests")
+# Cache fields the Jobs view prints as text. One that is an object or an
+# array would make the page throw, so that job shows as unreadable instead.
+SHOWN_FIELDS = (
+    "phase",
+    "round",
+    "max_rounds",
+    "pr",
+    "home",
+    "kind",
+    "hold",
+    "linear",
+)
 _ROUND_DIR = re.compile(r"^round-([1-9])$")
 
 
@@ -71,6 +83,9 @@ def _row(job: str, doc: dict[str, Any] | None, readable: bool, now: float) -> di
     if not isinstance(cache, dict) or not cache:
         return {"id": job, "group": "no-cache"}
     lease = as_dict(cache.get("lease"))
+    shown = [cache.get(k) for k in SHOWN_FIELDS] + [lease.get("host")]
+    if any(isinstance(v, (dict, list)) for v in shown):
+        return {"id": job, "group": "unreadable"}
     finished = cache.get("phase") in FINISHED_PHASES and cache.get("finished")
     return {
         "id": job,

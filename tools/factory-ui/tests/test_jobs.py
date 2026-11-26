@@ -132,3 +132,31 @@ def test_deeply_nested_job_json_is_unreadable_not_a_500(factory: Factory) -> Non
         assert rows[ACTIVE]["group"] == "cached"
         assert running.get("/api/verifier").status == 200
         assert running.get(f"/api/jobs/{job}").status == 200
+
+
+def test_cached_field_of_the_wrong_type_is_unreadable_not_the_view(
+    factory: Factory, tmp_path: Path
+) -> None:
+    """A cached field the Jobs view prints that is an object or an array:
+    that job shows unreadable, the healthy jobs still render."""
+    jobs = factory.root / "jobs"
+    bad = {
+        "2026-01-12-example-phase-object": '{"cache": {"phase": {"toString": null}}}',
+        "2026-01-13-example-hold-array": '{"cache": {"phase": "build", "hold": [1]}}',
+        "2026-01-14-example-lease-host": '{"cache": {"phase": "build", '
+        '"lease": {"host": {"toString": null}}}}',
+    }
+    for job, raw in bad.items():
+        (jobs / job).mkdir()
+        (jobs / job / "job.json").write_text(raw)
+    for running in start(factory):
+        data = running.get("/api/jobs").json()
+        rows = {r["id"]: r for r in data["rows"]}
+        for job in bad:
+            assert rows[job] == {"id": job, "group": "unreadable"}
+            assert running.get(f"/api/jobs/{job}").status == 200
+        assert rows[ACTIVE]["group"] == "cached"
+        text = render("jobs", data, tmp_path)["text"]
+        for job in bad:
+            assert job + ": unreadable" in text
+        assert ACTIVE in text and "review" in text and "1/3" in text
