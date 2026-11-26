@@ -219,6 +219,8 @@ class ResearchClaimEvidenceLink(Base):
         ),
         CheckConstraint(LINK_SHAPE_CHECK, name="ck_research_claim_links_shape"),
         Index("idx_research_claim_links_version", "claim_version_id"),
+        # Serves the document delete's RESTRICT check (GOO-737).
+        Index("ix_research_claim_evidence_links_document_id", "document_id"),
     )
 
 

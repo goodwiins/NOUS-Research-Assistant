@@ -226,7 +226,10 @@ class SearchResult(BaseModel):
 
     # Result information
     document_id = Column(
-        GUID(), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+        GUID(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     search_query_id = Column(
         GUID(), ForeignKey("search_queries.id", ondelete="CASCADE"), nullable=False

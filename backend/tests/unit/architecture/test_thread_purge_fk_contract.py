@@ -15,6 +15,11 @@ one. This reads the model metadata only; the rp01 migration and
 tests/integration/test_retention_thread_purge_postgres.py hold the live
 database to these rules for rp01's 11 FKs. A new FK's migration is not
 checked (see docs/engineering/gotchas.md).
+
+The index rule (every FK the delete reaches leads a full index) also holds
+for a document hard-delete, walked the same way from ``documents``
+(GOO-737). Its ON DELETE rules are not checked: RESTRICT there is deliberate.
+The fk01 and fk02 revisions build the indexes on live databases.
 """
 
 from __future__ import annotations
@@ -29,13 +34,17 @@ pytestmark = pytest.mark.unit
 
 # What purge_soft_deleted_threads deletes itself.
 PURGED = frozenset({"threads", "chat_messages"})
+# A document hard-delete (GOO-737): the row and whatever its CASCADEs reach.
+DOCUMENT_DELETE = frozenset({"documents"})
 RULES = frozenset({"CASCADE", "SET NULL"})
 
 
-def _walk(metadata: MetaData = Base.metadata) -> tuple[set[str], list[str]]:
-    """Tables a thread delete reaches, and every FK into them with no rule
-    PostgreSQL can carry out."""
-    reached = set(PURGED)
+def _walk(
+    metadata: MetaData = Base.metadata, roots: frozenset[str] = PURGED
+) -> tuple[set[str], list[str]]:
+    """Tables a delete from ``roots`` reaches, and every FK into them with no
+    rule PostgreSQL can carry out."""
+    reached = set(roots)
     unruled: set[str] = set()
     grew = True
     while grew:
@@ -130,14 +139,17 @@ def _leading_index_columns(table: Table) -> set[str]:
     return leading
 
 
-def _unindexed(metadata: MetaData = Base.metadata) -> list[str]:
-    """FKs into a table the purge deletes from whose column leads no index.
+def _unindexed(
+    metadata: MetaData = Base.metadata, roots: frozenset[str] = PURGED
+) -> list[str]:
+    """FKs into a table a delete from ``roots`` deletes from whose column
+    leads no index.
 
     PostgreSQL checks each such FK per deleted row with
-    ``WHERE <fk column> = $1``; without a leading index that is a sequential
-    scan of the referencing table for every purged message or thread
-    (GOO-655, audit MS-1)."""
-    reached, _ = _walk(metadata)
+    ``WHERE <fk column> = $1``, RESTRICT and NO ACTION keys included; without
+    a leading index that is a sequential scan of the referencing table for
+    every purged message, thread or document (GOO-655 audit MS-1, GOO-737)."""
+    reached, _ = _walk(metadata, roots)
     missing: list[str] = []
     for table in metadata.tables.values():
         leading = _leading_index_columns(table)
@@ -200,3 +212,59 @@ def test_a_partial_or_non_leading_index_does_not_count() -> None:
         "notes.message_id -> chat_messages.id",
         "runs.thread_id -> threads.id",
     ]
+
+
+def test_every_fk_a_document_delete_reaches_is_indexed() -> None:
+    # Only the index rule applies here: a RESTRICT key into documents (research
+    # evidence, full-text attempts) is meant to refuse the delete, but its
+    # check still runs per deleted row (GOO-737).
+    assert _unindexed(roots=DOCUMENT_DELETE) == []
+
+
+def test_the_document_walk_follows_cascades() -> None:
+    # Guards the guard: a walk that stopped at documents would never check the
+    # FKs into the rows its CASCADEs delete.
+    reached, _ = _walk(roots=DOCUMENT_DELETE)
+    assert {"entities", "entity_relationships", "search_results"} <= reached
+
+
+def test_the_document_index_check_ignores_a_partial_index() -> None:
+    # extraction_accepted_values.document_id led only the partial
+    # uq_extraction_accepted_initial; it must be reported, and the same FK
+    # reached through a CASCADE child must be reported as well.
+    metadata = MetaData()
+    Table("documents", metadata, Column("id", Integer, primary_key=True))
+    Table(
+        "entities",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("document_id", ForeignKey("documents.id", ondelete="CASCADE")),
+    )
+    accepted = Table(
+        "accepted",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("document_id", ForeignKey("documents.id", ondelete="RESTRICT")),
+        Column("entity_id", ForeignKey("entities.id", ondelete="RESTRICT")),
+        Column("initial", Integer),
+    )
+    Index(
+        "uq_accepted_initial",
+        accepted.c.document_id,
+        unique=True,
+        postgresql_where=accepted.c.initial == 1,
+    )
+
+    assert _unindexed(metadata, DOCUMENT_DELETE) == [
+        "accepted.document_id -> documents.id",
+        "accepted.entity_id -> entities.id",
+        "entities.document_id -> documents.id",
+    ]
+
+
+def test_agent_runs_conversation_and_project_fks_are_indexed() -> None:
+    # Off the document path: deleting a conversation or a collection SET NULLs
+    # these per row (GOO-737). The rest of the collection delete path is not
+    # held to the index rule yet.
+    leading = _leading_index_columns(Base.metadata.tables["agent_runs"])
+    assert {"conversation_id", "project_id"} <= leading

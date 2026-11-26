@@ -114,7 +114,10 @@ class Entity(BaseModel):
 
     # Relationships
     document_id = Column(
-        GUID(), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+        GUID(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     organization_id = Column(
         GUID(), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
