@@ -426,15 +426,17 @@ restore_backup() {
         return 1
     fi
 
-    # find -print -quit, not `find | grep -q`: under pipefail, grep exiting
+    # Capture find's output, not `find | grep -q`: under pipefail, grep exiting
     # early can SIGPIPE find and turn a match into a false "no match". The
-    # assignment keeps find's own status, so a traversal error still fails.
-    local first_match
-    if ! first_match=$(find "$restore_dir" -type f -name "*_${backup_id}.*" -print -quit); then
+    # assignment keeps find's own status. The search walks the whole restore
+    # directory (no -quit), so a traversal error anywhere in it stops the
+    # restore here, before anything loads.
+    local matches first_match
+    if ! matches=$(find "$restore_dir" -type f -name "*_${backup_id}.*" -print); then
         log_error "Could not search $restore_dir for backup $backup_id; nothing restored"
         return 1
     fi
-    if [ -z "$first_match" ]; then
+    if [ -z "$matches" ]; then
         log_error "No backup files match ID $backup_id in s3://$S3_BUCKET/backups/; nothing restored"
         return 1
     fi
