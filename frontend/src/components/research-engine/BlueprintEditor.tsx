@@ -39,6 +39,9 @@ import { DailyResearchBriefSetup } from './DailyResearchBriefSetup';
 
 type EditorProject = ProjectResponse & { blueprint_id?: string | null };
 
+const STALE_BRIEF_MESSAGE =
+  'This brief was saved again since this attempt. Retry to load the latest brief.';
+
 let _stepKeyCounter = 0;
 function nextStepKey(): string {
   return `step_${Date.now()}_${_stepKeyCounter++}`;
@@ -288,7 +291,11 @@ export function BlueprintEditor({
     parameters: Record<string, unknown>
   ): Promise<void> => {
     try {
-      await syncDailyBriefProtocol(blueprintId, parameters);
+      const result = await syncDailyBriefProtocol(blueprintId, parameters);
+      if (result === 'stale') {
+        // Retry reloads the newer brief (no failed sync is kept).
+        setError(STALE_BRIEF_MESSAGE);
+      }
     } catch (err) {
       setFailedProtocolSync({ blueprintId, parameters });
       setError(
@@ -310,9 +317,7 @@ export function BlueprintEditor({
         // now; amending it for this older blueprint would displace it.
         const current = (await getProject(projectId)) as EditorProject;
         if (current.blueprint_id !== failedProtocolSync.blueprintId) {
-          setError(
-            'This brief was saved again since this attempt. Retry to load the latest brief.'
-          );
+          setError(STALE_BRIEF_MESSAGE);
           return;
         }
         await runProtocolSync(

@@ -537,10 +537,20 @@ function savedBriefResponse(
 describe('BlueprintEditor Daily Research Brief protocol flow', () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    vi.mocked(getProject).mockResolvedValue({
-      id: 'project-1',
-      name: 'Research',
-      blueprint_id: 'blueprint-1',
+    // As on the server, each saved blueprint becomes the project's current
+    // one, so the brief's pre-amendment check sees the save it follows.
+    vi.mocked(getProject).mockImplementation(async () => {
+      const saves = vi.mocked(createBlueprint).mock.results;
+      const last = saves[saves.length - 1];
+      const saved =
+        last?.type === 'return'
+          ? await last.value.catch(() => undefined)
+          : undefined;
+      return {
+        id: 'project-1',
+        name: 'Research',
+        blueprint_id: saved?.id ?? 'blueprint-1',
+      };
     });
     vi.mocked(getBlueprint).mockResolvedValue(SAVED_BRIEF);
     vi.mocked(listTemplates).mockResolvedValue([
@@ -661,6 +671,55 @@ describe('BlueprintEditor Daily Research Brief protocol flow', () => {
       researchProtocolService.createQuestionVersion
     ).not.toHaveBeenCalled();
     expect(researchProtocolService.createProtocol).not.toHaveBeenCalled();
+  });
+
+  it('leaves the protocol draft alone when another tab saved a newer brief during Save', async () => {
+    vi.mocked(createBlueprint).mockResolvedValue(
+      savedBriefResponse('blueprint-2')
+    );
+    vi.mocked(researchProtocolService.listProtocols).mockResolvedValue([
+      BRIEF_PROTOCOL as never,
+    ]);
+    vi.mocked(researchProtocolService.listQuestions).mockResolvedValue([
+      questionRecord('What changed?'),
+    ]);
+    // The first read loads the editor; by the time this tab's Save reaches
+    // the amendment, another tab has saved blueprint-3.
+    vi.mocked(getProject)
+      .mockResolvedValueOnce({
+        id: 'project-1',
+        name: 'Research',
+        blueprint_id: 'blueprint-1',
+      })
+      .mockResolvedValue({
+        id: 'project-1',
+        name: 'Research',
+        blueprint_id: 'blueprint-3',
+      });
+
+    renderEditor();
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This brief was saved again since this attempt.'
+    );
+    expect(
+      researchProtocolService.createProtocolVersion
+    ).not.toHaveBeenCalled();
+    // The check runs right before the write, after the slower protocol reads.
+    const checkOrder = vi.mocked(getProject).mock.invocationCallOrder;
+    expect(checkOrder[checkOrder.length - 1]).toBeGreaterThan(
+      vi.mocked(researchProtocolService.listQuestions).mock
+        .invocationCallOrder[0]
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() =>
+      expect(getBlueprint).toHaveBeenLastCalledWith('blueprint-3')
+    );
+    expect(
+      researchProtocolService.createProtocolVersion
+    ).not.toHaveBeenCalled();
   });
 
   it('creates a question version before amending when the brief question changed', async () => {

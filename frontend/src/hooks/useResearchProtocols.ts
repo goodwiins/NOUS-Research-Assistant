@@ -24,6 +24,7 @@ import {
   type ResearchQuestionResponse,
   type ResearchQuestionVersionCreate,
 } from '@/services/researchProtocolService';
+import { getProject } from '@/services/researchEngineService';
 import {
   DAILY_BRIEF_AMENDMENT_REASON,
   DAILY_BRIEF_PROTOCOL_NAME,
@@ -197,13 +198,22 @@ export function useProtocolDeviations(
 }
 
 /**
+ * `stale`: a newer save (for example in another tab) owns the brief, so the
+ * protocol draft was left as it is.
+ */
+export type DailyBriefProtocolSyncResult = 'synced' | 'stale';
+
+/**
  * Create the Daily Research Brief's question version and protocol draft (or
  * amendment) for a newly saved brief blueprint. Approval still belongs to an
  * independent assigned supervisor in ProtocolPanel.
  */
 export function useDailyBriefProtocolSync(
   projectId: string
-): (blueprintId: string, parameters: Record<string, unknown>) => Promise<void> {
+): (
+  blueprintId: string,
+  parameters: Record<string, unknown>
+) => Promise<DailyBriefProtocolSyncResult> {
   const queryClient = useQueryClient();
   // A question created before a failed protocol call is reused on retry, so
   // pressing Save again does not create a duplicate question record.
@@ -246,7 +256,7 @@ export function useDailyBriefProtocolSync(
             snapshot,
           });
           unboundQuestion.current = undefined;
-          return;
+          return 'synced';
         }
 
         const draftId = brief.current_draft_version_id;
@@ -278,6 +288,15 @@ export function useDailyBriefProtocolSync(
           );
           questionVersionId = updated.current_version_id;
         }
+        // A newer save (for example in another tab) owns the protocol draft
+        // now; amending it for this older blueprint would displace it. Check
+        // right before the write, after the slower calls above.
+        const project = (await getProject(projectId)) as {
+          blueprint_id?: string | null;
+        };
+        if (project.blueprint_id !== blueprintId) {
+          return 'stale';
+        }
         await researchProtocolService.createProtocolVersion(brief.id, {
           question_version_id: questionVersionId,
           blueprint_id: blueprintId,
@@ -285,6 +304,7 @@ export function useDailyBriefProtocolSync(
           parent_version_id: draftId,
           amendment_reason: DAILY_BRIEF_AMENDMENT_REASON,
         });
+        return 'synced';
       } finally {
         await queryClient.invalidateQueries({
           queryKey: researchProtocolKeys.root(projectId),
