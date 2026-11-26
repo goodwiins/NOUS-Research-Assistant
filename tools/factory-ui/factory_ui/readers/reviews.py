@@ -6,9 +6,15 @@ import re
 
 HIDDEN_NOTICE = "hidden: environment values; open the file on disk"
 
-# The body of a `## Re-run` section runs to the next `## ` heading or the end,
-# like the helper's section(). A `###` heading inside stays in the body.
-_RERUN = re.compile(r"(?ms)^(##[ \t]+Re-run\b[^\n]*)(?:\n|\Z)(.*?)(?=^##[ \t]|\Z)")
+# A level-2 heading, as the helper's section() finds one: `##`, then a space
+# or a tab. The Re-run redactor and the header parser share it.
+_SECTION = r"##[ \t]"
+# The body of a `## Re-run` section runs to the next level-2 heading or the
+# end, like the helper's section(). A `###` heading inside stays in the body.
+_RERUN = re.compile(
+    rf"(?ms)^({_SECTION}[ \t]*Re-run\b[^\n]*)(?:\n|\Z)(.*?)(?=^{_SECTION}|\Z)"
+)
+_SECTION_START = re.compile(rf"^{_SECTION}")
 
 VERIFY_KEYS = (
     "VERDICT",
@@ -49,12 +55,13 @@ def file_verdict(text: str) -> str | None:
 
 
 def verify_header(text: str) -> dict[str, object]:
-    """The header lines of a verify file, up to the first `## ` heading:
-    each key of VERIFY_KEYS once, and every `FLAG:` value as a list."""
+    """The header lines of a verify file, up to the first level-2 heading:
+    each key of VERIFY_KEYS once, and every `FLAG:` value as a list. The
+    `## Re-run` body is hidden first, so nothing from it can be returned."""
     out: dict[str, object] = {}
     flags: list[str] = []
-    for line in text.splitlines():
-        if line.startswith("## "):
+    for line in hide_rerun(text).splitlines():
+        if _SECTION_START.match(line):
             break
         m = _HEADER_LINE.match(line.strip())
         if not m:

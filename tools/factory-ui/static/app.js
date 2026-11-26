@@ -349,8 +349,10 @@
   function budgetView(data) {
     const cmd = data.command || {};
     const a = data.answer;
-    const reading = (data.readings || []).find((r) => r.session === data.session);
-    const windows = (a && a.usage) || (reading && reading.windows) || {};
+    // Only the helper's own usage values sit beside its answer. A WAIT
+    // answer carries none, and a newer reading could contradict the cached
+    // answer, so current values appear only in the readings table.
+    const windows = (a && a.usage) || {};
     return h(
       "section",
       null,
@@ -367,7 +369,11 @@
             a.limits_error ? h("p", { class: "error" }, a.limits_error) : null,
           ]
         : null,
-      h("p", { class: "note" }, "session " + dash(data.session) + " (newest usage reading)"),
+      h(
+        "p",
+        { class: "note" },
+        "session " + dash(data.session) + " (newest usage reading when the answer was made)",
+      ),
       table(
         ["Window", "Used", "Resets", "Default limit"],
         Object.keys(data.limits || {}).map((w) => [w, ...windowCells(windows[w]), data.limits[w] + "%"]),

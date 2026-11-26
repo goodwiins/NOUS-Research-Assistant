@@ -147,3 +147,31 @@ def test_helper_diagnostic_never_carries_the_session_or_a_path(
     got = res.json()["answer"]["reading"]
     assert got == "unparsable: [Errno 2] No such file or directory: '<path>'"
     assert res.json()["answer"]["why"] == "usage data unreadable; starting"
+
+
+def test_budget_stderr_is_scrubbed(factory: Factory) -> None:
+    factory.set_control(
+        "budget",
+        out=BUDGET_GO,
+        stderr=f"warning: cannot stat /srv/example/usage/{NEWEST_SESSION}.json\n",
+    )
+    for running in start(factory):
+        res = running.get("/api/budget")
+    assert NEWEST_SESSION.encode() not in res.body
+    assert b"/srv/example" not in res.body
+    assert res.json()["command"]["stderr"] == "warning: cannot stat <path>\n"
+
+
+def test_wait_answer_shows_no_window_values_from_a_reading(
+    running: Running, tmp_path: Path
+) -> None:
+    """WAIT carries no usage. The answer table stays empty, so a newer
+    reading cannot contradict the cached answer; readings keep their values."""
+    data = running.get("/api/budget").json()
+    data["answer"] = dict(BUDGET_WAIT)
+    html = render("budget", data, tmp_path)["html"]
+    answer_table = html.split("<table")[1]
+    assert "Default limit" in answer_table
+    assert "<td>five_hour</td><td>-</td><td>-</td><td>75%</td>" in answer_table
+    assert "40%" not in answer_table
+    assert "40%" in html.split("Readings of the last 6 hours")[1]

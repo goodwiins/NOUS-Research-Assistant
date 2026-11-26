@@ -104,3 +104,14 @@ def test_busy_port_exits_nonzero_without_trying_another(
         assert tried == [port]
     finally:
         busy.close()
+
+
+def test_malformed_request_line_gets_400_with_headers(running: Running) -> None:
+    with socket.create_connection(("127.0.0.1", running.port), timeout=10) as s:
+        s.sendall(b"GET / HTTP/9x\r\nHost: 127.0.0.1\r\n\r\n")
+        raw = b""
+        while chunk := s.recv(65536):
+            raw += chunk
+    head = raw.partition(b"\r\n\r\n")[0].decode("latin-1").split("\r\n")
+    assert head[0].split()[1] == "400"
+    _check_headers([tuple(x.split(": ", 1)) for x in head[1:]])  # type: ignore[misc]

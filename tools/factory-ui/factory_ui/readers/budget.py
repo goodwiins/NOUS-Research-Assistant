@@ -100,7 +100,7 @@ def recent_readings(root: Path, now: float) -> list[dict[str, Any]]:
 _PATH = re.compile(r"(?<![\w.])/[^\s'\"]+")  # an absolute path
 
 
-def _scrub(value: Any, sid: str | None) -> Any:
+def scrub(value: Any, sid: str | None) -> Any:
     """A helper diagnostic without the full session id or a file path (an
     OSError names the usage file, whose name is the session id)."""
     if not isinstance(value, str):
@@ -115,7 +115,7 @@ def answer(data: dict[str, Any] | None, sid: str | None) -> dict[str, Any] | Non
     used, removed from every text field."""
     if data is None:
         return None
-    out = {k: _scrub(data[k], sid) for k in ANSWER_FIELDS if k in data}
+    out = {k: scrub(data[k], sid) for k in ANSWER_FIELDS if k in data}
     usage = data.get("usage")
     if isinstance(usage, dict):
         out["usage"] = {w: _window(usage.get(w)) for w in WINDOWS}

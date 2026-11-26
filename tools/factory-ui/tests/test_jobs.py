@@ -118,3 +118,17 @@ def test_failed_old_request_does_not_replace_the_new_view(
     data = running.get("/api/parallel").json()
     out = render("stale-error", data, tmp_path)
     assert out == {"parallel": True, "error": False}
+
+
+def test_deeply_nested_job_json_is_unreadable_not_a_500(factory: Factory) -> None:
+    job = "2026-01-11-example-deep"
+    (factory.root / "jobs" / job).mkdir()
+    (factory.root / "jobs" / job / "job.json").write_text("[" * 200_000)
+    for running in start(factory):
+        res = running.get("/api/jobs")
+        assert res.status == 200
+        rows = {r["id"]: r for r in res.json()["rows"]}
+        assert rows[job]["group"] == "unreadable"
+        assert rows[ACTIVE]["group"] == "cached"
+        assert running.get("/api/verifier").status == 200
+        assert running.get(f"/api/jobs/{job}").status == 200

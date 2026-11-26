@@ -511,6 +511,8 @@ with open(CONTROL) as fh:
     spec = json.load(fh).get(name, {{"out": {{"error": "unknown"}}, "exit": 2}})
 if spec.get("sleep"):
     time.sleep(spec["sleep"])
+if spec.get("stderr"):
+    sys.stderr.write(spec["stderr"])
 if "raw" in spec:
     sys.stdout.write(spec["raw"])
 else:

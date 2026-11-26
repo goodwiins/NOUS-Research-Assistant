@@ -31,5 +31,8 @@ def _finite(text: str) -> float:
 def loads(text: str) -> Any:
     """json.loads that refuses NaN, Infinity and numbers that overflow to
     them: Python accepts them, but they break age arithmetic and cannot be
-    sent back as JSON."""
-    return json.loads(text, parse_constant=_no_constant, parse_float=_finite)
+    sent back as JSON. Nesting too deep for the decoder is malformed too."""
+    try:
+        return json.loads(text, parse_constant=_no_constant, parse_float=_finite)
+    except RecursionError as e:
+        raise ValueError("JSON nested too deeply") from e

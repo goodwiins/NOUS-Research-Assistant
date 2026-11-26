@@ -154,3 +154,24 @@ def test_late_artifact_response_does_not_replace_another_view(
     detail = running.get(f"/api/jobs/{ACTIVE}").json()
     out = render("stale-draw", {"detail": detail}, tmp_path)
     assert out == {"elsewhere": 0, "onPage": 1}
+
+
+def test_rerun_with_tab_heading_is_hidden_on_both_routes(factory: Factory) -> None:
+    """`##<tab>Re-run`: the artifact route and the job-detail verify row see
+    the same section boundary, so no value from the hidden body escapes."""
+    marker = "TAB-RERUN-MARKER-81c3"
+    folder = factory.root / "jobs" / ESCALATED
+    (folder / "round-4").mkdir()
+    (folder / "round-4" / "shadow-verify.md").write_text(
+        "VERDICT: PASS\nHEAD: x\nBASE: y\nMODE: shadow\n"
+        f"##\tRe-run\nWHY: {marker}\nTOKEN={marker}\n##\tNotes\nafter\n"
+    )
+    for running in start(factory):
+        detail = running.get(f"/api/jobs/{ESCALATED}")
+        art = running.get(f"/api/jobs/{ESCALATED}/artifact/round-4/shadow-verify")
+    assert marker.encode() not in detail.body
+    assert marker.encode() not in art.body
+    v = {r["round"]: r for r in detail.json()["rounds"]}["4"]["verify"]
+    assert (v["verdict"], v["mode"], v["why"]) == ("PASS", "shadow", None)
+    assert reviews.HIDDEN_NOTICE in art.json()["text"]
+    assert "after" in art.json()["text"]

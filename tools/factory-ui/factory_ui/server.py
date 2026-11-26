@@ -107,8 +107,12 @@ class App:
             refresh,
             session_id=lambda: budget.newest_session(self.root),
         )
+        command = _command(res)
+        # The helper's diagnostics can name the usage file: scrub them like
+        # the answer.
+        command["stderr"] = budget.scrub(command["stderr"], res.get("session"))
         return {
-            "command": _command(res),
+            "command": command,
             "answer": budget.answer(res.get("data"), res.get("session")),
             "session": budget.short(res["session"]) if res.get("session") else None,
             "limits": dict(config.LIMITS),
@@ -135,6 +139,10 @@ def _command(res: dict[str, Any]) -> dict[str, Any]:
 class Handler(BaseHTTPRequestHandler):
     server_version = "factory-ui"
     sys_version = ""
+    # The base class answers a request it cannot parse as HTTP/0.9: a body
+    # with no status line and no headers. Answer it as HTTP/1.0 instead, so
+    # the 400 carries the security headers too.
+    default_request_version = "HTTP/1.0"
     server: FactoryServer
 
     def __getattr__(self, name: str) -> Callable[[], None]:
@@ -195,7 +203,10 @@ class Handler(BaseHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, format: str, *args: Any) -> None:
-        sys.stderr.write(f"factory-ui: {self.command} {self.path.partition('?')[0]}\n")
+        # A request the parser rejected may have no command or path yet.
+        command = getattr(self, "command", None) or "-"
+        path = str(getattr(self, "path", "") or "-").partition("?")[0]
+        sys.stderr.write(f"factory-ui: {command} {path}\n")
 
 
 class FactoryServer(ThreadingHTTPServer):
