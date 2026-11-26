@@ -31,7 +31,10 @@ _HEADER_LINE = re.compile(r"^([A-Z][A-Z-]*):[ \t]*(.*)$")
 
 
 def hide_rerun(text: str) -> str:
-    """Replace the body of every `## Re-run` section with HIDDEN_NOTICE."""
+    """Replace the body of every `## Re-run` section with HIDDEN_NOTICE.
+    LF, CRLF and bare CR all end a line: the text is returned with LF line
+    ends, so no line ending can hide a heading from the section matcher."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     return _RERUN.sub(lambda m: f"{m.group(1)}\n\n{HIDDEN_NOTICE}\n", text)
 
 

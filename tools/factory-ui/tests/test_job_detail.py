@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from conftest import (
     ACTIVE,
     ALL_ROUTES,
@@ -175,3 +176,38 @@ def test_rerun_with_tab_heading_is_hidden_on_both_routes(factory: Factory) -> No
     assert (v["verdict"], v["mode"], v["why"]) == ("PASS", "shadow", None)
     assert reviews.HIDDEN_NOTICE in art.json()["text"]
     assert "after" in art.json()["text"]
+
+
+@pytest.mark.parametrize("eol", ["\r", "\r\n"], ids=["bare-cr", "crlf"])
+def test_rerun_hidden_whatever_the_line_ends(factory: Factory, eol: str) -> None:
+    """A review file saved with bare CR or CRLF line ends: the Re-run body
+    never reaches the artifact or job-detail response."""
+    marker = "CR-RERUN-MARKER-2e7d"
+    lines = [
+        "VERDICT: PASS",
+        "HEAD: x",
+        "BASE: y",
+        "MODE: shadow",
+        "",
+        "## Re-run",
+        "",
+        f"FIXTURE_ENV={marker}",
+        f"WHY: {marker}",
+        "",
+        "## Notes",
+        "",
+        "after the hidden section",
+        "",
+    ]
+    folder = factory.root / "jobs" / ESCALATED
+    (folder / "round-5").mkdir()
+    (folder / "round-5" / "shadow-verify.md").write_bytes(eol.join(lines).encode())
+    for running in start(factory):
+        art = running.get(f"/api/jobs/{ESCALATED}/artifact/round-5/shadow-verify")
+        detail = running.get(f"/api/jobs/{ESCALATED}")
+    assert art.status == 200 and detail.status == 200
+    assert marker.encode() not in art.body
+    assert marker.encode() not in detail.body
+    text = art.json()["text"]
+    assert reviews.HIDDEN_NOTICE in text
+    assert "after the hidden section" in text
