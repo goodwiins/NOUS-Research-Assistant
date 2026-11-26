@@ -12,10 +12,11 @@ import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from . import config
 from .cache import CommandCache
@@ -80,8 +81,9 @@ def run(
         "error": None,
     }
     try:
-        # stdout and stderr as pipes: capture_output=True, with Popen so a
-        # timeout can stop the whole process group the child leads.
+        # stdout and stderr as pipes (capture_output=True), drained by
+        # threads with bounded buffers, so a timeout or an oversize output
+        # can stop the whole process group the child leads.
         proc = subprocess.Popen(
             argv,
             shell=False,
@@ -94,20 +96,27 @@ def run(
     except OSError as e:
         out["error"] = f"could not start the helper: {e.strerror or type(e).__name__}"
         return out
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout = _Drain(
+        proc.stdout, config.STDOUT_CAP, lambda: _signal(proc, signal.SIGTERM)
+    )
+    stderr = _Drain(proc.stderr, config.STDERR_CAP * 4, None)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _stop_group(proc)
+        _finish(proc, stdout, stderr)
         out["status"] = "timeout"
         out["error"] = f"no answer within {timeout:g} s"
         return out
+    _finish(proc, stdout, stderr)
     out["exit"] = proc.returncode
-    out["stderr"] = stderr.decode("utf-8", errors="replace")[: config.STDERR_CAP]
-    if len(stdout) > config.STDOUT_CAP:
+    out["stderr"] = stderr.text()[: config.STDERR_CAP]
+    if stdout.over:
         out["error"] = "output larger than 1 MB"
         return out
     try:
-        data = json.loads(stdout.decode("utf-8", errors="replace"))
+        data = json.loads(stdout.text())
     except ValueError:
         out["error"] = "output is not JSON"
         return out
@@ -119,19 +128,78 @@ def run(
     return out
 
 
+class _Drain(threading.Thread):
+    """Reads a pipe to its end and keeps at most `cap` bytes. When more
+    arrive it sets `over` and calls `on_over` once; the rest is discarded."""
+
+    def __init__(
+        self, pipe: IO[bytes], cap: int, on_over: Callable[[], None] | None
+    ) -> None:
+        super().__init__(daemon=True)
+        self._fd = pipe.fileno()
+        self._cap = cap
+        self._on_over = on_over
+        self._chunks: list[bytes] = []
+        self._size = 0
+        self.over = False
+        self.start()
+
+    def run(self) -> None:
+        while True:
+            try:
+                data = os.read(self._fd, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            keep = data[: max(0, self._cap - self._size)]
+            if keep:
+                self._chunks.append(keep)
+                self._size += len(keep)
+            if len(keep) < len(data) and not self.over:
+                self.over = True
+                if self._on_over:
+                    self._on_over()
+
+    def text(self) -> str:
+        return b"".join(self._chunks).decode("utf-8", errors="replace")
+
+
+def _signal(proc: subprocess.Popen[bytes], sig: int) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def _stop_group(proc: subprocess.Popen[bytes]) -> None:
     """SIGTERM to the process group the server started; SIGKILL when it is
     still there after TERM_GRACE seconds, so no run blocks the next one."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
+        _signal(proc, sig)
         try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
-        try:
-            proc.communicate(timeout=TERM_GRACE)
+            proc.wait(timeout=TERM_GRACE)
             return
         except subprocess.TimeoutExpired:
             continue
+
+
+def _finish(proc: subprocess.Popen[bytes], *drains: _Drain) -> None:
+    """Wait for both pipes to close. A process the child left behind that
+    still holds them open is stopped with the rest of the group."""
+    for d in drains:
+        d.join(TERM_GRACE)
+    if any(d.is_alive() for d in drains):
+        _signal(proc, signal.SIGTERM)
+        for d in drains:
+            d.join(TERM_GRACE)
+    if any(d.is_alive() for d in drains):
+        _signal(proc, signal.SIGKILL)
+        for d in drains:
+            d.join(TERM_GRACE)
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()
 
 
 class Runner:
@@ -157,14 +225,15 @@ class Runner:
     ) -> dict[str, Any]:
         """The cached result of `name`; a new run only when the cache and
         the minimum interval allow it. `session_id` is asked for the
-        session only when a run starts."""
+        session only when a run starts; the result keeps it under
+        `session` for the server, which shows only a shortened form."""
         if name not in ALLOWED:
             raise ValueError(f"command not allowed: {name!r}")
 
         def produce() -> dict[str, Any]:
             sid = session_id() if session_id else None
             res = run(name, self.root, sid, self._timeouts[name])
-            res["session"] = sid[:8] if sid else None
+            res["session"] = sid
             return res
 
         return self._caches[name].get(produce, refresh)

@@ -1,7 +1,8 @@
 """Usage readings (`usage/<session id>.json`) and the `F budget` answer.
 
-A session id is shown by its first 8 characters only; the full id goes only
-into the `budget` child's environment.
+A session id is shown by its first 8 characters at most, and never more than
+half of it (short()); the full id goes only into the `budget` child's
+environment.
 """
 
 from __future__ import annotations
@@ -66,6 +67,12 @@ def _readings(root: Path) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+def short(sid: str) -> str:
+    """The shown part of a session id: the first 8 characters, at most half
+    of the id, so a short id is never shown whole."""
+    return sid[: min(8, len(sid) // 2)]
+
+
 def newest_session(root: Path) -> str | None:
     """The stem of the newest reading by seen_at, from os.listdir."""
     readings = _readings(root)
@@ -81,7 +88,7 @@ def recent_readings(root: Path, now: float) -> list[dict[str, Any]]:
             continue
         out.append(
             {
-                "session": sid[:8],
+                "session": short(sid),
                 "seen_at": r["seen_at"],
                 "stale": age > config.USAGE_MAX_AGE,
                 "windows": r["windows"],

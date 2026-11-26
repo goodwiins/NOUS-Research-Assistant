@@ -303,6 +303,9 @@
       ),
       h("h2", null, "Backtest rows"),
       data.skipped ? h("p", { class: "note" }, data.skipped + " malformed line(s) skipped") : null,
+      data.truncated
+        ? h("p", { class: "error" }, "verify-backtest.jsonl is over 2 MB: rows and counts cover its start only")
+        : null,
       table(
         ["Job", "Verdict", "Why", "Flags", "Expect", "Match", "Owner verdict", "Owner note", "At", "Proof"],
         (data.rows || []).map((r) => [
@@ -537,9 +540,15 @@
     };
   }
 
+  function onJobPage(ui) {
+    const r = state.route;
+    return Boolean(ui && r && r.view === "job" && r.id === ui.id);
+  }
+
   function drawJob() {
     const ui = state.job;
-    if (!ui || !ui.detail) return;
+    // A late response must not replace another view the user moved to.
+    if (!ui || !ui.detail || !onJobPage(ui)) return;
     mount(
       views.job({
         detail: ui.detail,
@@ -554,7 +563,7 @@
   function loadArtifact(key) {
     const ui = state.job;
     return getJSON("/api/jobs/" + ui.id + "/artifact/" + key).then((res) => {
-      if (state.job !== ui) return;
+      if (state.job !== ui || !onJobPage(ui)) return;
       ui.texts[key] = res.ok ? res.body : { text: "not written yet", truncated: false };
       drawJob();
     });
@@ -613,7 +622,7 @@
     }, FILE_REFRESH_MS);
   }
 
-  root.FactoryUI = { views, fmtAge, parseRoute };
+  root.FactoryUI = { views, fmtAge, parseRoute, _state: state, _drawJob: drawJob };
   if (root.location && root.document.readyState) {
     if (root.document.readyState === "loading") {
       root.document.addEventListener("DOMContentLoaded", start);

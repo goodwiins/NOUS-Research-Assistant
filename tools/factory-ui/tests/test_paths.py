@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from conftest import ACTIVE, LINKED, MERGED, OUTSIDE_BYTES, Running
 from factory_ui import paths
@@ -88,3 +91,22 @@ def test_job_pattern() -> None:
     assert paths.JOB_RE.fullmatch("2026-01-01-example-job")
     for bad in ("2026-01-01-", "2026-01-01-Example", "../2026-01-01-x", "x"):
         assert not paths.JOB_RE.fullmatch(bad)
+
+
+def test_symlinked_directory_below_root_is_never_followed(tmp_path: Path) -> None:
+    """Every directory below the root is opened with O_NOFOLLOW, so a
+    directory swapped for a symlink after any check is refused, whether it
+    points outside the root or inside it."""
+    root = tmp_path / "root"
+    (root / "jobs" / "real").mkdir(parents=True)
+    (root / "jobs" / "real" / "spec.md").write_text("inside\n")
+    outside = tmp_path / "out"
+    outside.mkdir()
+    (outside / "spec.md").write_text(OUTSIDE_BYTES)
+    os.symlink(outside, root / "jobs" / "to-outside")
+    os.symlink(root / "jobs" / "real", root / "jobs" / "to-inside")
+    read = paths.safe_read(root, root / "jobs" / "real" / "spec.md")
+    assert read is not None and read.text == "inside\n"
+    assert paths.safe_read(root, root / "jobs" / "to-outside" / "spec.md") is None
+    assert paths.safe_read(root, root / "jobs" / "to-inside" / "spec.md") is None
+    assert paths.safe_read(root, outside / "spec.md") is None

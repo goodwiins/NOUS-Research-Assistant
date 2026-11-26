@@ -16,7 +16,6 @@ from typing import Any
 from .. import config, paths
 from . import as_dict, as_list, reviews
 
-LOCAL_FIELDS = ("worktree", "folder", "port")
 # Never shown: a credential-like token, the session that holds a lease, and
 # the Linear document links of the owner's workspace.
 HIDDEN_TOP = ("write_token", "docs")
@@ -70,7 +69,7 @@ def _row(job: str, doc: dict[str, Any] | None, readable: bool, now: float) -> di
     lease = as_dict(cache.get("lease"))
     finished = cache.get("phase") in FINISHED_PHASES and cache.get("finished")
     return {
-        "id": str(cache.get("id") or job),
+        "id": job,
         "phase": cache.get("phase"),
         "round": cache.get("round"),
         "max_rounds": cache.get("max_rounds"),
@@ -149,7 +148,11 @@ def _artifacts(folder: Path) -> list[dict[str, Any]]:
             if _regular(folder / name):
                 present.add(name[:-3])
         if _ROUND_DIR.match(name) and stat.S_ISDIR(_lmode(folder / name)):
-            for sub in os.listdir(folder / name):
+            try:
+                subs = os.listdir(folder / name)
+            except OSError:
+                continue
+            for sub in subs:
                 key = f"{name}/{sub[:-3]}"
                 if sub.endswith(".md") and paths.key_parts(key):
                     if _regular(folder / name / sub):
@@ -225,6 +228,7 @@ def _verify_round(
         else ("verify_shadow", shadow[n]) if n in shadow else (None, None)
     )
     file_flags: list[str] = []
+    header: dict[str, object] = {}
     key = None
     for cand in (f"round-{n}/review-verify", f"round-{n}/shadow-verify"):
         if cand in files:
@@ -232,17 +236,19 @@ def _verify_round(
             parts = paths.key_parts(cand)
             read = paths.safe_read(root, folder.joinpath(*parts)) if parts else None
             if read:
-                flags = reviews.verify_header(read.text)["FLAG"]
+                header = reviews.verify_header(read.text)
+                flags = header["FLAG"]
                 file_flags += flags if isinstance(flags, list) else []
             break
     if entry is None and key is None:
         return None
     entry = entry or {}
+    # The recorded entry first; the file's header fills what it lacks.
     return {
         "field": field,
-        "verdict": entry.get("verdict"),
-        "why": entry.get("why"),
-        "mode": entry.get("mode"),
+        "verdict": entry.get("verdict") or header.get("VERDICT"),
+        "why": entry.get("why") or header.get("WHY"),
+        "mode": entry.get("mode") or header.get("MODE"),
         "key": key,
         "diff_finding": "diff-finding" in (entry.get("flags") or [])
         or "diff-finding" in file_flags,

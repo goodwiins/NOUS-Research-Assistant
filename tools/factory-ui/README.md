@@ -75,28 +75,33 @@ rules. `F slot` and `F parallel` are never run.
 ### Switching to `F list` and `F stats`
 
 `factory_ui/sources.py` is the one place the server gets the Jobs rows
-(`jobs_rows`) and the backtests block (`backtests_block`). Today both read
+(`jobs_rows`), the backtests block (`backtests_block`) and the backtest rows
+(`backtest_rows`). Today both read
 files: `jobs/*/job.json` as the helper's `cached_jobs` and `merge` read it,
 and `verify-backtest.jsonl` counted line by line like the helper's
 `verify_stats`. The rows carry the `F list` field names (`id`, `phase`,
 `round`, `pr`, `home`, `lease`) and the block uses the `F stats`
 `verify.backtests` key names. Once the helper gains a no-write mode, switch
-by changing those two functions to call it, and add the commands to
-`ALLOWED` with a new proof. Nothing else changes.
+by changing `jobs_rows` and `backtests_block` to call it, and add the
+commands to `ALLOWED` with a new proof. Nothing else changes. `F stats`
+prints no rows, so `backtest_rows` stays a file read.
 
 ## Rules
 
 - **No writes.** The server opens files `O_RDONLY | O_NOFOLLOW` only, keeps
   its cache in memory, logs to stderr and writes no file anywhere.
-- **Reads.** Every read goes through one guard (`paths.safe_read`): the real
-  path must lie under the factory root, the file must be a regular file and
-  is cut at 2 MB with a notice. A job id must match the job-name pattern and
+- **Reads.** Every read goes through one guard (`paths.safe_read`): it opens
+  the path one component at a time from the factory root's descriptor with
+  `O_NOFOLLOW`, so no symlink below the root is followed; the file must be a
+  regular file and is cut at 2 MB with a notice. A `verify-backtest.jsonl`
+  over 2 MB is flagged on the Verifier view. A job id must match the job-name pattern and
   be a folder `os.listdir` returned; an artifact key must be one of `spec`,
   `build`, `decision`, `decision-<n>`, `pr-body`, `related-tests`,
   `round-<n>/review-<lens>` or `round-<n>/shadow-verify`.
 - **Secrets.** The server never opens the Linear key file or anything under
   `~/.config/`. `write_token`, `lease.session` and `docs` are never shown;
-  session ids show by their first 8 characters only. Environment values are
+  session ids show by their first 8 characters at most, and never more
+  than half of the id. Environment values are
   never logged or returned.
 - **`## Re-run`.** A verify file's `## Re-run` section prints the verify
   sandbox's environment. The server replaces its body with "hidden:
@@ -114,7 +119,9 @@ by changing those two functions to call it, and add the commands to
   | `budget` | 15 s | 10 s | 10 s |
 
   A failure or timeout is cached like a result. On timeout the server sends
-  SIGTERM to the process group it started. File views refetch every 15 s
+  SIGTERM to the process group it started (SIGKILL after 5 s if it is still
+  there). Output is read with bounded buffers; stdout over 1 MB stops the
+  group and is an error. File views refetch every 15 s
   while the tab is visible.
 
 ## This Mac's cache

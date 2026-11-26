@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from conftest import Factory, FakeClock, start
@@ -114,3 +117,37 @@ def test_failures_are_cached(factory: Factory, clock: FakeClock) -> None:
     clock.t += 61
     assert r.get("doctor", refresh=True)["status"] == "answer"
     assert _runs(factory, "doctor") == 3
+
+
+def test_doctor_serves_stale_result_while_a_refresh_runs(
+    factory: Factory, clock: FakeClock
+) -> None:
+    r = runner.Runner(factory.root, clock=clock)
+    first = r.get("doctor")
+    assert _runs(factory, "doctor") == 1
+    # The next run hangs until the test lets it finish.
+    factory.set_control("doctor", out={"linear": "ok"}, sleep=30)
+    clock.t += 301
+    refresh = threading.Thread(target=r.get, args=("doctor",), daemon=True)
+    refresh.start()
+    while _runs(factory, "doctor") < 2:
+        refresh.join(0.05)
+    during = r.get("doctor")
+    assert refresh.is_alive()
+    assert during["as_of"] == first["as_of"]
+    assert _runs(factory, "doctor") == 2
+    # Let the refresh end: stop the sleeping fake helper's process group.
+    for c in factory.calls()[1:]:
+        os.killpg(c["pgid"], signal.SIGTERM)
+    refresh.join(10)
+    assert not refresh.is_alive()
+
+
+def test_oversize_output_is_cut_and_stops_the_child(
+    factory: Factory, clock: FakeClock
+) -> None:
+    factory.set_control("doctor", raw="x" * (config.STDOUT_CAP + 10), sleep=0)
+    res = runner.run("doctor", root=factory.root, timeout=30)
+    assert res["status"] == "error"
+    assert res["error"] == "output larger than 1 MB"
+    assert res["data"] is None

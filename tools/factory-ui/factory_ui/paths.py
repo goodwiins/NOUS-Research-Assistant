@@ -70,16 +70,39 @@ def key_parts(key: str) -> tuple[str, ...] | None:
     return (*parts[:-1], parts[-1] + ".md")
 
 
-def safe_read(root: Path, path: Path, tail: bool = False) -> Read | None:
-    """Read a regular file under `root`, at most READ_CAP bytes (the last
-    ones when `tail`). None when it is missing, outside the root, a symlink
-    or not a regular file."""
-    real_root = os.path.realpath(root) + os.sep
-    if not os.path.realpath(path).startswith(real_root):
+def _open_under(root: Path, path: Path) -> int | None:
+    """A read-only descriptor for `path`, opened one component at a time from
+    the root's descriptor with O_NOFOLLOW (directories also O_DIRECTORY), so
+    no symlink anywhere below the root is followed, even one swapped in
+    after a check. None when that fails."""
+    try:
+        parts = Path(os.path.abspath(path)).relative_to(os.path.abspath(root)).parts
+    except ValueError:
+        return None
+    if not parts or any(p in ("", ".", "..") for p in parts):
         return None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
+        return None
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def safe_read(root: Path, path: Path, tail: bool = False) -> Read | None:
+    """Read a regular file under `root`, at most READ_CAP bytes (the last
+    ones when `tail`). None when it is missing, outside the root, reached
+    through a symlink or not a regular file."""
+    fd = _open_under(root, path)
+    if fd is None:
         return None
     try:
         st = os.fstat(fd)

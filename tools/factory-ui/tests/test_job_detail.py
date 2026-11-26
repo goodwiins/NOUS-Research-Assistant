@@ -9,12 +9,15 @@ from conftest import (
     ALL_ROUTES,
     ARTIFACT_KEYS,
     DOCS_VALUE,
+    ESCALATED,
     LEASE_SESSION,
     PR_OPEN,
     RERUN_MARKER,
     WRITE_TOKEN,
     XSS_SPEC,
+    Factory,
     Running,
+    start,
 )
 from dom import render
 from factory_ui.readers import reviews
@@ -124,3 +127,30 @@ def test_summary_omits_secret_fields(running: Running) -> None:
     assert "docs" not in summary["cache"]
     assert "session" not in summary["cache"]["lease"]
     assert summary["cache"]["lease"]["host"] == "mac-a"
+
+
+def test_file_only_verify_round_uses_the_file_header(
+    factory: Factory, tmp_path: Path
+) -> None:
+    """A verify file with no recorded entry: verdict, why and mode come from
+    the file's header lines."""
+    folder = factory.root / "jobs" / ESCALATED
+    (folder / "round-3").mkdir()
+    (folder / "round-3" / "shadow-verify.md").write_text(
+        "VERDICT: CHANGES\nHEAD: x\nBASE: y\nMODE: shadow\nWHY: flip\n\n## Notes\n"
+    )
+    for running in start(factory):
+        detail = running.get(f"/api/jobs/{ESCALATED}").json()
+    v = {r["round"]: r for r in detail["rounds"]}["3"]["verify"]
+    assert v["field"] is None
+    assert (v["verdict"], v["why"], v["mode"]) == ("CHANGES", "flip", "shadow")
+    assert v["key"] == "round-3/shadow-verify"
+    assert v["diff_finding"] is False
+
+
+def test_late_artifact_response_does_not_replace_another_view(
+    running: Running, tmp_path: Path
+) -> None:
+    detail = running.get(f"/api/jobs/{ACTIVE}").json()
+    out = render("stale-draw", {"detail": detail}, tmp_path)
+    assert out == {"elsewhere": 0, "onPage": 1}

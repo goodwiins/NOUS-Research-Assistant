@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -108,3 +110,19 @@ def test_doctor_helper_bug_and_garbage(factory: Factory, tmp_path: Path) -> None
         bug = running.get("/api/health").json()
     assert bug["command"]["status"] == "helper bug"
     assert "helper bug" in render("health", bug, tmp_path)["text"]
+
+
+def test_short_session_id_is_never_shown_whole(factory: Factory) -> None:
+    """An 8-character session name: at most half of it is shown, in the
+    current-session field and in the readings list."""
+    sid = "abcdefgh"
+    (factory.root / "usage" / f"{sid}.json").write_text(
+        json.dumps({"seen_at": int(time.time()), "rate_limits": {}})
+    )
+    for running in start(factory):
+        res = running.get("/api/budget")
+    data = res.json()
+    assert factory.calls()[0]["session"] == sid
+    assert data["session"] == "abcd"
+    assert data["readings"][0]["session"] == "abcd"
+    assert sid.encode() not in res.body

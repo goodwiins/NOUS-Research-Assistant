@@ -82,7 +82,9 @@ class Element {
   }
 }
 
+const mountPoints = { app: new Element("main"), nav: new Element("nav") };
 const documentShim = {
+  getElementById: (id) => mountPoints[id] || null,
   createElement: (tag) => new Element(tag),
   createTextNode: (text) => new TextNode(text),
   createDocumentFragment: () => new Element("fragment"),
@@ -106,6 +108,20 @@ function walk(node, tags, hrefs) {
 
 const [view, file] = process.argv.slice(2);
 const data = JSON.parse(fs.readFileSync(file, "utf8"));
+if (view === "stale-draw") {
+  // A job response that lands after the user moved to another view.
+  const ui = globalThis.FactoryUI;
+  const id = data.detail.id;
+  ui._state.job = { id, detail: data.detail, open: new Set(), raw: new Set(), texts: {} };
+  ui._state.route = { view: "health" };
+  ui._drawJob();
+  const elsewhere = mountPoints.app.children.length;
+  ui._state.route = { view: "job", id };
+  ui._drawJob();
+  const onPage = mountPoints.app.children.length;
+  process.stdout.write(JSON.stringify({ elsewhere, onPage }));
+  process.exit(0);
+}
 let node;
 if (view === "markdown") node = globalThis.FactoryRender.markdown(data.text);
 else if (view === "raw") node = globalThis.FactoryRender.raw(data.text);

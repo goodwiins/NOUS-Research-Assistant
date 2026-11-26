@@ -505,6 +505,7 @@ with open(LOG, "a") as fh:
         "env": sorted(os.environ),
         "session": os.environ.get("CLAUDE_CODE_SESSION_ID"),
         "stdin_tty": sys.stdin.isatty(),
+        "pgid": os.getpgid(0),
     }}) + "\\n")
 with open(CONTROL) as fh:
     spec = json.load(fh).get(name, {{"out": {{"error": "unknown"}}, "exit": 2}})

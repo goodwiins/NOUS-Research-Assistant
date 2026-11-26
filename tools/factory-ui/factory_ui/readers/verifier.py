@@ -53,8 +53,12 @@ def verify_mode(root: Path) -> tuple[str, str | None]:
     return ("off", None)
 
 
+def _read(root: Path) -> paths.Read | None:
+    return paths.safe_read(root, root / "verify-backtest.jsonl")
+
+
 def _lines(root: Path) -> list[str]:
-    read = paths.safe_read(root, root / "verify-backtest.jsonl")
+    read = _read(root)
     return read.text.splitlines() if read else []
 
 
@@ -102,9 +106,11 @@ def count_backtests(root: Path) -> dict[str, Any]:
 
 def backtest_rows(root: Path) -> dict[str, Any]:
     """The backtest rows with the shown fields; a line that is not a JSON
-    object is skipped and counted."""
+    object is skipped and counted. `truncated`: the file is over the 2 MB
+    read cap, so rows and the recomputed block cover its start only."""
+    read = _read(root)
     rows, skipped = [], 0
-    for line in _lines(root):
+    for line in read.text.splitlines() if read else []:
         if not line.strip():
             continue
         try:
@@ -116,7 +122,11 @@ def backtest_rows(root: Path) -> dict[str, Any]:
             skipped += 1
             continue
         rows.append({k: r.get(k) for k in ROW_FIELDS})
-    return {"rows": rows, "skipped": skipped}
+    return {
+        "rows": rows,
+        "skipped": skipped,
+        "truncated": bool(read and read.truncated),
+    }
 
 
 def round_rows(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
