@@ -47,20 +47,54 @@ vi.mock('../BlueprintEditor', () => ({
   BlueprintEditor: ({
     projectId,
     readOnly,
+    onBlueprintSaved,
   }: {
     projectId: string;
     readOnly?: boolean;
+    onBlueprintSaved?: (
+      blueprintId: string,
+      templateSource: string | null
+    ) => void;
   }) => (
     <div>
       Blueprint for {projectId} {readOnly ? '(read only)' : '(editable)'}
+      <button
+        type="button"
+        onClick={() =>
+          onBlueprintSaved?.('blueprint-brief', 'daily_research_brief')
+        }
+      >
+        Save brief blueprint
+      </button>
+      <button
+        type="button"
+        onClick={() => onBlueprintSaved?.('blueprint-custom', null)}
+      >
+        Save custom blueprint
+      </button>
     </div>
   ),
 }));
-vi.mock('../ProtocolPanel', () => ({
-  ProtocolPanel: ({ projectId }: { projectId: string }) => (
-    <div>Protocol for {projectId}</div>
-  ),
-}));
+// The real ProtocolPanel renders against empty protocol data, so the wiring
+// test can assert on its actual question fieldset.
+vi.mock('@/hooks/useResearchProtocols', () => {
+  const idle = { mutate: vi.fn(), isPending: false, error: null };
+  return {
+    useResearchQuestions: () => ({ data: [], isLoading: false, error: null }),
+    useResearchProtocols: () => ({ data: [], isLoading: false, error: null }),
+    useProtocolActions: () => ({
+      createQuestion: idle,
+      createQuestionVersion: idle,
+      createProtocol: idle,
+      createVersion: idle,
+      approve: idle,
+      register: idle,
+      recordDeviation: idle,
+    }),
+    useProtocolRegistrations: () => ({ data: [] }),
+    useProtocolDeviations: () => ({ data: [] }),
+  };
+});
 vi.mock('../ReportIdentityPanel', () => ({
   ReportIdentityPanel: ({ projectId }: { projectId: string }) => (
     <div>Reports for {projectId}</div>
@@ -513,6 +547,46 @@ describe('ProjectWorkflow', () => {
       ).toBeInTheDocument()
     );
     expect(useProjectStore.getState().currentProject).toEqual(other);
+  });
+
+  it('tells the protocol panel when the saved blueprint is a Daily Research Brief', () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectWorkflow
+          project={{
+            id: 'collection-1',
+            workspace_id: 'workspace-1',
+            name: 'Brief',
+            research_engine_project_id: 'engine-1',
+            can_edit: true,
+            can_manage: true,
+            workspace_archived: false,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          }}
+        />
+      </QueryClientProvider>
+    );
+
+    const setupLine = /created from the Daily Research Brief setup/;
+    expect(
+      screen.getByRole('textbox', { name: 'Research question' })
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save brief blueprint' })
+    );
+    expect(
+      screen.queryByRole('textbox', { name: 'Research question' })
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(setupLine)).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save custom blueprint' })
+    );
+    expect(
+      screen.getByRole('textbox', { name: 'Research question' })
+    ).toBeInTheDocument();
+    expect(screen.queryByText(setupLine)).not.toBeInTheDocument();
   });
 
   it('renders the corpus panel read-only for an archived project', async () => {

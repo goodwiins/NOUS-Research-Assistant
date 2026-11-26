@@ -21,6 +21,7 @@ import {
   removeProjectRole,
   type ResearchProjectRole,
 } from '@/services/researchEngineService';
+import { DAILY_BRIEF_TEMPLATE_SOURCE } from '@/utils/dailyBriefProtocol';
 import { AppraisalPanel } from './AppraisalPanel';
 import { BlueprintEditor } from './BlueprintEditor';
 import { CorpusPanel } from './CorpusPanel';
@@ -105,18 +106,24 @@ export function ProjectWorkflow({
   const [savedBlueprint, setSavedBlueprint] = useState<{
     projectId: string;
     blueprintId: string;
+    templateSource: string | null;
   } | null>(null);
   const approvedProtocolVersionId =
     approvedProtocol?.projectId === project.id
       ? approvedProtocol.versionId
       : undefined;
-  const blueprintId =
-    savedBlueprint?.projectId === project.id
-      ? savedBlueprint.blueprintId
-      : undefined;
+  const currentBlueprint =
+    savedBlueprint?.projectId === project.id ? savedBlueprint : null;
+  const blueprintId = currentBlueprint?.blueprintId;
+  const savedDailyBrief =
+    currentBlueprint?.templateSource === DAILY_BRIEF_TEMPLATE_SOURCE;
   const handleBlueprintSaved = useCallback(
-    (savedId: string) =>
-      setSavedBlueprint({ projectId: project.id, blueprintId: savedId }),
+    (savedId: string, templateSource: string | null) =>
+      setSavedBlueprint({
+        projectId: project.id,
+        blueprintId: savedId,
+        templateSource,
+      }),
     [project.id]
   );
   const handleApprovedProtocolChange = useCallback(
@@ -240,6 +247,7 @@ export function ProjectWorkflow({
         <ProtocolPanel
           projectId={project.id}
           blueprintId={blueprintId}
+          dailyBrief={savedDailyBrief}
           readOnly={!canEdit}
           onApprovedVersionChange={handleApprovedProtocolChange}
         />

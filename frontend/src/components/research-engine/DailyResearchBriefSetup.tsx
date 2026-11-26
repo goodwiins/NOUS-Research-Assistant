@@ -39,12 +39,15 @@ export interface DailyResearchBriefSetupProps {
     parameters: Record<string, unknown>,
     confirmation: DailyBriefScopeConfirmation | null
   ) => void;
+  /** Called for a parameter edit only, never for a scope confirmation. */
+  onEdit?: () => void;
   disabled?: boolean;
 }
 
 export function DailyResearchBriefSetup({
   initialParameters,
   onChange,
+  onEdit,
   disabled = false,
 }: DailyResearchBriefSetupProps): ReactElement {
   const [parameters, setParameters] = useState<Record<string, unknown>>(() => ({
@@ -88,6 +91,7 @@ export function DailyResearchBriefSetup({
     setParameters(next);
     setConfirmed(false);
     onChange(next, null);
+    onEdit?.();
   };
 
   const handleConfirmation = (checked: boolean): void => {
@@ -97,9 +101,11 @@ export function DailyResearchBriefSetup({
       return;
     }
 
+    // The server compares the confirmation with the saved parameters exactly,
+    // so the question is sent as saved, not trimmed.
     const confirmation: DailyBriefScopeConfirmation = {
       confirmed: true,
-      research_question: researchQuestion.trim(),
+      research_question: researchQuestion,
       inclusion_criteria: inclusionCriteria,
       exclusion_criteria: exclusionCriteria,
       providers,
