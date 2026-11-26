@@ -230,8 +230,9 @@ class Runner:
         if name not in ALLOWED:
             raise ValueError(f"command not allowed: {name!r}")
 
-        def produce() -> dict[str, Any]:
+        def produce(launch: Callable[[], None]) -> dict[str, Any]:
             sid = session_id() if session_id else None
+            launch()
             res = run(name, self.root, sid, self._timeouts[name])
             res["session"] = sid
             return res

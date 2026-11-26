@@ -98,6 +98,28 @@ def test_budget_at_most_once_per_10s(factory: Factory, clock: FakeClock) -> None
         assert _runs(factory, "budget") == 3
 
 
+def test_budget_interval_starts_at_launch_not_before_the_scan(
+    factory: Factory, clock: FakeClock
+) -> None:
+    def slow_scan() -> str | None:
+        # The usage scan before the launch takes 11 s of injected time.
+        clock.t += 11
+        return None
+
+    r = runner.Runner(factory.root, clock=clock)
+    r.get("budget", refresh=True, session_id=slow_scan)
+    assert _runs(factory, "budget") == 1
+    # The helper launched at t=11: a refresh at once must not launch again.
+    r.get("budget", refresh=True, session_id=slow_scan)
+    assert _runs(factory, "budget") == 1
+    clock.t += 9.9
+    r.get("budget", refresh=True, session_id=slow_scan)
+    assert _runs(factory, "budget") == 1
+    clock.t += 0.2
+    r.get("budget", refresh=True, session_id=slow_scan)
+    assert _runs(factory, "budget") == 2
+
+
 def test_policies_match_the_spec() -> None:
     d, b = config.COMMANDS["doctor"], config.COMMANDS["budget"]
     assert (d.ttl, d.min_interval, d.timeout, d.serve_stale) == (300, 60, 120, True)

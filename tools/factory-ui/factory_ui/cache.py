@@ -3,6 +3,9 @@
 The limits hold whatever the caller: any number of requests, tabs or
 refresh clicks start at most one run per minimum interval, and never two
 runs of one command at a time. A failure is cached like a result.
+The interval counts from the helper's launch: `produce` calls the
+`launch` callback it is given just before it starts the helper, so slow
+work before the launch (the Budget view's usage scan) cannot use it up.
 """
 
 from __future__ import annotations
@@ -32,7 +35,9 @@ class CommandCache:
         self._next_wall = 0.0
 
     def get(
-        self, produce: Callable[[], dict[str, Any]], refresh: bool = False
+        self,
+        produce: Callable[[Callable[[], None]], dict[str, Any]],
+        refresh: bool = False,
     ) -> dict[str, Any]:
         with self._cond:
             now = self._clock()
@@ -56,7 +61,7 @@ class CommandCache:
             self._next_wall = self._wall() + self._policy.min_interval
         result: dict[str, Any] = {}
         try:
-            result = produce()
+            result = produce(self._launch)
         finally:
             with self._cond:
                 result["as_of"] = self._wall()
@@ -66,6 +71,11 @@ class CommandCache:
                 self._cond.notify_all()
         with self._cond:
             return self._stamped()
+
+    def _launch(self) -> None:
+        with self._cond:
+            self._last_start = self._clock()
+            self._next_wall = self._wall() + self._policy.min_interval
 
     def _stamped(self) -> dict[str, Any]:
         assert self._result is not None
