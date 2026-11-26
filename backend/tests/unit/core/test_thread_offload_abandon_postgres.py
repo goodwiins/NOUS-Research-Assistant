@@ -17,8 +17,11 @@ CI runner fewer abandons fell before the COMMIT and that count dropped below 5.
 ``test_randomly_timed_abandons_stay_within_the_bound`` keeps the random stress
 for the bound itself: any landed abandoned write must have been admitted.
 
-Mutation check: make ``_gate_abandoned_commit`` (or ``_Handoff.admit_commit``)
-never refuse and the ``flushing`` case lands its write.
+Mutation checks: make ``_gate_abandoned_commit`` (or ``_Handoff.admit_commit``)
+never refuse and the ``flushing`` case lands its write. Make
+``_refuse_abandoned_commit`` never refuse and the ``before_commit`` case still
+does not land (the engine gate refuses it instead), but it fails on which
+check refused it (GOO-799).
 
     ORCHESTRATION_TEST_DATABASE_URL=postgresql://... \\
         pytest -q backend/tests/unit/core/test_thread_offload_abandon_postgres.py
@@ -28,6 +31,7 @@ import asyncio
 import os
 import random
 import threading
+import traceback
 import uuid
 from typing import Any, Callable, Dict, Iterator, List, Set
 
@@ -98,19 +102,30 @@ def _landed(pg_engine: Engine, row_table: Any) -> Set[int]:
         return set(conn.execute(text(f'SELECT v FROM "{name}"')).scalars())
 
 
+_SESSION_CHECK = "_refuse_abandoned_commit"
+_ENGINE_GATE = "_gate_abandoned_commit"
+
 # Stage the thread is paused at when the abandon is decided, and what must
-# follow: (write lands, admitted_before_abandon, abandoned_mid_commit).
+# follow: (write lands, admitted_before_abandon, abandoned_mid_commit, the
+# check that refused the commit). before_commit and flushing agree on the
+# first three (nothing admitted, nothing in flight); only the refusing check
+# tells them apart (GOO-799).
 _STAGES = {
     # Before commit() starts: the Session-level before_commit check refuses.
-    "before_commit": (False, False, False),
+    "before_commit": (False, False, False, _SESSION_CHECK),
     # commit() is flushing, before_commit already passed (the GOO-766 window):
     # only the engine commit gate stands between the abandon and the COMMIT.
-    "flushing": (False, False, False),
+    "flushing": (False, False, False, _ENGINE_GATE),
     # The gate admitted the COMMIT and it is on its way: it may land.
-    "commit_in_flight": (True, True, True),
+    "commit_in_flight": (True, True, True, None),
     # The COMMIT returned (after_commit), the thread has not finished yet.
-    "commit_returned": (True, True, False),
+    "commit_returned": (True, True, False, None),
 }
+
+
+def _refused_by(error: BaseException) -> str:
+    """The function that raised ``error``: which of the two checks refused."""
+    return traceback.extract_tb(error.__traceback__)[-1].name
 
 
 @pytest.mark.parametrize("stage", sorted(_STAGES))
@@ -119,7 +134,8 @@ async def test_an_abandoned_write_lands_only_if_its_commit_was_in_flight(
 ) -> None:
     reached = threading.Event()
     release = threading.Event()
-    seen: Dict[str, Any] = {}
+    done = threading.Event()
+    seen: Dict[str, Any] = {"refused_by": None}
 
     def _pause() -> None:
         seen["handoff"] = thread_offload._offloaded.handoff
@@ -150,10 +166,17 @@ async def test_an_abandoned_write_lands_only_if_its_commit_was_in_flight(
         _hook(db, "after_commit", lambda *_: _pause())
 
     def _write(session: Session) -> None:
-        session.add(row_table(1))
-        if stage == "before_commit":
-            _pause()
-        session.commit()
+        try:
+            session.add(row_table(1))
+            if stage == "before_commit":
+                _pause()
+            try:
+                session.commit()
+            except thread_offload.AbandonedSessionError as error:
+                seen["refused_by"] = _refused_by(error)
+                raise
+        finally:
+            done.set()
 
     try:
         task = asyncio.create_task(
@@ -166,6 +189,9 @@ async def test_an_abandoned_write_lands_only_if_its_commit_was_in_flight(
         handoff = seen["handoff"]
         assert handoff is not None and handoff._abandoned
         release.set()
+        # before_commit has no connection checked out yet, so the pool being
+        # empty does not show the thread is done: wait for it explicitly.
+        assert await asyncio.to_thread(done.wait, _WAIT), "thread never finished"
         await _all_sessions_closed(pg_engine)
     finally:
         release.set()
@@ -173,13 +199,14 @@ async def test_an_abandoned_write_lands_only_if_its_commit_was_in_flight(
             event.remove(target, name, fn)
 
     landed = 1 in _landed(pg_engine, row_table)
-    lands, admitted, mid_commit = _STAGES[stage]
+    lands, admitted, mid_commit, refused_by = _STAGES[stage]
     assert seen["committing"] is mid_commit, "paused at the wrong point"
     assert (
         landed,
         handoff.admitted_before_abandon,
         handoff.abandoned_mid_commit,
-    ) == (lands, admitted, mid_commit), stage
+        seen["refused_by"],
+    ) == (lands, admitted, mid_commit, refused_by), stage
     # The guarantee itself: a landed write was admitted before the abandon.
     assert not landed or handoff.admitted_before_abandon
 

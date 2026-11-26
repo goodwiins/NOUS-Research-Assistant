@@ -34,7 +34,11 @@ import { REPLAY_PRIVACY_OPTIONS } from '@/lib/replay-privacy';
 // Secret-shaped fixtures are assembled at runtime so no literal credential
 // is committed (secret scanners match on the source text).
 const b64url = (text: string): string =>
-  Buffer.from(text).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  Buffer.from(text)
+    .toString('base64')
+    .replace(/=+$/, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
 const JWT = [
   b64url('{"alg":"HS256","typ":"JWT"}'),
   b64url('{"sub":"user-123","email":"a@b.co"}'),
@@ -141,7 +145,17 @@ describe('strings', () => {
       ].join('\n'),
       2000
     );
-    expectNoLeak(out, [JWT, 'abcdefghijklmnop', BASIC, 'abc123', OPENAI_KEY, SB_SECRET, AWS_KEY, 'alice@example.com', b64url('signature-value-here')]);
+    expectNoLeak(out, [
+      JWT,
+      'abcdefghijklmnop',
+      BASIC,
+      'abc123',
+      OPENAI_KEY,
+      SB_SECRET,
+      AWS_KEY,
+      'alice@example.com',
+      b64url('signature-value-here'),
+    ]);
     expect(out).toContain('[jwt]');
     expect(out).toContain('Authorization: [Filtered]');
     expect(out).toContain('Cookie: [Filtered]');
@@ -154,7 +168,9 @@ describe('strings', () => {
   });
 
   it('drops SSE payloads but keeps plain prose about data', () => {
-    expect(scrubString(`event: message\n${SSE_LINE}\n`)).not.toContain('merger');
+    expect(scrubString(`event: message\n${SSE_LINE}\n`)).not.toContain(
+      'merger'
+    );
     expect(scrubString(`Request failed: ${SSE_LINE}`)).not.toContain('merger');
     expect(scrubString('Invalid data: expected a number')).toBe(
       'Invalid data: expected a number'
@@ -162,7 +178,9 @@ describe('strings', () => {
   });
 
   it('drops JSON embedded mid-string', () => {
-    const out = scrubString(`Tool call failed ${JSON.stringify(TOOL_CALL)} at step 2`);
+    const out = scrubString(
+      `Tool call failed ${JSON.stringify(TOOL_CALL)} at step 2`
+    );
     expect(out).toBe(`Tool call failed ${OBJECT_PLACEHOLDER}`);
   });
 
@@ -173,7 +191,9 @@ describe('strings', () => {
     expect(scrubString('fetch /api/v1/threads/search?q=lithium failed')).toBe(
       'fetch /api/v1/threads/search?[Filtered] failed'
     );
-    expect(scrubString('callback access_token=abc.def&state=1')).not.toContain('abc.def');
+    expect(scrubString('callback access_token=abc.def&state=1')).not.toContain(
+      'abc.def'
+    );
   });
 
   it('truncates long strings', () => {
@@ -221,9 +241,7 @@ describe('strings', () => {
     const input = `${'a '.repeat(MAX_SCAN_LENGTH / 2)}b`;
     const out = scrubString(input, MAX_SCAN_LENGTH * 2);
 
-    expect(out).toBe(
-      `${'a '.repeat(MAX_SCAN_LENGTH / 2)}…[truncated 1 chars]`
-    );
+    expect(out).toBe(`${'a '.repeat(MAX_SCAN_LENGTH / 2)}…[truncated 1 chars]`);
   });
 });
 
@@ -256,10 +274,28 @@ describe('cost is bounded (no quadratic patterns)', () => {
 describe('keys and structured data (allowlist)', () => {
   it('matches the content and credential denylist in any casing', () => {
     for (const key of [
-      'toolArgs', 'tool_args', 'thread_title', 'Authorization', 'accessToken',
-      'userEmail', 'document_text', 'prompt', 'name', 'description', 'snippet',
-      'filename', 'question', 'answer', 'headers', 'username', 'ip', 'phone',
-      'credentials', 'access_key', 'http.query', 'url.query',
+      'toolArgs',
+      'tool_args',
+      'thread_title',
+      'Authorization',
+      'accessToken',
+      'userEmail',
+      'document_text',
+      'prompt',
+      'name',
+      'description',
+      'snippet',
+      'filename',
+      'question',
+      'answer',
+      'headers',
+      'username',
+      'ip',
+      'phone',
+      'credentials',
+      'access_key',
+      'http.query',
+      'url.query',
     ]) {
       expect(isSensitiveKey(key), key).toBe(true);
     }
@@ -286,7 +322,12 @@ describe('keys and structured data (allowlist)', () => {
       attempt: 2,
       title: FILTERED,
       phone_number: 5551234,
-      nested: { type: 'tool_call', tool_name: FILTERED, args: FILTERED, result: FILTERED },
+      nested: {
+        type: 'tool_call',
+        tool_name: FILTERED,
+        args: FILTERED,
+        result: FILTERED,
+      },
       url: 'https://app.test/search',
     });
   });
@@ -322,10 +363,20 @@ describe('scrubLog (beforeSendLog)', () => {
     const out = scrubLog({
       level: 'info',
       message: JSON.stringify({ title: THREAD_TITLE }),
-      attributes: { title: THREAD_TITLE, tool_name: 'x', thread_id: 't-1', step: 3 },
+      attributes: {
+        title: THREAD_TITLE,
+        tool_name: 'x',
+        thread_id: 't-1',
+        step: 3,
+      },
     });
     expect(out.message).toBe(OBJECT_PLACEHOLDER);
-    expect(out.attributes).toEqual({ title: FILTERED, tool_name: FILTERED, thread_id: 't-1', step: 3 });
+    expect(out.attributes).toEqual({
+      title: FILTERED,
+      tool_name: FILTERED,
+      thread_id: 't-1',
+      step: 3,
+    });
   });
 });
 
@@ -335,9 +386,16 @@ describe('scrubBreadcrumb (beforeBreadcrumb)', () => {
       category: 'console',
       level: 'log',
       message: 'Loaded thread',
-      data: { arguments: ['Loaded thread', { title: THREAD_TITLE }, TOOL_CALL], logger: 'console' },
+      data: {
+        arguments: ['Loaded thread', { title: THREAD_TITLE }, TOOL_CALL],
+        logger: 'console',
+      },
     });
-    expect(out.data?.arguments).toEqual(['Loaded thread', OBJECT_PLACEHOLDER, OBJECT_PLACEHOLDER]);
+    expect(out.data?.arguments).toEqual([
+      'Loaded thread',
+      OBJECT_PLACEHOLDER,
+      OBJECT_PLACEHOLDER,
+    ]);
     expectNoLeak(out, ['Divorce', 'lithium']);
   });
 
@@ -358,7 +416,10 @@ describe('scrubBreadcrumb (beforeBreadcrumb)', () => {
       status_code: 200,
       request_body: FILTERED,
     });
-    const nav = scrubBreadcrumb({ category: 'navigation', data: { from: '/chat?thread=abc', to: '/search?q=lithium' } });
+    const nav = scrubBreadcrumb({
+      category: 'navigation',
+      data: { from: '/chat?thread=abc', to: '/search?q=lithium' },
+    });
     expect(nav.data).toEqual({ from: '/chat', to: '/search' });
   });
 });
@@ -376,7 +437,11 @@ const fullEvent = (): ErrorEvent =>
         {
           type: 'Error',
           value: `Request failed: ${SSE_LINE}`,
-          mechanism: { type: 'onerror', handled: false, data: { prompt: 'secret prompt' } },
+          mechanism: {
+            type: 'onerror',
+            handled: false,
+            data: { prompt: 'secret prompt' },
+          },
           stacktrace: {
             frames: [
               {
@@ -393,7 +458,16 @@ const fullEvent = (): ErrorEvent =>
         },
       ],
     },
-    threads: { values: [{ id: 1, stacktrace: { frames: [{ function: 'f', vars: { title: THREAD_TITLE } }] } }] },
+    threads: {
+      values: [
+        {
+          id: 1,
+          stacktrace: {
+            frames: [{ function: 'f', vars: { title: THREAD_TITLE } }],
+          },
+        },
+      ],
+    },
     request: {
       url: 'https://app.test/chat?thread=t-1',
       cookies: { 'sb-access-token': JWT },
@@ -409,17 +483,43 @@ const fullEvent = (): ErrorEvent =>
     },
     user: { id: 'user-1', email: 'alice@example.com', ip_address: '1.2.3.4' },
     contexts: {
-      trace: { trace_id: 'tr1', span_id: 'sp1', data: { 'http.query': 'q=lithium', 'url.full': 'https://a.test/x?q=lithium', 'http.method': 'GET' } },
+      trace: {
+        trace_id: 'tr1',
+        span_id: 'sp1',
+        data: {
+          'http.query': 'q=lithium',
+          'url.full': 'https://a.test/x?q=lithium',
+          'http.method': 'GET',
+        },
+      },
       browser: { name: 'Chrome', version: '131' },
       thread: { title: THREAD_TITLE },
     },
     tags: { thread_title: THREAD_TITLE, route: '/chat' },
     extra: { threadTitle: THREAD_TITLE, toolCall: TOOL_CALL, attempt: 2 },
     breadcrumbs: [{ category: 'console', data: { arguments: [TOOL_CALL] } }],
-    spans: [{ span_id: 's', trace_id: 't', start_timestamp: 1, description: 'GET /api/search?q=lithium', data: { 'url.full': 'https://a.test/x?q=lithium' } }],
+    spans: [
+      {
+        span_id: 's',
+        trace_id: 't',
+        start_timestamp: 1,
+        description: 'GET /api/search?q=lithium',
+        data: { 'url.full': 'https://a.test/x?q=lithium' },
+      },
+    ],
   }) as unknown as ErrorEvent;
 
-const EVENT_LEAKS = [JWT, 'alice@example.com', 'my private question', 'Divorce', 'lithium', 'merger', 'secret prompt', '1.2.3.4', 'pod-7'];
+const EVENT_LEAKS = [
+  JWT,
+  'alice@example.com',
+  'my private question',
+  'Divorce',
+  'lithium',
+  'merger',
+  'secret prompt',
+  '1.2.3.4',
+  'pod-7',
+];
 
 describe('scrubEvent (beforeSend)', () => {
   it('covers every content-bearing event field', () => {
@@ -427,14 +527,37 @@ describe('scrubEvent (beforeSend)', () => {
     expectNoLeak(out, EVENT_LEAKS);
     expect(out.request).toEqual({
       url: 'https://app.test/chat',
-      headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://app.test/search' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        Referer: 'https://app.test/search',
+      },
     });
     expect(out.user).toEqual({ id: 'user-1' });
-    expect(out.exception.values[0].stacktrace.frames[0]).toEqual({ filename: 'app.js', function: 'send', lineno: 3 });
-    expect(out.exception.values[0].mechanism).toEqual({ type: 'onerror', handled: false });
-    expect(out.threads.values[0].stacktrace.frames[0]).toEqual({ function: 'f' });
-    expect(out.logentry).toEqual({ message: 'Saved %s', params: [FILTERED, FILTERED, 3] });
-    expect(out.contexts.trace).toEqual({ trace_id: 'tr1', span_id: 'sp1', data: { 'http.query': FILTERED, 'url.full': 'https://a.test/x', 'http.method': 'GET' } });
+    expect(out.exception.values[0].stacktrace.frames[0]).toEqual({
+      filename: 'app.js',
+      function: 'send',
+      lineno: 3,
+    });
+    expect(out.exception.values[0].mechanism).toEqual({
+      type: 'onerror',
+      handled: false,
+    });
+    expect(out.threads.values[0].stacktrace.frames[0]).toEqual({
+      function: 'f',
+    });
+    expect(out.logentry).toEqual({
+      message: 'Saved %s',
+      params: [FILTERED, FILTERED, 3],
+    });
+    expect(out.contexts.trace).toEqual({
+      trace_id: 'tr1',
+      span_id: 'sp1',
+      data: {
+        'http.query': FILTERED,
+        'url.full': 'https://a.test/x',
+        'http.method': 'GET',
+      },
+    });
     expect(out.contexts.browser).toEqual({ name: 'Chrome', version: '131' });
     expect(out.contexts.thread).toEqual({ title: FILTERED });
     expect(out.tags).toEqual({ thread_title: FILTERED, route: '/chat' });
@@ -451,11 +574,18 @@ describe('transactions and spans', () => {
       type: 'transaction',
       transaction: '/search?q=lithium',
     };
-    const out = JSON.parse(dump(safeBeforeSendTransaction(transaction as never, {})));
+    const out = JSON.parse(
+      dump(safeBeforeSendTransaction(transaction as never, {}))
+    );
     expectNoLeak(out, EVENT_LEAKS);
     expect(out.transaction).toBe('/search');
-    expect(out.spans[0]).toMatchObject({ description: 'GET /api/search?[Filtered]', data: { 'url.full': 'https://a.test/x' } });
-    expect(JSON.parse(dump(scrubTransaction(transaction as never)))).toEqual(out);
+    expect(out.spans[0]).toMatchObject({
+      description: 'GET /api/search?[Filtered]',
+      data: { 'url.full': 'https://a.test/x' },
+    });
+    expect(JSON.parse(dump(scrubTransaction(transaction as never)))).toEqual(
+      out
+    );
   });
 
   it('scrubs a span sent through beforeSendSpan', () => {
@@ -465,12 +595,20 @@ describe('transactions and spans', () => {
       start_timestamp: 1,
       op: 'http.client',
       description: 'GET https://api.test/search?q=lithium',
-      data: { 'http.query': 'q=lithium', 'http.response.status_code': 200, 'user.email': 'alice@example.com' },
+      data: {
+        'http.query': 'q=lithium',
+        'http.response.status_code': 200,
+        'user.email': 'alice@example.com',
+      },
     };
     const out = safeBeforeSendSpan(span as never);
     expect(out).toEqual(scrubSpan(span as never));
     expect(out.description).toBe('GET https://api.test/search?[Filtered]');
-    expect(out.data).toEqual({ 'http.query': FILTERED, 'http.response.status_code': 200, 'user.email': FILTERED });
+    expect(out.data).toEqual({
+      'http.query': FILTERED,
+      'http.response.status_code': 200,
+      'user.email': FILTERED,
+    });
   });
 });
 
@@ -479,7 +617,15 @@ describe('replay', () => {
     const nav = scrubReplayRecordingEvent({
       type: 5,
       timestamp: 1,
-      data: { tag: 'breadcrumb', payload: { category: 'navigation', timestamp: 1, type: 'default', data: { from: '/a?q=lithium', to: '/b?token=x' } } },
+      data: {
+        tag: 'breadcrumb',
+        payload: {
+          category: 'navigation',
+          timestamp: 1,
+          type: 'default',
+          data: { from: '/a?q=lithium', to: '/b?token=x' },
+        },
+      },
     });
     expect(nav?.data.payload).toMatchObject({ data: { from: '/a', to: '/b' } });
 
@@ -493,7 +639,12 @@ describe('replay', () => {
           description: 'https://api.test/threads/search?q=lithium',
           startTimestamp: 1,
           endTimestamp: 2,
-          data: { method: 'GET', statusCode: 200, request: { size: 10, headers: { cookie: 'sb=1' } }, response: { size: 20, body: 'Divorce' } },
+          data: {
+            method: 'GET',
+            statusCode: 200,
+            request: { size: 10, headers: { cookie: 'sb=1' } },
+            response: { size: 20, body: 'Divorce' },
+          },
         },
       },
     });
@@ -502,24 +653,49 @@ describe('replay', () => {
       description: 'https://api.test/threads/search',
       startTimestamp: 1,
       endTimestamp: 2,
-      data: { method: 'GET', statusCode: 200, request: { size: 10 }, response: { size: 20 } },
+      data: {
+        method: 'GET',
+        statusCode: 200,
+        request: { size: 10 },
+        response: { size: 20 },
+      },
     });
 
     const consoleFrame = scrubReplayRecordingEvent({
       type: 5,
       timestamp: 1,
-      data: { tag: 'breadcrumb', payload: { category: 'console', timestamp: 1, type: 'default', level: 'log', message: 'x', data: { logger: 'console', arguments: [TOOL_CALL] } } },
+      data: {
+        tag: 'breadcrumb',
+        payload: {
+          category: 'console',
+          timestamp: 1,
+          type: 'default',
+          level: 'log',
+          message: 'x',
+          data: { logger: 'console', arguments: [TOOL_CALL] },
+        },
+      },
     });
     expectNoLeak(consoleFrame, ['lithium']);
 
-    const options = { type: 5, timestamp: 1, data: { tag: 'options', payload: { maskAllText: true } } };
+    const options = {
+      type: 5,
+      timestamp: 1,
+      data: { tag: 'options', payload: { maskAllText: true } },
+    };
     expect(scrubReplayRecordingEvent(options)).toBe(options);
   });
 
   it('strips query strings from the replay event URL list only', () => {
     const integration = scrubReplayEventsIntegration();
-    const replay = integration.processEvent({ type: 'replay_event', urls: ['https://app.test/search?q=lithium', '/chat#t-1'] });
-    expect(replay).toEqual({ type: 'replay_event', urls: ['https://app.test/search', '/chat'] });
+    const replay = integration.processEvent({
+      type: 'replay_event',
+      urls: ['https://app.test/search?q=lithium', '/chat#t-1'],
+    });
+    expect(replay).toEqual({
+      type: 'replay_event',
+      urls: ['https://app.test/search', '/chat'],
+    });
     const other = { type: undefined, message: 'x' };
     expect(integration.processEvent(other)).toBe(other);
   });
@@ -535,28 +711,70 @@ describe('fail closed', () => {
     });
 
   it('drops breadcrumbs and logs whose scrubbing throws', () => {
-    expect(safeBeforeBreadcrumb(throwing({ category: 'console' } as Breadcrumb, 'message'))).toBeNull();
-    const hostile = new Proxy({}, { ownKeys() { throw new Error('boom'); } });
-    expect(safeBeforeSendLog({ level: 'error', message: 'm', attributes: hostile })).toBeNull();
+    expect(
+      safeBeforeBreadcrumb(
+        throwing({ category: 'console' } as Breadcrumb, 'message')
+      )
+    ).toBeNull();
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error('boom');
+        },
+      }
+    );
+    expect(
+      safeBeforeSendLog({ level: 'error', message: 'm', attributes: hostile })
+    ).toBeNull();
     expect(scrubReplayRecordingEvent(throwing({ type: 5 }, 'data'))).toBeNull();
   });
 
   it('replaces an event whose scrubbing throws with a minimal one', () => {
-    const out = safeBeforeSend(throwing(fullEvent() as unknown as Record<string, unknown>, 'extra') as unknown as ErrorEvent, {});
+    const out = safeBeforeSend(
+      throwing(
+        fullEvent() as unknown as Record<string, unknown>,
+        'extra'
+      ) as unknown as ErrorEvent,
+      {}
+    );
     expect(out).toEqual(minimalEvent(fullEvent()));
     expect(out).toEqual({
       tags: { scrub_failed: true },
       event_id: 'e1',
       release: 'abc123',
-      exception: { values: [{ type: 'Error', stacktrace: { frames: [{ filename: 'app.js', function: 'send', lineno: 3 }] } }] },
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            stacktrace: {
+              frames: [{ filename: 'app.js', function: 'send', lineno: 3 }],
+            },
+          },
+        ],
+      },
     });
     expectNoLeak(out, EVENT_LEAKS);
   });
 
   it('drops transactions and blanks spans whose scrubbing throws', () => {
-    expect(safeBeforeSendTransaction(throwing({ type: 'transaction' }, 'message') as never, {})).toBeNull();
-    const span = throwing({ span_id: 's', trace_id: 't', start_timestamp: 1, op: 'http' }, 'description');
-    expect(safeBeforeSendSpan(span as never)).toEqual({ span_id: 's', trace_id: 't', start_timestamp: 1, op: 'http', data: {} });
+    expect(
+      safeBeforeSendTransaction(
+        throwing({ type: 'transaction' }, 'message') as never,
+        {}
+      )
+    ).toBeNull();
+    const span = throwing(
+      { span_id: 's', trace_id: 't', start_timestamp: 1, op: 'http' },
+      'description'
+    );
+    expect(safeBeforeSendSpan(span as never)).toEqual({
+      span_id: 's',
+      trace_id: 't',
+      start_timestamp: 1,
+      op: 'http',
+      data: {},
+    });
   });
 });
 
@@ -580,17 +798,28 @@ describe('Sentry config wiring', () => {
   ])('%s spreads the hooks and forwards only console errors', (file) => {
     const source = readFileSync(resolve(__dirname, '../../..', file), 'utf8');
     expect(source).toContain('...sentryScrubOptions');
-    expect(source).toContain('consoleLoggingIntegration({ levels: SENTRY_CONSOLE_LOG_LEVELS })');
+    expect(source).toContain(
+      'consoleLoggingIntegration({ levels: SENTRY_CONSOLE_LOG_LEVELS })'
+    );
     expect(source).not.toMatch(/levels:\s*\[/);
-    expect(source).not.toMatch(/\bbefore(Send|SendTransaction|SendSpan|Breadcrumb|SendLog)\s*:/);
+    expect(source).not.toMatch(
+      /\bbefore(Send|SendTransaction|SendSpan|Breadcrumb|SendLog)\s*:/
+    );
   });
 
   it('instrumentation-client scrubs replay frames and the replay URL list', () => {
-    const source = readFileSync(resolve(__dirname, '../../..', 'instrumentation-client.ts'), 'utf8');
-    expect(source).toContain('Sentry.replayIntegration(REPLAY_PRIVACY_OPTIONS)');
+    const source = readFileSync(
+      resolve(__dirname, '../../..', 'instrumentation-client.ts'),
+      'utf8'
+    );
+    expect(source).toContain(
+      'Sentry.replayIntegration(REPLAY_PRIVACY_OPTIONS)'
+    );
     expect(source).toContain('scrubReplayEventsIntegration()');
     // The page-load snapshot is checked right after init (GOO-734).
-    expect(source).toMatch(/installReplayUrlGuard\(\(\) => Sentry\.getReplay\(\)/);
+    expect(source).toMatch(
+      /installReplayUrlGuard\(\(\) => Sentry\.getReplay\(\)/
+    );
     expect(REPLAY_PRIVACY_OPTIONS).toMatchObject({
       maskAllText: true,
       blockAllMedia: true,
@@ -624,7 +853,10 @@ describe('tuning: ordinary error messages stay readable', () => {
       span_id: 's',
       trace_id: 't',
       start_timestamp: 1,
-      data: { 'http.route': '/chat/[threadId]', 'next.route': '/api/threads/[id]' },
+      data: {
+        'http.route': '/chat/[threadId]',
+        'next.route': '/api/threads/[id]',
+      },
     };
     expect(safeBeforeSendSpan(span as never).data).toEqual(span.data);
   });
@@ -635,14 +867,25 @@ describe('tuning: ordinary error messages stay readable', () => {
     expect(scrubString(`Token ${tokenValue}`)).toBe('Token [Filtered]');
     expect(scrubString(`Basic ${BASIC}`)).toBe('Basic [Filtered]');
     expect(scrubString('Bearer abcdefghijklmnop')).toBe('Bearer [Filtered]');
-    expect(scrubString(`authorization: ${tokenValue}`)).toBe('Authorization: [Filtered]');
-    expect(scrubString('cookie: sid=abc123; theme=dark')).toBe('Cookie: [Filtered]');
+    expect(scrubString(`authorization: ${tokenValue}`)).toBe(
+      'Authorization: [Filtered]'
+    );
+    expect(scrubString('cookie: sid=abc123; theme=dark')).toBe(
+      'Cookie: [Filtered]'
+    );
   });
 
   it('filters Bearer even before a word Token/Basic would keep (#2278 delta review)', () => {
     // The scheme rule needs 8+ characters (as at base), so these are the
     // SCHEME_PROSE words; after Bearer none of them is kept.
-    for (const word of ['required', 'undefined', 'validation', 'authentication', 'exchange', 'rejected']) {
+    for (const word of [
+      'required',
+      'undefined',
+      'validation',
+      'authentication',
+      'exchange',
+      'rejected',
+    ]) {
       expect(scrubString(`Bearer ${word}`), word).toBe('Bearer [Filtered]');
       expect(scrubString(`Token ${word}`), word).toBe(`Token ${word}`);
       expect(scrubString(`Token ${word}.`), word).toBe(`Token ${word}.`);
@@ -674,11 +917,23 @@ describe('tuning: ordinary error messages stay readable', () => {
 describe('tuning: secrets that used to pass', () => {
   it('filters key ids in any case and separator style (#2278 delta review)', () => {
     for (const key of [
-      'keyId', 'key_id', 'apiKeyId', 'KEY_ID', 'API_KEY_ID', 'AWS_ACCESS_KEY_ID',
-      'X-API-KEY-ID', 'apiKey_ID', 'apiKey.id', 'APIKeyId', 'passkeyId', 'KeyIds',
+      'keyId',
+      'key_id',
+      'apiKeyId',
+      'KEY_ID',
+      'API_KEY_ID',
+      'AWS_ACCESS_KEY_ID',
+      'X-API-KEY-ID',
+      'apiKey_ID',
+      'apiKey.id',
+      'APIKeyId',
+      'passkeyId',
+      'KeyIds',
     ]) {
       expect(isSensitiveKey(key), key).toBe(true);
-      expect(scrubData({ [key]: 'AKIAABCDEFGH1234' }), key).toEqual({ [key]: FILTERED });
+      expect(scrubData({ [key]: 'AKIAABCDEFGH1234' }), key).toEqual({
+        [key]: FILTERED,
+      });
     }
   });
 
@@ -686,18 +941,33 @@ describe('tuning: secrets that used to pass', () => {
     // No exception list: "monkeyId" is over-scrubbed so that camel-case
     // splits such as "monKeyId" can never slip through.
     for (const key of [
-      'keyId', 'key_id', 'apiKeyID', 'signing_key_ids',
-      'monKeyId', 'monkeyId', 'commonKeyId', 'adHocKeyId', 'turKeyId',
-      'user.monKeyId', 'hockeyIds',
+      'keyId',
+      'key_id',
+      'apiKeyID',
+      'signing_key_ids',
+      'monKeyId',
+      'monkeyId',
+      'commonKeyId',
+      'adHocKeyId',
+      'turKeyId',
+      'user.monKeyId',
+      'hockeyIds',
       // Snake case too: ordinary words ending in key_id (GOO-746 review).
-      'monkey_id', 'commonkey_id',
+      'monkey_id',
+      'commonkey_id',
     ]) {
       expect(isSensitiveKey(key), key).toBe(true);
     }
   });
 
   it('denies session and key identifiers but keeps other ids', () => {
-    for (const key of ['sessionId', 'session_id', 'apiKeyId', 'api_key_id', 'keyIds']) {
+    for (const key of [
+      'sessionId',
+      'session_id',
+      'apiKeyId',
+      'api_key_id',
+      'keyIds',
+    ]) {
       expect(isSensitiveKey(key), key).toBe(true);
     }
     const out = scrubData({
@@ -736,16 +1006,22 @@ describe('tuning: secrets that used to pass', () => {
     expect(out).toContain('password: [Filtered]');
     expect(out).toContain('api_key: [Filtered]');
     // Passwords are often plain words, so the name alone is enough here.
-    expect(scrubString(`password: ${'sunflower'}`)).toBe('password: [Filtered]');
+    expect(scrubString(`password: ${'sunflower'}`)).toBe(
+      'password: [Filtered]'
+    );
   });
 
   it('filters credentials in a URL', () => {
     const pass = ['hun', 'ter2', '-x'].join('');
-    const url = ['https://', 'deploy', ':', pass, '@db.example.test/app'].join('');
+    const url = ['https://', 'deploy', ':', pass, '@db.example.test/app'].join(
+      ''
+    );
     const out = scrubString(`connect failed: ${url}`);
     expectNoLeak(out, [pass, 'deploy:']);
     expect(out).toBe('connect failed: https://[Filtered]@db.example.test/app');
-    const pg = ['postgres://', 'admin', ':', pass, '@10.0.0.5:5432/db'].join('');
+    const pg = ['postgres://', 'admin', ':', pass, '@10.0.0.5:5432/db'].join(
+      ''
+    );
     expect(scrubString(pg)).toBe('postgres://[Filtered]@10.0.0.5:5432/db');
     expect(scrubString('see https://example.test:8443/path')).toBe(
       'see https://example.test:8443/path'
@@ -756,16 +1032,36 @@ describe('tuning: secrets that used to pass', () => {
     const event = {
       event_id: 'e',
       contexts: {
-        device: { name: "Alice's iPhone", model: 'iPhone15,2', family: 'iOS', memory_size: 4096 },
-        os: { name: 'macOS', version: '15.1', raw: 'Mozilla/5.0 (custom alice build)' },
-        app: { app_name: 'NOUS', app_version: '1.2.3', device_app_hash: 'free text alice' },
+        device: {
+          name: "Alice's iPhone",
+          model: 'iPhone15,2',
+          family: 'iOS',
+          memory_size: 4096,
+        },
+        os: {
+          name: 'macOS',
+          version: '15.1',
+          raw: 'Mozilla/5.0 (custom alice build)',
+        },
+        app: {
+          app_name: 'NOUS',
+          app_version: '1.2.3',
+          device_app_hash: 'free text alice',
+        },
         browser: { name: 'Chrome', version: '131' },
       },
     };
     const out = JSON.parse(dump(scrubEvent(event as never)));
-    expect(out.contexts.device).toEqual({ model: 'iPhone15,2', family: 'iOS', memory_size: 4096 });
+    expect(out.contexts.device).toEqual({
+      model: 'iPhone15,2',
+      family: 'iOS',
+      memory_size: 4096,
+    });
     expect(out.contexts.os).toEqual({ name: 'macOS', version: '15.1' });
-    expect(out.contexts.app).toEqual({ app_name: 'NOUS', app_version: '1.2.3' });
+    expect(out.contexts.app).toEqual({
+      app_name: 'NOUS',
+      app_version: '1.2.3',
+    });
     expect(out.contexts.browser).toEqual({ name: 'Chrome', version: '131' });
     expectNoLeak(out, ['alice', 'Alice']);
   });
@@ -846,7 +1142,14 @@ describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-
   const hex = ['9f8e', '7d6c', '5b4a', '3921'].join('');
   const uuid = ['3f2a1b4c', '9d8e', '4f7a', 'b6c5', 'd4e3f2a1b0c9'].join('-');
   const b64 = Buffer.from('svc:letmein-now').toString('base64');
-  const SHAPES = [letters, letters.toLowerCase(), hex, uuid, b64, JWT.split('.')[2]];
+  const SHAPES = [
+    letters,
+    letters.toLowerCase(),
+    hex,
+    uuid,
+    b64,
+    JWT.split('.')[2],
+  ];
 
   const expectFiltered = (input: string, secret: string): void => {
     const out = scrubString(input);
@@ -854,7 +1157,16 @@ describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-
     expect(out, input).toContain(FILTERED);
   };
 
-  it.each(['ApiKey', 'Key', 'SSWS', 'OAuth', 'DPoP', 'Custom', 'Bearer', 'Basic'])(
+  it.each([
+    'ApiKey',
+    'Key',
+    'SSWS',
+    'OAuth',
+    'DPoP',
+    'Custom',
+    'Bearer',
+    'Basic',
+  ])(
     'R1: Authorization with the %s scheme is filtered for every credential shape',
     (scheme) => {
       for (const cred of SHAPES) {
@@ -865,12 +1177,18 @@ describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-
   );
 
   it('R2: a bare letters-only Authorization value is filtered', () => {
-    for (const cred of [letters, letters.toLowerCase(), 'abcdefghijklmnopqrstuvwxyzabcde']) {
+    for (const cred of [
+      letters,
+      letters.toLowerCase(),
+      'abcdefghijklmnopqrstuvwxyzabcde',
+    ]) {
       expectFiltered(`Authorization: ${cred}`, cred);
       expectFiltered(`Proxy-Authorization: ${cred}`, cred);
     }
     // Only a single prose word stays.
-    expect(scrubString('Authorization: required')).toBe('Authorization: required');
+    expect(scrubString('Authorization: required')).toBe(
+      'Authorization: required'
+    );
     expectFiltered('Authorization: required abcdefgh', 'abcdefgh');
   });
 
@@ -882,7 +1200,14 @@ describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-
   });
 
   it('R4: any value after cookie:, Set-Cookie: or cookie= is filtered', () => {
-    for (const prefix of ['cookie: ', 'Cookie:', 'COOKIE: ', 'Set-Cookie: ', 'set-cookie:', 'cookie=']) {
+    for (const prefix of [
+      'cookie: ',
+      'Cookie:',
+      'COOKIE: ',
+      'Set-Cookie: ',
+      'set-cookie:',
+      'cookie=',
+    ]) {
       for (const cred of SHAPES) expectFiltered(`${prefix}${cred}`, cred);
     }
   });
@@ -915,9 +1240,15 @@ describe('tuning: nothing the earlier scrubber caught may pass (#2278 review R1-
   });
 
   it('keeps the readability fixes only for exact prose', () => {
-    expect(scrubString('Unexpected token undefined in JSON')).toBe('Unexpected token undefined in JSON');
-    expect(scrubString('basic authentication failed')).toBe('basic authentication failed');
+    expect(scrubString('Unexpected token undefined in JSON')).toBe(
+      'Unexpected token undefined in JSON'
+    );
+    expect(scrubString('basic authentication failed')).toBe(
+      'basic authentication failed'
+    );
     expect(scrubString('cookie: not set')).toBe('cookie: not set');
-    expect(scrubString('Invalid data: expected a number')).toBe('Invalid data: expected a number');
+    expect(scrubString('Invalid data: expected a number')).toBe(
+      'Invalid data: expected a number'
+    );
   });
 });
