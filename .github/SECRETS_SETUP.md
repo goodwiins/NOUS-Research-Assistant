@@ -19,10 +19,13 @@ is.
 | --- | --- | --- |
 | `RELEASE_PR_TOKEN` | `release-dev.yml` | Fine-grained PAT (Pull requests: read and write) used only to open the digest-pinned release PR so its checks start normally. Optional: without it the workflow falls back to the built-in token and warns that a human must approve the PR's workflow runs. Details in [workflows/README.md](workflows/README.md). |
 | `SUPABASE_DB_URL` | `supabase-migrations.yml` | Connection string for `supabase db push` against the hosted Supabase project. |
-| `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET` | `trigger-deploy.yml` | Universal Auth machine identity used to read Trigger.dev secrets from Infisical (project `nous-platform`, env `dev`, path `/trigger`) before `trigger.dev deploy`. |
 | `OPENCODE_API_KEY` | `opencode.yml` | Key for the `/oc` and `/opencode` comment bot, restricted to owner, member and collaborator comments. |
 | `CODECOV_TOKEN` | `test-pipeline.yml` | Coverage upload. |
-| `LANGSMITH_API_KEY`, `AZURE_OPENAI_*`, `EVAL_DATABASE_URL`, `EVAL_NEO4J_*`, `EVAL_REDIS_URL`, `EVAL_DO_API_TOKEN`, `EVAL_DO_KB_*` | `agent-eval.yml` | Weekly agent regression eval. It runs on a `[self-hosted, linux]` runner; see [../infrastructure/runner/README.md](../infrastructure/runner/README.md) for the unverified runner status. |
+| `LANGSMITH_API_KEY`, `AZURE_OPENAI_*`, `EVAL_DATABASE_URL`, `EVAL_NEO4J_*`, `EVAL_REDIS_URL` | `agent-eval.yml` | Weekly agent regression eval. It runs on a `[self-hosted, linux]` runner; see [../infrastructure/runner/README.md](../infrastructure/runner/README.md) for the unverified runner status. |
+
+No workflow reads `INFISICAL_CLIENT_ID` or `INFISICAL_CLIENT_SECRET` since
+`trigger-deploy.yml` was retired, so the owner may delete them from the
+repository settings.
 
 ## AWS access (no static keys)
 

@@ -40,7 +40,10 @@ class DraftCitation(BaseModel):
         index=True,
     )
     citation_id = Column(
-        GUID(), ForeignKey("citations.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("citations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     # Citation content (captured at time of draft generation)

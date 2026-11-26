@@ -20,6 +20,16 @@ export type TerminalMessage = RuntimeMessage & {
   threadId?: string;
 };
 
+/** A non-2xx API answer; `status` lets callers tell a gone resource from a failed request. */
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 export async function request<T>(
   path: string,
   method = "GET",
@@ -36,7 +46,10 @@ export async function request<T>(
       : AbortSignal.timeout(30000),
   });
   if (!response.ok)
-    throw new Error(`${method} ${path}: HTTP ${response.status}`);
+    throw new HttpError(
+      `${method} ${path}: HTTP ${response.status}`,
+      response.status,
+    );
   return response.status === 204 ? (undefined as T) : response.json();
 }
 

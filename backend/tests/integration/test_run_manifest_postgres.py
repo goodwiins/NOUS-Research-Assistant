@@ -324,7 +324,12 @@ def _check(w: Any, draft: UUID, version: int) -> Awaitable[Any]:
 
 
 def _register(
-    w: Any, key: str, output: UUID, supersedes: UUID | None = None, kind: str = "figure"
+    w: Any,
+    key: str,
+    output: UUID,
+    supersedes: UUID | None = None,
+    kind: str = "figure",
+    staling: bool = False,
 ) -> Awaitable[Any]:
     body = FigureCreate(
         figure_key="fig-1",
@@ -334,9 +339,34 @@ def _register(
         supersedes_figure_id=supersedes,
         idempotency_key=key,
     )
+    if staling:  # the route's resolve (GOO-721)
+
+        async def routed() -> Any:
+            async with w.factory() as db:
+                context = await draft_release_service.resolve_for_staling(
+                    db, w.p1, w.ids["O"], EDIT
+                )
+                w.staling_context = context
+                return await svc.register_figure(db, context, w.ids["O"], body)
+
+        return routed()
     return _as(
         w, "O", EDIT, lambda db, ctx: svc.register_figure(db, ctx, w.ids["O"], body)
     )
+
+
+def _count_edge_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """GOO-721: ``load_edges`` runs for the pre-lock snapshot and again only
+    if a staling writer rebuilds the edges under the Collection lock."""
+    reads: list[int] = []
+    original = draft_release_service.load_edges
+
+    async def counted(db: AsyncSession, collection_id: UUID) -> Any:
+        reads.append(1)
+        return await original(db, collection_id)
+
+    monkeypatch.setattr(draft_release_service, "load_edges", counted)
+    return reads
 
 
 async def _release_cause(factory: Factory, release: UUID) -> str | None:
@@ -543,8 +573,13 @@ async def test_manifest_lineage_legacy_and_source_change(
         svc.FIGURE_NOT_CURRENT,
     )
     await _refused(_register(w, "fork", output_ids["table.csv"]), 409, svc.FIGURE_STALE)
-    fig2, _ = await _register(w, "fig2", output_ids["table.csv"], supersedes=fig1.id)
+    reads = _count_edge_reads(monkeypatch)
+    fig2, _ = await _register(
+        w, "fig2", output_ids["table.csv"], supersedes=fig1.id, staling=True
+    )
     assert fig2.supersedes_figure_id == fig1.id
+    # GOO-721: the edges read before the lock were used under it.
+    assert w.staling_context.release_edges and reads == [1]
     assert await _release_cause(factory, release1.id) == "research_experiment"
     assert await _release_cause(factory, release2.id) is None
     async with _client(w, "V") as client:

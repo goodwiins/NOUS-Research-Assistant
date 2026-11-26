@@ -44,6 +44,26 @@ FROZEN_DEFAULT_COLUMNS = (
 
 
 def upgrade() -> None:
+    # op.get_context().as_sql == offline mode; unlike context.is_offline_mode()
+    # it also works when upgrade() runs under a bare Operations context.
+    if op.get_context().as_sql:
+        for table, column in FROZEN_DEFAULT_COLUMNS:
+            op.execute(
+                sa.text(
+                    "DO $$ BEGIN "
+                    "IF EXISTS ("
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    f"AND table_name = '{table}' "
+                    f"AND column_name = '{column}'"
+                    ") THEN "
+                    f'ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT now(); '
+                    "END IF; "
+                    "END $$"
+                )
+            )
+        return
+
     inspector = sa.inspect(op.get_bind())
     for table, column in FROZEN_DEFAULT_COLUMNS:
         if not inspector.has_table(table):

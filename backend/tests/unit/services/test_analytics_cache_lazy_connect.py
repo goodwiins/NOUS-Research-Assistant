@@ -9,13 +9,17 @@ open (GOO-654, CI-4).
   background reconnect. A Redis outage costs one attempt per window.
 * Only ``REDIS_URL`` is provided by the deployment, so the cache falls back
   to it when ``ANALYTICS_redis_analytics_url`` is unset.
-* Invalidation is tenant-anchored and uses SCAN, never KEYS.
+* Keys are tenant-scoped and invalidation uses SCAN, never KEYS.
+
+Outage consistency (replayed deletes, no local read on a Redis miss, one key
+namespace, UUID org ids) is in test_analytics_cache_outage_consistency.py.
 """
 
 from __future__ import annotations
 
 import asyncio
 import fnmatch
+import uuid
 import warnings
 from typing import Any, AsyncIterator, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
@@ -25,6 +29,13 @@ import pytest
 from src.cache import analytics_cache as module
 
 pytestmark = pytest.mark.unit
+
+ORG_1 = str(uuid.UUID("11111111-1111-4111-8111-111111111111"))
+ORG_2 = str(uuid.UUID("22222222-2222-4222-8222-222222222222"))
+
+
+def _k(name: str) -> str:
+    return f"analytics:test:{name}"
 
 
 class FakeRedis:
@@ -108,10 +119,10 @@ async def test_connect_then_reads_and_writes_go_to_redis(
     cache, _ = _cache(monkeypatch, client)
 
     assert await cache.connect() is True
-    await cache.set("k", {"v": 1}, ttl=60)
-    assert "k" in client.data
+    await cache.set(_k("k"), {"v": 1}, ttl=60)
+    assert _k("k") in client.data
     cache.fallback_cache.clear()
-    assert await cache.get("k") == {"v": 1}
+    assert await cache.get(_k("k")) == {"v": 1}
     assert client.get_calls == 1
 
 
@@ -127,13 +138,13 @@ async def test_first_request_never_waits_for_a_connect(
 
     client.ping.side_effect = black_holed_ping
     cache, _ = _cache(monkeypatch, client)
-    await cache.set("k", 1, ttl=60)  # served from memory
+    await cache.set(_k("k"), 1, ttl=60)  # served from memory
 
     loop = asyncio.get_running_loop()
     started = loop.time()
     # Bounded here, so awaiting the connect fails in a second instead of
     # hanging until the suite-wide timeout.
-    assert await asyncio.wait_for(cache.get("k"), timeout=1.0) == 1
+    assert await asyncio.wait_for(cache.get(_k("k")), timeout=1.0) == 1
     assert loop.time() - started < 0.1  # did not wait on the ping
     assert client.get_calls == 0
     gate.set()
@@ -144,13 +155,13 @@ async def test_background_connect_is_used_by_the_next_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeRedis()
-    client.data["k"] = '{"v": 2}'
+    client.data[_k("k")] = '{"v": 2}'
     cache, _ = _cache(monkeypatch, client)
 
-    assert await cache.get("k") is None  # cold: memory, connect started
+    assert await cache.get(_k("k")) is None  # cold: memory, connect started
     await _settle()
     assert cache._connected is True
-    assert await cache.get("k") == {"v": 2}
+    assert await cache.get(_k("k")) == {"v": 2}
 
 
 @pytest.mark.asyncio
@@ -162,14 +173,14 @@ async def test_failed_connect_is_retried_once_per_window(
     cache, from_url = _cache(monkeypatch, client)
 
     for key in "abcde":
-        await cache.get(key)
+        await cache.get(_k(key))
         await _settle()
     assert from_url.call_count == 1  # one attempt in the window
     assert cache._connected is False
 
     cache._next_connect_attempt = 0.0  # window elapses
     client.ping.side_effect = None
-    await cache.get("f")
+    await cache.get(_k("f"))
     await _settle()
     assert from_url.call_count == 2
     assert cache._connected is True
@@ -182,19 +193,19 @@ async def test_redis_failure_after_connect_opens_the_breaker_and_fails_open(
     client = FakeRedis()
     cache, from_url = _cache(monkeypatch, client)
     assert await cache.connect() is True
-    await cache.set("k", {"v": 1}, ttl=60)
+    await cache.set(_k("k"), {"v": 1}, ttl=60)
     # The connect was long ago: only the trip itself can open a window now.
     cache._next_connect_attempt = 0.0
 
     client.fail_with = TimeoutError("redis stalled")
-    assert await cache.get("k") == {"v": 1}  # fails open to memory
+    assert await cache.get(_k("k")) == {"v": 1}  # fails open to memory
     await _settle()
     assert cache._connected is False
     assert client.closed is True
 
     calls = client.get_calls
     for _ in range(10):
-        assert await cache.get("k") == {"v": 1}
+        assert await cache.get(_k("k")) == {"v": 1}
     await _settle()
     assert client.get_calls == calls  # breaker open: Redis not touched
     assert from_url.call_count == 1  # and no reconnect inside the window
@@ -209,9 +220,9 @@ async def test_set_failure_trips_and_still_stores_in_memory(
     assert await cache.connect() is True
     client.fail_with = ConnectionError("gone")
 
-    assert await cache.set("k", 7, ttl=60) is True
+    assert await cache.set(_k("k"), 7, ttl=60) is True
     assert cache._connected is False
-    assert await cache.get("k") == 7
+    assert await cache.get(_k("k")) == 7
 
 
 @pytest.mark.asyncio
@@ -254,7 +265,7 @@ async def test_trip_reopens_the_window_from_the_failure(
     cache._next_connect_attempt = 0.0
 
     client.fail_with = ConnectionError("gone")
-    await cache.get("k")
+    await cache.get(_k("k"))
 
     now = asyncio.get_running_loop().time()
     remaining = cache._next_connect_attempt - now
@@ -295,7 +306,7 @@ async def test_no_connect_task_without_an_explicit_url(
     )
     cache = module.AnalyticsCache()
 
-    await cache.get("k")
+    await cache.get(_k("k"))
     await _settle()
 
     assert cache._connect_task is None
@@ -308,18 +319,18 @@ async def test_disabled_redis_never_connects(monkeypatch: pytest.MonkeyPatch) ->
     cache = module.AnalyticsCache()
 
     assert await cache.connect() is False
-    await cache.set("k", 1, ttl=5)
-    assert await cache.get("k") == 1  # in-memory fallback still works
+    await cache.set(_k("k"), 1, ttl=5)
+    assert await cache.get(_k("k")) == 1  # in-memory fallback still works
 
 
 # ---- tenant isolation ----------------------------------------------------
 
 
 def test_cache_keys_are_tenant_scoped() -> None:
-    a = module.CacheKey("analytics", "org-a", "dashboard_data", {"x": 1}).generate_key()
-    b = module.CacheKey("analytics", "org-b", "dashboard_data", {"x": 1}).generate_key()
+    a = module.CacheKey("analytics", ORG_1, "dashboard_data", {"x": 1}).generate_key()
+    b = module.CacheKey("analytics", ORG_2, "dashboard_data", {"x": 1}).generate_key()
     assert a != b
-    assert ":org-a:" in a and ":org-b:" in b
+    assert f":{ORG_1}:" in a and f":{ORG_2}:" in b
 
 
 async def _seed(cache: module.AnalyticsCache, orgs: List[str]) -> None:
@@ -329,7 +340,7 @@ async def _seed(cache: module.AnalyticsCache, orgs: List[str]) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("redis_on", [True, False])
-async def test_invalidating_one_org_leaves_other_orgs(
+async def test_an_org_anchored_pattern_leaves_other_orgs(
     monkeypatch: pytest.MonkeyPatch, redis_on: bool
 ) -> None:
     client = FakeRedis()
@@ -339,31 +350,22 @@ async def test_invalidating_one_org_leaves_other_orgs(
     else:
         monkeypatch.setattr(module, "REDIS_AVAILABLE", False)
         cache = module.AnalyticsCache()
-    # "xorg-1" ends with "org-1": a suffix match would wipe it too.
-    await _seed(cache, ["org-1", "xorg-1", "org-2"])
+    await _seed(cache, [ORG_1, ORG_2])
 
-    removed = await cache.invalidate_organization_data("org-1")
+    removed = await cache.invalidate_pattern(f"analytics:*:*:{ORG_1}:*")
 
     assert removed >= 1
-    assert await cache.get_analytics_data("org-1", "dashboard_data", {"f": 1}) is None
-    for other in ("xorg-1", "org-2"):
-        assert await cache.get_analytics_data(other, "dashboard_data", {"f": 1}) == {
-            "org": other
-        }
-    if redis_on:
-        assert not any(":org-1:" in k for k in client.data)
-        assert any(":xorg-1:" in k for k in client.data)
-
-
-@pytest.mark.asyncio
-async def test_glob_characters_in_an_org_id_match_only_that_org() -> None:
-    cache = module.AnalyticsCache()
-    cache._redis_enabled = False
-    await _seed(cache, ["org-*", "org-1"])
-
-    await cache.invalidate_organization_data("org-*")
-
-    assert await cache.get_analytics_data("org-1", "dashboard_data", {"f": 1}) == {
-        "org": "org-1"
+    assert await cache.get_analytics_data(ORG_1, "dashboard_data", {"f": 1}) is None
+    assert await cache.get_analytics_data(ORG_2, "dashboard_data", {"f": 1}) == {
+        "org": ORG_2
     }
-    assert await cache.get_analytics_data("org-*", "dashboard_data", {"f": 1}) is None
+    if redis_on:
+        assert not any(f":{ORG_1}:" in k for k in client.data)
+        assert any(f":{ORG_2}:" in k for k in client.data)
+
+
+@pytest.mark.parametrize("org", ["org-*", "org:1", "None"])
+def test_an_org_id_with_glob_or_separator_cannot_build_a_key(org: str) -> None:
+    # Ids are UUIDs; anything else would break the segments patterns rely on.
+    with pytest.raises(ValueError):
+        module.CacheKey("analytics", org, "dashboard_data", {"f": 1}).generate_key()

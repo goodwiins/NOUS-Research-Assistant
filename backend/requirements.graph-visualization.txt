@@ -18,7 +18,6 @@ aioredis==2.0.1
 # Authentication and security
 PyJWT>=2.13.0  # JWT verification; replaced python-jose (GOO-474, GHSA-3qf3-8w2g-rqmx)
 cryptography>=50.0.2
-passlib[bcrypt]==1.7.4
 
 # Data validation and serialization
 pydantic==2.14.1

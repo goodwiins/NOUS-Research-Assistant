@@ -55,7 +55,6 @@ Docs: `docs/operations/`. Cluster manifests: `infrastructure/kubernetes/monitori
 | `release-dev.yml` | After a green pipeline on `develop`, open the digest-pinned GitOps PR for dev |
 | `helm-validate.yml`, `workflow-lint.yml`, `secret-scan.yml` | Chart, workflow and secret validation |
 | `supabase-migrations.yml` | Supabase migration checks/apply |
-| `trigger-deploy.yml` | Trigger.dev job deploy |
 | `agent-eval.yml` | Agent eval harness |
 | `opencode.yml` | Agent automation workflow |
 

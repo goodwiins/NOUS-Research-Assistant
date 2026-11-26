@@ -30,7 +30,7 @@ from src.core.database import get_db
 from src.core.dependencies import get_current_user
 from src.models.research_project_role import ResearchProjectRole
 from src.services.research import claims_service as svc
-from src.services.research import draft_release_service as release_svc
+from src.services.research import draft_release_service as release_service
 from src.services.research.draft_generation_service import (
     DraftGenerationService,
     DraftRetainedError,
@@ -101,12 +101,12 @@ def harness(
             collection=SimpleNamespace(id=pid),
             effective_roles=frozenset(roles),
             organization_id=user.organization_id,
+            release_edges=None,
         )
 
     monkeypatch.setattr(_routes(), "resolve_project", fake_resolve)
-    # GOO-721: the unlocked edge snapshot reads nothing from the fake session.
-    monkeypatch.setattr(release_svc, "_ledger_token", AsyncMock(return_value="heads"))
-    monkeypatch.setattr(release_svc, "_build_edges", AsyncMock(return_value=[]))
+    # GOO-721: staling writers resolve through draft_release_service.
+    monkeypatch.setattr(release_service, "resolve_for_staling", fake_resolve)
     test_app.dependency_overrides[get_current_user] = lambda: user
     test_app.dependency_overrides[get_db] = lambda: db
 

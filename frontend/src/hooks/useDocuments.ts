@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Document, DocumentFilters, APIErrorClass } from '@/types';
 import { api } from '@/services/api-client';
+import { documentListQueryString } from '@/services/documentListParams';
 import { useAuth } from '@/hooks/useAuth';
 import { isTabHidden } from '@/lib/tabVisibility';
 
@@ -18,6 +19,7 @@ interface BackendDocument {
   file_size?: number;
   processing_status?: string;
   processing_error?: string;
+  processing_partial?: boolean;
   created_at?: string;
   upload_timestamp?: string;
   processing_completed_at?: string;
@@ -110,6 +112,7 @@ const transformDocument = (backendDoc: BackendDocument): Document => {
     file_size: backendDoc.file_size_bytes || backendDoc.file_size || 0,
     processing_status: normalizeProcessingStatus(backendDoc.processing_status),
     processing_error: backendDoc.processing_error,
+    processing_partial: backendDoc.processing_partial === true,
     upload_timestamp:
       backendDoc.created_at ||
       backendDoc.upload_timestamp ||
@@ -296,30 +299,13 @@ export const useDocuments = (
         fetchTokenRef.current !== requestToken || !mountedRef.current;
 
       try {
-        const params: Record<string, string | number> = {
-          page: actualPage,
-          page_size: actualPageSize,
-        };
-
-        // Add filters to params with proper null checks
-        // Backend expects document_type and processing_status
-        if (actualFilters?.file_types && actualFilters.file_types.length > 0) {
-          params.document_type = actualFilters.file_types.join(',');
-        }
-        if (actualFilters?.status && actualFilters.status.length > 0) {
-          params.processing_status = actualFilters.status.join(',');
-        }
-        if (actualFilters?.search_term) {
-          params.search = actualFilters.search_term;
-        }
-        if (actualFilters?.date_range) {
-          params.date_from = actualFilters.date_range.start;
-          params.date_to = actualFilters.date_range.end;
-        }
-
-        const queryString = new URLSearchParams(
-          Object.entries(params).map(([k, v]) => [k, String(v)])
-        ).toString();
+        // The backend's own names: size (not page_size), one document_type
+        // and one processing_status (GOO-666 FL2C-3).
+        const queryString = documentListQueryString(
+          actualPage,
+          actualPageSize,
+          actualFilters
+        );
         const response = (await api.get(
           `/documents?${queryString}`
         )) as DocumentsApiResponse;

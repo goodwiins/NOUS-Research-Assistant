@@ -13,8 +13,18 @@ Fixtures provided
 ``thread_factory``   async factory returning a persisted ``Thread`` (auto-creates
                      workspace + conversation + user as needed).
 
-The DSN can be overridden with ``TEST_PG_ASYNC_URL``. Default targets the
-Supabase local stack at ``localhost:54322`` per ``backend/alembic.ini``.
+Where the database comes from, first match wins:
+
+1. ``TEST_PG_ASYNC_URL``: an already-provisioned async DSN, used as is.
+2. ``TEST_PG_ADMIN_DSN``: an admin DSN; a sibling ``chat_msg_idempotency_test``
+   database is created on that server and provisioned from the models.
+3. ``ORCHESTRATION_TEST_DATABASE_URL``: the disposable PostgreSQL the CI
+   PostgreSQL lane provides (GOO-731), used the same way as 2.
+4. The Supabase local stack at ``localhost:54322`` per ``backend/alembic.ini``.
+
+Every test that uses these fixtures is marked ``requires_postgres`` at
+collection (``backend/tests/conftest.py``), so the CI PostgreSQL lane runs it
+and fails it if it skips. Without a database it skips everywhere else.
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Initialize encryption so encrypted_string columns (User.first_name etc.)
@@ -34,7 +45,11 @@ os.environ.setdefault(
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 )
 
-from src.core.encryption import EncryptionKeyType, get_key_manager, initialize_encryption
+from src.core.encryption import (
+    EncryptionKeyType,
+    get_key_manager,
+    initialize_encryption,
+)
 
 initialize_encryption()
 _km = get_key_manager()
@@ -51,7 +66,6 @@ from src.models import (  # noqa: E402  (must come after encryption init)
     Workspace,
 )
 
-
 DEFAULT_ADMIN_DSN = "postgresql://postgres:postgres@localhost:54322/postgres"
 DEFAULT_TEST_DB = "chat_msg_idempotency_test"
 
@@ -66,19 +80,34 @@ _CLIENT_MSG_INDEX_DDL = (
 )
 
 _ALLOWED_CLEANUP_TABLES = frozenset(
-    {"chat_messages", "threads", "conversations", "workspaces", "users", "organizations"}
+    {
+        "chat_messages",
+        "threads",
+        "conversations",
+        "workspaces",
+        "users",
+        "organizations",
+    }
 )
 
 
 def _resolve_admin_dsn() -> str:
-    return os.environ.get("TEST_PG_ADMIN_DSN", DEFAULT_ADMIN_DSN)
+    dsn = DEFAULT_ADMIN_DSN
+    for name in ("TEST_PG_ADMIN_DSN", "ORCHESTRATION_TEST_DATABASE_URL"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            dsn = value
+            break
+    # psycopg2 takes a libpq URL: drop a "+asyncpg"/"+psycopg" driver suffix.
+    url = make_url(dsn).set(drivername="postgresql")
+    return url.render_as_string(hide_password=False)
 
 
 def _resolve_test_dsn() -> str:
-    base = _resolve_admin_dsn()
-    # Replace database segment after the last '/'.
-    head, _, _ = base.rpartition("/")
-    return f"{head}/{DEFAULT_TEST_DB}"
+    # Same server and credentials, the dedicated test database; query
+    # parameters (sslmode=...) are kept.
+    url = make_url(_resolve_admin_dsn()).set(database=DEFAULT_TEST_DB)
+    return url.render_as_string(hide_password=False)
 
 
 def _to_async(dsn: str) -> str:
@@ -109,7 +138,8 @@ def _ensure_test_db_provisioned() -> str:
     try:
         conn = psycopg2.connect(admin_dsn)
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"Local PostgreSQL unreachable at {admin_dsn}: {exc}")
+        shown = make_url(admin_dsn).render_as_string(hide_password=True)
+        pytest.skip(f"Local PostgreSQL unreachable at {shown}: {exc}")
     conn.set_isolation_level(pg_ext.ISOLATION_LEVEL_AUTOCOMMIT)
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM pg_database WHERE datname=%s", (DEFAULT_TEST_DB,))
@@ -155,6 +185,7 @@ def _bootstrap_schema_from_models(sync_dsn: str) -> None:
     unique index that lives in the Alembic migration but isn't represented
     on the model (we keep migrations as the source of truth for indexes)."""
     from sqlalchemy import create_engine, text
+
     from src.models import Base  # noqa: WPS433 - intentional import here
 
     engine = create_engine(sync_dsn, future=True)
@@ -258,7 +289,9 @@ async def organization_factory(db_session: AsyncSession):
             id=uuid4(),
             name=overrides.get("name", f"TestOrg-{uuid4().hex[:8]}"),
             storage_tier=StorageTier.FREE,
-            storage_limit_bytes=Organization.get_default_storage_limit(StorageTier.FREE),
+            storage_limit_bytes=Organization.get_default_storage_limit(
+                StorageTier.FREE
+            ),
             is_active=True,
         )
         db_session.add(org)
@@ -275,7 +308,9 @@ async def user_factory(
     db_session: AsyncSession,
     organization_factory: Callable[..., Awaitable[Organization]],
 ):
-    async def _make(*, organization: Optional[Organization] = None, **overrides) -> User:
+    async def _make(
+        *, organization: Optional[Organization] = None, **overrides
+    ) -> User:
         org = organization or await organization_factory()
         user = User(
             id=uuid4(),

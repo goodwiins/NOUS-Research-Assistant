@@ -118,15 +118,11 @@ async def create_claim_version(
     db: AsyncSession = Depends(get_db),
 ) -> ClaimVersionResponse:
     """Append a reworded version superseding the claim's tip (EDIT)."""
-    context, edges = await draft_release_service.resolve_for_staling_write(
-        db,
-        project_id,
-        _uid(current_user),
-        ResearchAction.EDIT,
-        resolve=resolve_project,
+    context = await draft_release_service.resolve_for_staling(
+        db, project_id, _uid(current_user), ResearchAction.EDIT
     )
     result, replayed = await claims_service.create_version(
-        db, context, claim_id, _uid(current_user), request, edges
+        db, context, claim_id, _uid(current_user), request
     )
     _status(response, replayed)
     return result
@@ -144,16 +140,16 @@ async def create_claim_link(
     db: AsyncSession = Depends(get_db),
 ) -> ClaimLinkResponse:
     """Link, re-point or withdraw evidence on the claim's tip version (EDIT)."""
-    context, edges = await draft_release_service.resolve_for_staling_write(
-        db,
-        project_id,
-        _uid(current_user),
-        ResearchAction.EDIT,
-        resolve=resolve_project,
-        stales=request.supersedes_link_id is not None,
+    # GOO-721: only a re-point or withdrawal stales releases; a new link
+    # skips the pre-lock graph read.
+    resolve = (
+        draft_release_service.resolve_for_staling
+        if request.supersedes_link_id is not None
+        else resolve_project
     )
+    context = await resolve(db, project_id, _uid(current_user), ResearchAction.EDIT)
     result, replayed = await claims_service.link(
-        db, context, claim_id, _uid(current_user), request, edges
+        db, context, claim_id, _uid(current_user), request
     )
     _status(response, replayed)
     return result
@@ -198,16 +194,17 @@ async def create_claim_assessment(
     db: AsyncSession = Depends(get_db),
 ) -> ClaimAssessmentResponse:
     """Assess the claim's tip version (ADJUDICATOR role only)."""
-    context, edges = await draft_release_service.resolve_for_staling_write(
-        db,
-        project_id,
-        _uid(current_user),
-        ResearchAction.ADJUDICATE,
-        resolve=resolve_project,
-        stales=request.supersedes_assessment_id is not None,
+    # GOO-721: only a superseding assessment stales releases.
+    resolve = (
+        draft_release_service.resolve_for_staling
+        if request.supersedes_assessment_id is not None
+        else resolve_project
+    )
+    context = await resolve(
+        db, project_id, _uid(current_user), ResearchAction.ADJUDICATE
     )
     result, replayed = await claims_service.assess(
-        db, context, claim_id, _uid(current_user), request, edges
+        db, context, claim_id, _uid(current_user), request
     )
     _status(response, replayed)
     return result

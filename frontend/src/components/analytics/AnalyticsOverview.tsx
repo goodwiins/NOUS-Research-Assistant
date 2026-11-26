@@ -5,6 +5,12 @@ import { useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
+  NOT_MEASURED,
+  NOT_MEASURED_NOTE,
+  UNAVAILABLE_NOTE,
+  type NotMeasured,
+} from '@/utils/analyticsFigure';
+import {
   Users,
   FileText,
   Search,
@@ -122,7 +128,8 @@ type Figure = number | null | undefined;
 export interface AnalyticsOverviewData {
   documentsIndexed: Figure;
   searches24h: Figure;
-  avgSearchTimeMs24h: Figure;
+  /** `NOT_MEASURED` when no search in the window was timed (GOO-768). */
+  avgSearchTimeMs24h: Figure | NotMeasured;
   /** Admin only. */
   activeUsers24h?: Figure;
   /** Admin only. */
@@ -185,8 +192,13 @@ export function AnalyticsOverview({
     },
   ].filter((metric) => metric.figure !== undefined);
 
+  // A failed source keeps the cards (with "—"), so an outage never looks
+  // like a new org. A zero count or an unmeasured average is no activity
+  // (GOO-768).
   const hasAnyData = overviewMetrics.some(
-    (metric) => metric.figure === null || (metric.figure ?? 0) > 0
+    (metric) =>
+      metric.figure === null ||
+      (typeof metric.figure === 'number' && metric.figure > 0)
   );
 
   if (!loading && !hasAnyData) {
@@ -213,7 +225,7 @@ export function AnalyticsOverview({
           key={metric.key}
           title={metric.title}
           value={
-            metric.figure == null
+            typeof metric.figure !== 'number'
               ? UNAVAILABLE
               : metric.key === 'searchTime'
                 ? Math.round(metric.figure)
@@ -221,7 +233,11 @@ export function AnalyticsOverview({
           }
           icon={metric.icon}
           description={
-            metric.figure == null ? 'Unavailable right now' : metric.description
+            metric.figure === NOT_MEASURED
+              ? NOT_MEASURED_NOTE
+              : metric.figure == null
+                ? UNAVAILABLE_NOTE
+                : metric.description
           }
           loading={loading}
           onClick={onMetricClick ? () => onMetricClick(metric.key) : undefined}

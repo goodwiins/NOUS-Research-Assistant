@@ -7,12 +7,14 @@ import json
 import logging
 import statistics
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, asc, desc, func, or_, text
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
@@ -82,6 +84,26 @@ class QualityRecommendation:
     updated_at: datetime = None
 
 
+# The only database failures an analyser may treat as "metrics unavailable":
+# the database could not be reached or a connection broke. ProgrammingError
+# (a wrong column, the original PL-2 bug class), DataError, IntegrityError
+# and every non-database exception are bugs and propagate.
+_TRANSIENT_DB_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    DisconnectionError,
+    PoolTimeoutError,
+)
+
+
+class _MetricsUnavailable(Exception):
+    """An analyser could not read its metrics; the result is incomplete."""
+
+
+class RecommendationTrackingUnavailable(RuntimeError):
+    """Raised when a write the service cannot persist is requested."""
+
+
 @dataclass
 class QualityInsight:
     """Insight about quality metrics"""
@@ -94,6 +116,7 @@ class QualityInsight:
     impact_area: str
     root_causes: List[str]
     related_metrics: List[str]
+    supporting_data: Dict[str, Any] = field(default_factory=dict)
 
 
 class QualityRecommendationsService:
@@ -131,135 +154,122 @@ class QualityRecommendationsService:
             if (datetime.utcnow() - cached_data["timestamp"]).seconds < self.cache_ttl:
                 return cached_data["recommendations"]
 
-        try:
-            recommendations = []
+        recommendations = []
 
-            # Get quality insights
-            insights = await self.analyze_quality_insights(organization_id, days_back)
+        # Get quality insights
+        insights, complete = await self._collect_insights(organization_id, days_back)
 
-            # Generate recommendations based on insights
-            if not focus_areas or RecommendationCategory.CONTENT in focus_areas:
-                recommendations.extend(
-                    await self._generate_content_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if (
-                not focus_areas
-                or RecommendationCategory.SEARCH_ALGORITHM in focus_areas
-            ):
-                recommendations.extend(
-                    await self._generate_search_algorithm_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if not focus_areas or RecommendationCategory.INDEXING in focus_areas:
-                recommendations.extend(
-                    await self._generate_indexing_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if not focus_areas or RecommendationCategory.USER_EXPERIENCE in focus_areas:
-                recommendations.extend(
-                    await self._generate_user_experience_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if include_host_metrics and (
-                not focus_areas or RecommendationCategory.INFRASTRUCTURE in focus_areas
-            ):
-                recommendations.extend(
-                    await self._generate_infrastructure_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            if not focus_areas or RecommendationCategory.MONITORING in focus_areas:
-                recommendations.extend(
-                    await self._generate_monitoring_recommendations(
-                        insights, organization_id
-                    )
-                )
-
-            # Filter by priority if specified
-            if priority_filter:
-                recommendations = [
-                    r for r in recommendations if r.priority == priority_filter
-                ]
-
-            # Sort by priority and estimated impact
-            priority_order = {
-                RecommendationPriority.CRITICAL: 0,
-                RecommendationPriority.HIGH: 1,
-                RecommendationPriority.MEDIUM: 2,
-                RecommendationPriority.LOW: 3,
-            }
-
-            recommendations.sort(
-                key=lambda r: (priority_order[r.priority], -r.estimated_improvement)
+        # Generate recommendations based on insights
+        if not focus_areas or RecommendationCategory.CONTENT in focus_areas:
+            recommendations.extend(
+                await self._generate_content_recommendations(insights, organization_id)
             )
 
-            # Cache the results
+        if not focus_areas or RecommendationCategory.SEARCH_ALGORITHM in focus_areas:
+            recommendations.extend(
+                await self._generate_search_algorithm_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        if not focus_areas or RecommendationCategory.INDEXING in focus_areas:
+            recommendations.extend(
+                await self._generate_indexing_recommendations(insights, organization_id)
+            )
+
+        if not focus_areas or RecommendationCategory.USER_EXPERIENCE in focus_areas:
+            recommendations.extend(
+                await self._generate_user_experience_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        if include_host_metrics and (
+            not focus_areas or RecommendationCategory.INFRASTRUCTURE in focus_areas
+        ):
+            recommendations.extend(
+                await self._generate_infrastructure_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        if not focus_areas or RecommendationCategory.MONITORING in focus_areas:
+            recommendations.extend(
+                await self._generate_monitoring_recommendations(
+                    insights, organization_id
+                )
+            )
+
+        # Filter by priority if specified
+        if priority_filter:
+            recommendations = [
+                r for r in recommendations if r.priority == priority_filter
+            ]
+
+        # Sort by priority and estimated impact
+        priority_order = {
+            RecommendationPriority.CRITICAL: 0,
+            RecommendationPriority.HIGH: 1,
+            RecommendationPriority.MEDIUM: 2,
+            RecommendationPriority.LOW: 3,
+        }
+
+        recommendations.sort(
+            key=lambda r: (priority_order[r.priority], -r.estimated_improvement)
+        )
+
+        # Cache the results, unless they rest on incomplete insights
+        if complete:
             self.recommendation_cache[cache_key] = {
                 "recommendations": recommendations,
                 "timestamp": datetime.utcnow(),
             }
 
-            return recommendations
-
-        except Exception as e:
-            logger.error(f"Failed to generate recommendations: {e}")
-            raise
+        return recommendations
 
     async def analyze_quality_insights(
         self, organization_id: str, days_back: int = 30
     ) -> List[QualityInsight]:
         """Analyze quality metrics to generate insights"""
 
+        insights, _complete = await self._collect_insights(organization_id, days_back)
+        return insights
+
+    async def _collect_insights(
+        self, organization_id: str, days_back: int
+    ) -> Tuple[List[QualityInsight], bool]:
+        """Insights plus whether every analyser could read its metrics.
+
+        An incomplete result (a database outage) is returned but never
+        cached, so the outage does not pin empty insights for an hour.
+        """
         cache_key = f"insights_{organization_id}_{days_back}"
         if cache_key in self.insight_cache:
             cached_data = self.insight_cache[cache_key]
             if (datetime.utcnow() - cached_data["timestamp"]).seconds < self.cache_ttl:
-                return cached_data["insights"]
+                return cached_data["insights"], True
 
-        try:
-            insights = []
-            cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+        insights: List[QualityInsight] = []
+        complete = True
+        cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+        for analyse in (
+            self._analyze_relevance_insights,
+            self._analyze_precision_insights,
+            self._analyze_recall_insights,
+            self._analyze_response_time_insights,
+            self._analyze_user_satisfaction_insights,
+        ):
+            try:
+                insights.extend(await analyse(organization_id, cutoff_date))
+            except _MetricsUnavailable:
+                complete = False
 
-            # Analyze different quality metrics
-            insights.extend(
-                await self._analyze_relevance_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_precision_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_recall_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_response_time_insights(organization_id, cutoff_date)
-            )
-            insights.extend(
-                await self._analyze_user_satisfaction_insights(
-                    organization_id, cutoff_date
-                )
-            )
-
-            # Cache the results
+        if complete:
             self.insight_cache[cache_key] = {
                 "insights": insights,
                 "timestamp": datetime.utcnow(),
             }
-
-            return insights
-
-        except Exception as e:
-            logger.error(f"Failed to analyze quality insights: {e}")
-            raise
+        return insights, complete
 
     async def track_recommendation_progress(
         self,
@@ -270,78 +280,29 @@ class QualityRecommendationsService:
     ) -> bool:
         """Track implementation progress of a recommendation"""
 
-        # In a real implementation, this would update a database table
-        # For now, we'll just log the update
-        logger.info(
-            f"Recommendation {recommendation_id} status updated to {status.value}"
+        # Nothing stores recommendation progress. Reporting success here told
+        # clients a status change was saved when it was not, so say so instead.
+        raise RecommendationTrackingUnavailable(
+            "Recommendation progress tracking is not available"
         )
-        if notes:
-            logger.info(f"Notes: {notes}")
-        if actual_improvement is not None:
-            logger.info(f"Actual improvement: {actual_improvement}%")
-
-        return True
 
     async def get_recommendation_effectiveness(
         self, organization_id: str, completed_days: int = 30
     ) -> Dict[str, Any]:
         """Analyze effectiveness of implemented recommendations"""
 
-        try:
-            # Get recent quality metrics
-            recent_metrics = await self._get_recent_quality_metrics(
-                organization_id, completed_days
-            )
-
-            # Compare with baseline metrics (before recommendations)
-            baseline_metrics = await self._get_baseline_quality_metrics(
-                organization_id, completed_days * 2
-            )
-
-            effectiveness = {}
-
-            for metric_name in [
-                "relevance",
-                "precision",
-                "recall",
-                "response_time",
-                "user_satisfaction",
-            ]:
-                recent_value = recent_metrics.get(metric_name, 0)
-                baseline_value = baseline_metrics.get(metric_name, 0)
-
-                if baseline_value > 0:
-                    improvement = (
-                        (recent_value - baseline_value) / baseline_value
-                    ) * 100
-                    effectiveness[metric_name] = {
-                        "baseline": baseline_value,
-                        "current": recent_value,
-                        "improvement_percentage": improvement,
-                    }
-                else:
-                    effectiveness[metric_name] = {
-                        "baseline": baseline_value,
-                        "current": recent_value,
-                        "improvement_percentage": 0,
-                    }
-
-            return {
-                "organization_id": organization_id,
-                "period_days": completed_days,
-                "effectiveness": effectiveness,
-                "overall_improvement": (
-                    statistics.mean(
-                        [e["improvement_percentage"] for e in effectiveness.values()]
-                    )
-                    if effectiveness
-                    else 0
-                ),
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to get recommendation effectiveness: {e}")
-            raise
+        # No baseline is recorded when a recommendation is implemented, so a
+        # before/after comparison cannot be measured. The previous version
+        # compared two hard-coded dictionaries and served the difference as
+        # the organization's improvement; report "not available" instead.
+        return {
+            "organization_id": organization_id,
+            "period_days": completed_days,
+            "available": False,
+            "reason": "Recommendation effectiveness is not measured yet",
+            "effectiveness": {},
+            "overall_improvement": None,
+        }
 
     async def _generate_content_recommendations(
         self, insights: List[QualityInsight], organization_id: str
@@ -528,69 +489,72 @@ class QualityRecommendationsService:
         """Generate infrastructure-related recommendations"""
         recommendations = []
 
-        # Get system performance data
+        # Get system performance data. Only the dependency call is tolerated;
+        # a bug while building a recommendation must surface.
         try:
             system_health = (
                 await performance_dashboard_service.get_system_health_metrics()
             )
-
-            if system_health.cpu_usage > 80:
-                recommendations.append(
-                    QualityRecommendation(
-                        id=str(uuid.uuid4()),
-                        category=RecommendationCategory.INFRASTRUCTURE,
-                        priority=RecommendationPriority.CRITICAL,
-                        title="Scale System Resources - High CPU Usage",
-                        description=f"System CPU usage is critical ({system_health.cpu_usage:.1f}%)",
-                        impact_assessment="Critical impact on all system operations",
-                        effort_required="High - infrastructure scaling",
-                        actionable_steps=[
-                            "Scale up compute resources immediately",
-                            "Implement horizontal scaling for search services",
-                            "Add load balancing for search queries",
-                            "Optimize resource-intensive operations",
-                            "Consider auto-scaling configuration",
-                        ],
-                        expected_outcome="Improved system performance and reliability",
-                        metrics_to_track=["cpu_usage", "response_time", "error_rate"],
-                        supporting_data={"cpu_usage": system_health.cpu_usage},
-                        estimated_improvement=50.0,
-                        due_date=datetime.utcnow() + timedelta(days=7),
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                    )
-                )
-
-            if system_health.memory_usage > 85:
-                recommendations.append(
-                    QualityRecommendation(
-                        id=str(uuid.uuid4()),
-                        category=RecommendationCategory.INFRASTRUCTURE,
-                        priority=RecommendationPriority.HIGH,
-                        title="Optimize Memory Usage",
-                        description=f"System memory usage is high ({system_health.memory_usage:.1f}%)",
-                        impact_assessment="High impact on system stability and performance",
-                        effort_required="Medium - memory optimization",
-                        actionable_steps=[
-                            "Analyze memory usage patterns",
-                            "Implement memory-efficient algorithms",
-                            "Add memory monitoring and alerts",
-                            "Optimize data structures and caching",
-                            "Consider memory scaling",
-                        ],
-                        expected_outcome="Reduced memory usage and improved stability",
-                        metrics_to_track=["memory_usage", "error_rate", "performance"],
-                        supporting_data={"memory_usage": system_health.memory_usage},
-                        estimated_improvement=30.0,
-                        due_date=datetime.utcnow() + timedelta(days=14),
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                    )
-                )
-
         except Exception as e:
             logger.warning(
-                f"Could not get system health for infrastructure recommendations: {e}"
+                "Could not get system health for infrastructure recommendations: "
+                f"{type(e).__name__}",
+                exc_info=True,
+            )
+            return recommendations
+
+        if system_health.cpu_usage is not None and system_health.cpu_usage > 80:
+            recommendations.append(
+                QualityRecommendation(
+                    id=str(uuid.uuid4()),
+                    category=RecommendationCategory.INFRASTRUCTURE,
+                    priority=RecommendationPriority.CRITICAL,
+                    title="Scale System Resources - High CPU Usage",
+                    description=f"System CPU usage is critical ({system_health.cpu_usage:.1f}%)",
+                    impact_assessment="Critical impact on all system operations",
+                    effort_required="High - infrastructure scaling",
+                    actionable_steps=[
+                        "Scale up compute resources immediately",
+                        "Implement horizontal scaling for search services",
+                        "Add load balancing for search queries",
+                        "Optimize resource-intensive operations",
+                        "Consider auto-scaling configuration",
+                    ],
+                    expected_outcome="Improved system performance and reliability",
+                    metrics_to_track=["cpu_usage", "response_time", "error_rate"],
+                    supporting_data={"cpu_usage": system_health.cpu_usage},
+                    estimated_improvement=50.0,
+                    due_date=datetime.utcnow() + timedelta(days=7),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
+
+        if system_health.memory_usage is not None and system_health.memory_usage > 85:
+            recommendations.append(
+                QualityRecommendation(
+                    id=str(uuid.uuid4()),
+                    category=RecommendationCategory.INFRASTRUCTURE,
+                    priority=RecommendationPriority.HIGH,
+                    title="Optimize Memory Usage",
+                    description=f"System memory usage is high ({system_health.memory_usage:.1f}%)",
+                    impact_assessment="High impact on system stability and performance",
+                    effort_required="Medium - memory optimization",
+                    actionable_steps=[
+                        "Analyze memory usage patterns",
+                        "Implement memory-efficient algorithms",
+                        "Add memory monitoring and alerts",
+                        "Optimize data structures and caching",
+                        "Consider memory scaling",
+                    ],
+                    expected_outcome="Reduced memory usage and improved stability",
+                    metrics_to_track=["memory_usage", "error_rate", "performance"],
+                    supporting_data={"memory_usage": system_health.memory_usage},
+                    estimated_improvement=30.0,
+                    due_date=datetime.utcnow() + timedelta(days=14),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
             )
 
         return recommendations
@@ -601,45 +565,49 @@ class QualityRecommendationsService:
         """Generate monitoring-related recommendations"""
         recommendations = []
 
-        # Check for active alerts
+        # Check for active alerts. Only the dependency call is tolerated.
         try:
             alerts = await performance_dashboard_service.get_active_alerts(
                 organization_id
             )
-
-            if len(alerts) > 10:
-                recommendations.append(
-                    QualityRecommendation(
-                        id=str(uuid.uuid4()),
-                        category=RecommendationCategory.MONITORING,
-                        priority=RecommendationPriority.MEDIUM,
-                        title="Improve Alert Management - Too Many Active Alerts",
-                        description=f"Too many active alerts ({len(alerts)}) may indicate alert fatigue",
-                        impact_assessment="Medium impact on operational efficiency",
-                        effort_required="Low - alert configuration optimization",
-                        actionable_steps=[
-                            "Review and consolidate alert rules",
-                            "Implement alert correlation and grouping",
-                            "Add alert severity classification",
-                            "Implement alert acknowledgment workflows",
-                            "Schedule regular alert rule reviews",
-                        ],
-                        expected_outcome="Reduced alert noise and improved response times",
-                        metrics_to_track=[
-                            "alert_count",
-                            "mean_time_to_resolution",
-                            "false_positive_rate",
-                        ],
-                        supporting_data={"active_alerts": len(alerts)},
-                        estimated_improvement=25.0,
-                        due_date=datetime.utcnow() + timedelta(days=30),
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                    )
-                )
-
         except Exception as e:
-            logger.warning(f"Could not get alerts for monitoring recommendations: {e}")
+            logger.warning(
+                "Could not get alerts for monitoring recommendations: "
+                f"{type(e).__name__}",
+                exc_info=True,
+            )
+            return recommendations
+
+        if len(alerts) > 10:
+            recommendations.append(
+                QualityRecommendation(
+                    id=str(uuid.uuid4()),
+                    category=RecommendationCategory.MONITORING,
+                    priority=RecommendationPriority.MEDIUM,
+                    title="Improve Alert Management - Too Many Active Alerts",
+                    description=f"Too many active alerts ({len(alerts)}) may indicate alert fatigue",
+                    impact_assessment="Medium impact on operational efficiency",
+                    effort_required="Low - alert configuration optimization",
+                    actionable_steps=[
+                        "Review and consolidate alert rules",
+                        "Implement alert correlation and grouping",
+                        "Add alert severity classification",
+                        "Implement alert acknowledgment workflows",
+                        "Schedule regular alert rule reviews",
+                    ],
+                    expected_outcome="Reduced alert noise and improved response times",
+                    metrics_to_track=[
+                        "alert_count",
+                        "mean_time_to_resolution",
+                        "false_positive_rate",
+                    ],
+                    supporting_data={"active_alerts": len(alerts)},
+                    estimated_improvement=25.0,
+                    due_date=datetime.utcnow() + timedelta(days=30),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
 
         return recommendations
 
@@ -647,8 +615,8 @@ class QualityRecommendationsService:
         self, organization_id: str, cutoff_date: datetime
     ) -> List[QualityInsight]:
         """Analyze relevance metric insights"""
+        db = next(get_db_sync())
         try:
-            db = next(get_db_sync())
 
             # Get relevance metrics
             relevance_data = db.execute(
@@ -724,8 +692,14 @@ class QualityRecommendationsService:
                     )
                 ]
 
-        except Exception as e:
-            logger.error(f"Failed to analyze relevance insights: {e}")
+        except _TRANSIENT_DB_ERRORS as exc:
+            # Database unreachable: report incomplete (never cached). Any
+            # other error, including ProgrammingError, is a bug and surfaces.
+            logger.warning(
+                "Failed to analyze relevance insights: database unavailable",
+                exc_info=True,
+            )
+            raise _MetricsUnavailable() from exc
         finally:
             db.close()
 
@@ -749,21 +723,21 @@ class QualityRecommendationsService:
         self, organization_id: str, cutoff_date: datetime
     ) -> List[QualityInsight]:
         """Analyze response time insights"""
+        db = next(get_db_sync())
         try:
-            db = next(get_db_sync())
 
             # Get response time from search queries
             response_time_data = db.execute(
                 text("""
                 SELECT
-                    AVG(sq.response_time) as current_value,
+                    AVG(sq.search_duration_ms) as current_value,
                     COUNT(*) as sample_count,
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sq.response_time) as p95
+                    PERCENTILE_CONT(0.95) WITHIN GROUP
+                        (ORDER BY sq.search_duration_ms) as p95
                 FROM search_queries sq
-                JOIN search_sessions s ON sq.session_id = s.id
-                WHERE s.organization_id = :org_id
+                WHERE sq.organization_id = :org_id
                     AND sq.created_at >= :cutoff_date
-                    AND sq.response_time IS NOT NULL
+                    AND sq.search_duration_ms IS NOT NULL
             """),
                 {"org_id": organization_id, "cutoff_date": cutoff_date},
             ).fetchone()
@@ -778,13 +752,12 @@ class QualityRecommendationsService:
                 prev_cutoff = cutoff_date - period_length
                 prev_rt_data = db.execute(
                     text("""
-                    SELECT AVG(sq.response_time) as prev_value
+                    SELECT AVG(sq.search_duration_ms) as prev_value
                     FROM search_queries sq
-                    JOIN search_sessions s ON sq.session_id = s.id
-                    WHERE s.organization_id = :org_id
+                    WHERE sq.organization_id = :org_id
                         AND sq.created_at >= :prev_cutoff
                         AND sq.created_at < :cutoff_date
-                        AND sq.response_time IS NOT NULL
+                        AND sq.search_duration_ms IS NOT NULL
                 """),
                     {
                         "org_id": organization_id,
@@ -821,8 +794,14 @@ class QualityRecommendationsService:
                     )
                 ]
 
-        except Exception as e:
-            logger.error(f"Failed to analyze response time insights: {e}")
+        except _TRANSIENT_DB_ERRORS as exc:
+            # Database unreachable: report incomplete (never cached). Any
+            # other error, including ProgrammingError, is a bug and surfaces.
+            logger.warning(
+                "Failed to analyze response time insights: database unavailable",
+                exc_info=True,
+            )
+            raise _MetricsUnavailable() from exc
         finally:
             db.close()
 
@@ -886,32 +865,6 @@ class QualityRecommendationsService:
             )
 
         return causes
-
-    async def _get_recent_quality_metrics(
-        self, organization_id: str, days_back: int
-    ) -> Dict[str, float]:
-        """Get recent quality metrics"""
-        # Implementation to fetch recent metrics
-        return {
-            "relevance": 0.75,
-            "precision": 0.82,
-            "recall": 0.78,
-            "response_time": 800.0,
-            "user_satisfaction": 4.1,
-        }
-
-    async def _get_baseline_quality_metrics(
-        self, organization_id: str, days_back: int
-    ) -> Dict[str, float]:
-        """Get baseline quality metrics"""
-        # Implementation to fetch baseline metrics
-        return {
-            "relevance": 0.65,
-            "precision": 0.75,
-            "recall": 0.70,
-            "response_time": 1200.0,
-            "user_satisfaction": 3.8,
-        }
 
 
 # Global service instance

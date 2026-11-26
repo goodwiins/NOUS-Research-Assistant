@@ -26,6 +26,7 @@ from src.core.database import get_db
 from src.core.dependencies import get_current_user
 from src.models.research_project_role import ResearchProjectRole as Role
 from src.services.research import claims_service
+from src.services.research import draft_release_service as release_service
 from src.services.research_engine import evidence_rules as er
 from src.services.research_engine import evidence_service, project_access
 from src.services.research_engine import synthesis_rules as sr
@@ -76,9 +77,12 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Harness]:
             collection=SimpleNamespace(id=pid),
             effective_roles=frozenset(h.roles),
             organization_id=uuid4(),
+            release_edges=None,
         )
 
     monkeypatch.setattr(routes, "resolve_project", fake_resolve)
+    # GOO-721: staling writers resolve through draft_release_service.
+    monkeypatch.setattr(release_service, "resolve_for_staling", fake_resolve)
     monkeypatch.setattr(
         svc, "_selection", AsyncMock(return_value=(str(VERSION), SELECTION))
     )

@@ -58,10 +58,13 @@ def hot_host() -> Iterator[AsyncMock]:
             "get_active_alerts",
             new=AsyncMock(return_value=[]),
         ),
+        # The single source of insights for generate_recommendations and
+        # analyze_quality_insights alike (GOO-653): stubbing only the public
+        # method let the analysers read whatever database the run had.
         patch.object(
             QualityRecommendationsService,
-            "analyze_quality_insights",
-            new=AsyncMock(return_value=[]),
+            "_collect_insights",
+            new=AsyncMock(return_value=([], True)),
         ),
     ):
         yield health

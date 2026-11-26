@@ -42,7 +42,8 @@ exit 0
 
 # kubectl stub:
 # - `get pods -l app=redis` prints $STUB_REDIS_POD;
-# - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT;
+# - the emptiness probe (`psql ... -tAc`) prints $STUB_TABLE_COUNT, or
+#   $STUB_COUNT_AFTER_LOAD (when set) once the load has run;
 # - any other psql call stores its stdin in $STUB_PSQL_STDIN;
 # - `cp` copies its source to $STUB_CP_OUT.
 # - `get externalsecret aws-database-credentials` succeeds only when $STUB_RDS=1;
@@ -55,7 +56,13 @@ case "$*" in
     *"get externalsecret aws-database-credentials"*) [ "${STUB_RDS:-0}" = 1 ]; exit $? ;;
     *"get deployment postgres"*) [ "${STUB_NO_PG_DEPLOY:-0}" != 1 ]; exit $? ;;
     *"get pods"*"app=redis"*) printf '%s' "${STUB_REDIS_POD:-}"; exit 0 ;;
-    *psql*-tAc*) fails probe && exit 1; echo "${STUB_TABLE_COUNT:-0}"; exit 0 ;;
+    *psql*-tAc*) fails probe && exit 1
+        if [ -f "$STUB_PSQL_STDIN" ] && [ -n "${STUB_COUNT_AFTER_LOAD:-}" ]; then
+            echo "$STUB_COUNT_AFTER_LOAD"
+        else
+            echo "${STUB_TABLE_COUNT:-0}"
+        fi
+        exit 0 ;;
     *psql*) cat > "$STUB_PSQL_STDIN"; fails load && exit 1; exit 0 ;;
     cp\\ *) fails cp && exit 1; cp "$2" "$STUB_CP_OUT"; exit 0 ;;
 esac
@@ -78,6 +85,10 @@ if [ "$1" = "s3" ] && [ "$2" = "sync" ]; then
                 printf 'REDIS0011' | gzip > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
             badredis) mkdir -p "$d/redis"
                 printf 'not gzip' > "$d/redis/redis_backup_${STUB_BACKUP_ID}.rdb.gz" ;;
+            lockedredis) mkdir -p "$d/redis"; chmod 000 "$d/redis" ;;
+            lockedk8s) mkdir -p "$d/kubernetes"
+                printf x | gzip > "$d/kubernetes/k8s_configs_${STUB_BACKUP_ID}.tar.gz"
+                chmod 000 "$d/kubernetes" ;;
             neo4j) mkdir -p "$d/neo4j"
                 printf 'dump' | gzip > "$d/neo4j/neo4j_backup_${STUB_BACKUP_ID}.dump.gz" ;;
         esac
@@ -175,6 +186,33 @@ def test_restore_fails_when_no_backup_matches(tmp_path: Path) -> None:
     assert "kubectl exec" not in calls
 
 
+def test_unreadable_component_dir_fails_the_restore(tmp_path: Path) -> None:
+    # find's own failure must stop the restore, not read as "MISSING".
+    try:
+        result, _calls, output = _restore(tmp_path, "postgres lockedredis")
+    finally:
+        for locked in tmp_path.rglob("redis"):
+            locked.chmod(0o700)
+    assert result.returncode != 0, output
+    assert "Could not search" in output
+    assert _psql_stdin(tmp_path) is None
+
+
+def test_unreadable_kubernetes_dir_stops_the_restore_before_loading(
+    tmp_path: Path,
+) -> None:
+    # The top-level search walks every directory, not only the components.
+    try:
+        result, _calls, output = _restore(tmp_path, "postgres lockedk8s")
+    finally:
+        for locked in tmp_path.rglob("kubernetes"):
+            locked.chmod(0o700)
+    assert result.returncode != 0, output
+    assert "Could not search" in output
+    assert "PostgreSQL restore completed" not in output
+    assert _psql_stdin(tmp_path) is None
+
+
 def test_restore_syncs_only_the_keys_for_the_id(tmp_path: Path) -> None:
     result, calls, output = _restore(tmp_path, "postgres")
     assert result.returncode == 0, output
@@ -193,11 +231,18 @@ def test_restore_pipes_the_dump_into_psql_with_on_error_stop(tmp_path: Path) -> 
     assert "ON_ERROR_STOP=1" in load[0] and "--single-transaction" in load[0]
 
 
-def test_emptiness_probe_counts_only_base_tables(tmp_path: Path) -> None:
+def test_emptiness_probe_counts_tables_and_other_user_objects(tmp_path: Path) -> None:
     _result, calls, _output = _restore(tmp_path, "postgres")
     probe = next(line for line in calls.splitlines() if "-tAc" in line)
-    # Views and extension-owned tables must not make a fresh DB look populated.
+    # Views and extension-owned objects must not make a fresh DB look populated.
     assert "relkind IN ('r', 'p')" in probe and "deptype = 'e'" in probe
+    # Sequences, composite/enum/domain types, functions and schemas collide
+    # with the dump's CREATE statements too, so they count.
+    assert "relkind IN ('S', 'c')" in probe
+    # Extension-owned composite types record membership on pg_type.
+    assert "d.objid = c.reltype" in probe
+    assert "typtype IN ('e', 'd', 'r', 'm')" in probe
+    assert "pg_catalog.pg_proc" in probe and "nspname <> 'public'" in probe
 
 
 def test_failed_psql_load_fails_the_restore(tmp_path: Path) -> None:
@@ -205,6 +250,24 @@ def test_failed_psql_load_fails_the_restore(tmp_path: Path) -> None:
     assert result.returncode != 0, output
     assert "PostgreSQL restore failed" in output
     assert "Restored 1 component" not in output
+
+
+def test_failed_load_that_left_objects_says_partially_loaded(tmp_path: Path) -> None:
+    result, _calls, output = _restore(
+        tmp_path, "postgres", STUB_FAIL="load", STUB_COUNT_AFTER_LOAD="7"
+    )
+    assert result.returncode != 0, output
+    assert "may be partially loaded" in output
+    assert "rolled back" not in output
+
+
+def test_failed_load_with_zero_count_still_says_to_inspect(tmp_path: Path) -> None:
+    # The count skips views and extension objects, so 0 proves nothing.
+    result, _calls, output = _restore(tmp_path, "postgres", STUB_FAIL="load")
+    assert result.returncode != 0, output
+    assert "shows no counted objects" in output
+    assert "inspect it before retrying" in output
+    assert "nothing was committed" not in output
 
 
 def test_failed_emptiness_probe_restores_nothing(tmp_path: Path) -> None:
@@ -456,8 +519,10 @@ def test_help_states_the_velero_version(tmp_path: Path) -> None:
 # - `get crd externalsecrets...` prints the CRD unless $RB_NO_ESO=1;
 # - `get externalsecret aws-database-credentials` prints its name when
 #   $RB_RDS=1, prints nothing otherwise;
-# - `get crd scaledobjects.keda.sh` fails (KEDA is not installed);
-# - $RB_FAIL lists calls that exit 1 instead: deploy, crd, es, drop.
+# - `get crd scaledobjects.keda.sh` prints the CRD when $RB_KEDA=1, prints
+#   nothing otherwise (matching `--ignore-not-found`), and fails when $RB_FAIL
+#   contains `keda`;
+# - $RB_FAIL lists calls that exit 1 instead: deploy, crd, es, keda, drop.
 RUNBOOK_KUBECTL_STUB = """#!/bin/sh
 echo "kubectl $*" >> "$STUB_LOG"
 fails() { case " ${RB_FAIL:-} " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -472,7 +537,10 @@ case "$*" in
         fails es && exit 1
         [ "${RB_RDS:-0}" = 1 ] && echo externalsecret/aws-database-credentials
         exit 0 ;;
-    *"get crd scaledobjects.keda.sh"*) exit 1 ;;
+    *"get crd scaledobjects.keda.sh"*)
+        fails keda && exit 1
+        [ "${RB_KEDA:-0}" = 1 ] && echo crd/scaledobjects.keda.sh
+        exit 0 ;;
     *"DROP DATABASE"*) fails drop && exit 1; exit 0 ;;
 esac
 exit 0
@@ -494,7 +562,10 @@ def _runbook_block() -> str:
 
 
 def _run_runbook(
-    tmp_path: Path, backup_id: str = BACKUP_ID, **extra: str
+    tmp_path: Path,
+    backup_id: str = BACKUP_ID,
+    namespace: str = "multimodal-rag-system",
+    **extra: str,
 ) -> Tuple[subprocess.CompletedProcess, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -511,6 +582,9 @@ def _run_runbook(
     log = tmp_path / "stub.log"
     log.touch()
     block = _runbook_block().replace("  BACKUP_ID=  ", f"  BACKUP_ID={backup_id}  ", 1)
+    if namespace != "multimodal-rag-system":
+        assert block.count("  NS=multimodal-rag-system ") == 1
+        block = block.replace("  NS=multimodal-rag-system ", f"  NS={namespace} ", 1)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
     env["STUB_LOG"] = str(log)
     env.update(extra)
@@ -561,6 +635,7 @@ def test_runbook_runs_every_step_for_in_cluster_postgres(tmp_path: Path) -> None
         ("kubectl fails on the deployment", {"RB_FAIL": "deploy"}),
         ("kubectl fails on the CRD", {"RB_FAIL": "crd"}),
         ("kubectl fails on the ExternalSecret", {"RB_FAIL": "es"}),
+        ("kubectl fails on the KEDA CRD", {"RB_FAIL": "keda"}),
     ],
 )
 def test_runbook_stops_before_touching_workloads(
@@ -569,8 +644,28 @@ def test_runbook_stops_before_touching_workloads(
     result, calls = _run_runbook(tmp_path, **extra)
     assert result.returncode != 0, case
     assert "STOPPED, nothing changed" in result.stderr, case
+    assert "writers are still scaled down" not in result.stderr, case
     for destructive in DESTRUCTIVE + ("backup-and-restore.sh",):
         assert destructive not in calls, (case, destructive)
+
+
+def test_runbook_pauses_and_resumes_keda_when_installed(tmp_path: Path) -> None:
+    result, calls = _run_runbook(tmp_path, RB_KEDA="1")
+    assert result.returncode == 0, result.stderr
+    assert "autoscaling.keda.sh/paused-replicas=0 --overwrite" in calls
+    assert "autoscaling.keda.sh/paused-replicas-" in calls
+    assert "writers are still scaled down" not in result.stderr
+
+
+def test_runbook_comments_have_no_apostrophes() -> None:
+    # In default zsh (without interactivecomments), an unmatched apostrophe in a
+    # comment line inside the pasted subshell leaves the prompt stuck at quote>.
+    block = _runbook_block()
+    for line in block.splitlines():
+        if "#" not in line:
+            continue
+        comment = line.split("#", 1)[1]
+        assert "'" not in comment, line
 
 
 def test_runbook_refuses_without_a_backup_id(tmp_path: Path) -> None:
@@ -581,16 +676,7 @@ def test_runbook_refuses_without_a_backup_id(tmp_path: Path) -> None:
 
 
 def test_runbook_refuses_an_empty_namespace(tmp_path: Path) -> None:
-    block = _runbook_block()
-    assert block.count("  NS=multimodal-rag-system ") == 1
-    original = _runbook_block
-    try:
-        globals()["_runbook_block"] = lambda: original().replace(
-            "  NS=multimodal-rag-system ", "  NS= ", 1
-        )
-        result, calls = _run_runbook(tmp_path)
-    finally:
-        globals()["_runbook_block"] = original
+    result, calls = _run_runbook(tmp_path, namespace="")
     assert result.returncode != 0
     assert "NS is empty" in result.stderr
     assert calls == ""
@@ -609,8 +695,10 @@ def test_cluster_recovery_delegates_the_data_restore() -> None:
 
 
 def test_runbook_stops_when_a_step_fails(tmp_path: Path) -> None:
-    # set -e: a failed drop must not go on to load the dump.
+    # set -e: a failed drop must not go on to load the dump, and the operator
+    # is reminded that writers remain scaled down.
     result, calls = _run_runbook(tmp_path, RB_FAIL="drop")
     assert result.returncode != 0
     assert "DROP DATABASE" in calls
     assert "backup-and-restore.sh" not in calls
+    assert "writers are still scaled down" in result.stderr

@@ -20,20 +20,20 @@ import { cn } from '@/lib/utils';
 import { Alert, AlertAction } from '@/types/monitoring';
 import { useMonitoringStore } from '@/stores/monitoringStore';
 import {
-  ExclamationTriangleIcon,
-  InformationCircleIcon,
-  CheckCircleIcon,
-  XCircleIcon,
-  BellIcon,
-  BellSlashIcon,
-  ClockIcon,
-  UserIcon,
-  TagIcon,
-  FunnelIcon,
-  MagnifyingGlassIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-} from '@heroicons/react/24/outline';
+  AlertTriangle,
+  Info,
+  CheckCircle,
+  XCircle,
+  Bell,
+  BellOff,
+  Clock,
+  User,
+  Tag,
+  Filter,
+  Search,
+  ChevronDown,
+  ChevronRight,
+} from 'lucide-react';
 
 export interface AlertListProps {
   alerts?: Alert[];
@@ -145,7 +145,7 @@ const AlertList: React.FC<AlertListProps> = ({
     switch (severity) {
       case 'critical':
         return {
-          icon: XCircleIcon,
+          icon: XCircle,
           color: 'text-red-600',
           bgColor: 'bg-red-50',
           borderColor: 'border-red-200',
@@ -153,7 +153,7 @@ const AlertList: React.FC<AlertListProps> = ({
         };
       case 'warning':
         return {
-          icon: ExclamationTriangleIcon,
+          icon: AlertTriangle,
           color: 'text-yellow-600',
           bgColor: 'bg-yellow-50',
           borderColor: 'border-yellow-200',
@@ -161,7 +161,7 @@ const AlertList: React.FC<AlertListProps> = ({
         };
       case 'info':
         return {
-          icon: InformationCircleIcon,
+          icon: Info,
           color: 'text-blue-600',
           bgColor: 'bg-blue-50',
           borderColor: 'border-blue-200',
@@ -169,7 +169,7 @@ const AlertList: React.FC<AlertListProps> = ({
         };
       default:
         return {
-          icon: BellIcon,
+          icon: Bell,
           color: 'text-foreground',
           bgColor: 'bg-gray-50',
           borderColor: 'border-border',
@@ -182,31 +182,31 @@ const AlertList: React.FC<AlertListProps> = ({
     switch (status) {
       case 'active':
         return {
-          icon: BellIcon,
+          icon: Bell,
           color: 'text-green-600',
           label: 'Active',
         };
       case 'acknowledged':
         return {
-          icon: CheckCircleIcon,
+          icon: CheckCircle,
           color: 'text-blue-600',
           label: 'Acknowledged',
         };
       case 'resolved':
         return {
-          icon: CheckCircleIcon,
+          icon: CheckCircle,
           color: 'text-foreground',
           label: 'Resolved',
         };
       case 'suppressed':
         return {
-          icon: BellSlashIcon,
+          icon: BellOff,
           color: 'text-muted-foreground',
           label: 'Suppressed',
         };
       default:
         return {
-          icon: BellIcon,
+          icon: Bell,
           color: 'text-foreground',
           label: status,
         };
@@ -322,16 +322,16 @@ const AlertList: React.FC<AlertListProps> = ({
               {/* Alert Metadata */}
               <div className="flex items-center space-x-4 text-xs text-muted-foreground">
                 <div className="flex items-center space-x-1">
-                  <ClockIcon className="h-3 w-3" />
+                  <Clock className="h-3 w-3" />
                   <span>{formatRelativeTime(alert.triggered_at)}</span>
                 </div>
                 <div className="flex items-center space-x-1">
-                  <TagIcon className="h-3 w-3" />
+                  <Tag className="h-3 w-3" />
                   <span>{alert.source}</span>
                 </div>
                 {alert.acknowledged_by && (
                   <div className="flex items-center space-x-1">
-                    <UserIcon className="h-3 w-3" />
+                    <User className="h-3 w-3" />
                     <span>By {alert.acknowledged_by}</span>
                   </div>
                 )}
@@ -352,9 +352,9 @@ const AlertList: React.FC<AlertListProps> = ({
                 className="h-8 w-8 p-0"
               >
                 {isExpanded ? (
-                  <ChevronDownIcon className="h-4 w-4" />
+                  <ChevronDown className="h-4 w-4" />
                 ) : (
-                  <ChevronRightIcon className="h-4 w-4" />
+                  <ChevronRight className="h-4 w-4" />
                 )}
               </Button>
             )}
@@ -448,7 +448,7 @@ const AlertList: React.FC<AlertListProps> = ({
         <div className="flex items-center justify-between">
           <div>
             <CardTitle className="flex items-center space-x-2">
-              <BellIcon className="h-5 w-5" />
+              <Bell className="h-5 w-5" />
               <span>{title}</span>
               <Badge variant="outline">{alertStats.active} active</Badge>
             </CardTitle>
@@ -467,7 +467,7 @@ const AlertList: React.FC<AlertListProps> = ({
               onClick={() => setShowFiltersPanel(!showFiltersPanel)}
               className="text-muted-foreground"
             >
-              <FunnelIcon className="h-4 w-4 mr-1" />
+              <Filter className="h-4 w-4 mr-1" />
               Filters
             </Button>
           )}
@@ -479,7 +479,7 @@ const AlertList: React.FC<AlertListProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
               {/* Search */}
               <div className="relative">
-                <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   placeholder="Search alerts..."
                   value={filters.search || ''}
@@ -571,7 +571,7 @@ const AlertList: React.FC<AlertListProps> = ({
             </div>
           ) : (
             <div className="text-center py-8">
-              <BellIcon className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+              <Bell className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
               <p className="text-muted-foreground">
                 {alerts.length === 0
                   ? 'No alerts'

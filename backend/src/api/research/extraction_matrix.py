@@ -286,15 +286,13 @@ async def update_matrix(
             detail="Matrix not found",
         )
 
-    # GOO-721: a column change can stale releases; read the edges unlocked.
-    context, edges = await draft_release_service.resolve_for_staling_write(
-        db,
-        matrix.project_id,
-        current_user.id,
-        ResearchAction.EDIT,
-        resolve=resolve_project,
-        stales=request.columns is not None,
+    # GOO-721: only a column change can stale releases.
+    resolve = (
+        draft_release_service.resolve_for_staling
+        if request.columns is not None
+        else resolve_project
     )
+    context = await resolve(db, matrix.project_id, current_user.id, ResearchAction.EDIT)
 
     columns_changed = False
     stale_document_ids: List[str] = []
@@ -322,7 +320,6 @@ async def update_matrix(
             matrix,
             [col.model_dump() for col in request.columns],
             current_user.id,
-            edges,
         )
 
     logger.info(
@@ -594,16 +591,10 @@ async def accept_extraction_value(
     db: AsyncSession = Depends(get_db),
 ) -> ExtractionAcceptedValueResponse:
     """Accept a value that equals a cited observation (ADJUDICATOR role only)."""
-    # GOO-721: a supersede or a changed source stales releases; read the
-    # edges before queueing on the project lock.
     project_id = await extraction_forms_service.matrix_project_id(db, matrix_id)
-    context, edges = await draft_release_service.resolve_for_staling_write(
-        db,
-        project_id,
-        current_user.id,
-        ResearchAction.ADJUDICATE,
-        resolve=resolve_project,
+    context = await draft_release_service.resolve_for_staling(
+        db, project_id, current_user.id, ResearchAction.ADJUDICATE
     )
     return await extraction_forms_service.accept_value(
-        db, context, matrix_id, current_user.id, request, edges
+        db, context, matrix_id, current_user.id, request
     )

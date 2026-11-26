@@ -40,7 +40,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -259,7 +259,7 @@ def _log_skip(document: DocumentRow, reason: str) -> None:
     )
 
 
-_FAILURE_RECHECK = ["is_deleted", "document_metadata", "do_kb_sync_status"]
+STAGE_WRITE_COLUMNS = ["is_deleted", "document_metadata", "do_kb_sync_status"]
 
 
 def _record_stage_failure(document: DocumentRow) -> StageOutcome:
@@ -277,7 +277,17 @@ def _record_stage_failure(document: DocumentRow) -> StageOutcome:
         state["stage_failures"] = int(state.get("stage_failures") or 0) + 1
         _write_state(document, state)
         document.do_kb_sync_status = _FAILED
+    else:
+        mark_deleted(document)
     return StageOutcome.FAILED
+
+
+def _record_stage_success(document: DocumentRow, uploaded_text: str) -> StageOutcome:
+    if document.is_deleted:
+        mark_deleted(document)
+        return StageOutcome.SKIPPED
+    _mark_pending(document, text=uploaded_text)
+    return StageOutcome.STAGED
 
 
 def stage_document_sync(db: Session, document: DocumentRow) -> StageOutcome:
@@ -292,18 +302,19 @@ def stage_document_sync(db: Session, document: DocumentRow) -> StageOutcome:
     try:
         from src.core.s3_client import S3StorageHelper
 
+        uploaded_text = document.content_text
         upload_document_objects(
             S3StorageHelper(),
             document.organization_id,
             document.id,
-            document.content_text,
+            uploaded_text,
         )
     except Exception:  # noqa: BLE001 - a KB outage must never fail ingestion
         logger.warning("bedrock_kb stage upload error", exc_info=True)
-        db.refresh(document, attribute_names=_FAILURE_RECHECK, with_for_update=True)
+        db.refresh(document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True)
         return _record_stage_failure(document)
-    _mark_pending(document, text=document.content_text)
-    return StageOutcome.STAGED
+    db.refresh(document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True)
+    return _record_stage_success(document, uploaded_text)
 
 
 async def stage_document(session: AsyncSession, document: DocumentRow) -> StageOutcome:
@@ -318,21 +329,24 @@ async def stage_document(session: AsyncSession, document: DocumentRow) -> StageO
     try:
         from src.core.s3_client import S3StorageHelper
 
+        uploaded_text = document.content_text
         await asyncio.to_thread(
             upload_document_objects,
             S3StorageHelper(),
             document.organization_id,
             document.id,
-            document.content_text,
+            uploaded_text,
         )
     except Exception:  # noqa: BLE001 - a KB outage must never fail ingestion
         logger.warning("bedrock_kb stage upload error", exc_info=True)
         await session.refresh(
-            document, attribute_names=_FAILURE_RECHECK, with_for_update=True
+            document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
         )
         return _record_stage_failure(document)
-    _mark_pending(document, text=document.content_text)
-    return StageOutcome.STAGED
+    await session.refresh(
+        document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
+    )
+    return _record_stage_success(document, uploaded_text)
 
 
 # --------------------------------------------------------------------------
@@ -597,6 +611,82 @@ async def _job_running_elsewhere(client: Any) -> bool:
         job.get("status") in IN_FLIGHT_STATUSES
         for job in response.get("ingestionJobSummaries") or []
     )
+
+
+def _staged_object_identity(key: str, prefix: str) -> tuple[UUID, UUID] | None:
+    """Accept only keys this pipeline owns within the configured prefix."""
+    if not key.startswith(prefix):
+        return None
+    relative = key[len(prefix) :].removesuffix(SIDECAR_SUFFIX)
+    parts = relative.split("/")
+    if len(parts) != 2:
+        return None
+    org, filename = parts
+    doc, _, ext = filename.rpartition(".")
+    if ext not in CONTENT_EXTENSIONS:
+        return None
+    try:
+        org_id, doc_id = UUID(org), UUID(doc)
+    except ValueError:
+        return None
+    if (str(org_id), str(doc_id)) != (org, doc):
+        return None
+    return org_id, doc_id
+
+
+async def prune_staged_objects(
+    db: AsyncSession, client: Any, helper: Any, *, apply: bool
+) -> dict[str, Any]:
+    """Reconcile legacy files; caller holds the queue tick's advisory lock."""
+    prefix = _prefix()
+    if not prefix or not bedrock_sync_enabled():
+        raise ValueError(
+            "Bedrock KB, data source, and a dedicated S3 prefix are required"
+        )
+    if apply and await _job_running_elsewhere(client):
+        raise RuntimeError("Wait for the current Bedrock ingestion job before pruning")
+
+    keys_by_document: dict[tuple[UUID, UUID], list[str]] = defaultdict(list)
+    for key in await asyncio.to_thread(helper.list_objects, prefix):
+        identity = _staged_object_identity(key, prefix)
+        if identity is not None:
+            keys_by_document[identity].append(key)
+
+    stale_objects = 0
+    identities = list(keys_by_document)
+    for start in range(0, len(identities), 500):
+        batch = identities[start : start + 500]
+        live = set(
+            (
+                await db.execute(
+                    select(Document.organization_id, Document.id).where(
+                        Document.id.in_({doc_id for _, doc_id in batch}),
+                        Document.is_deleted.is_(False),
+                    )
+                )
+            ).tuples()
+        )
+        await db.rollback()
+        for identity in batch:
+            if identity in live:
+                continue
+            keys = keys_by_document[identity]
+            stale_objects += len(keys)
+            if apply:
+                for key in keys:
+                    await asyncio.to_thread(_delete_or_raise, helper, key)
+
+    report: dict[str, Any] = {"stale_objects": stale_objects}
+    if apply:
+        # Sync even if this retry finds no stale objects: the previous run
+        # may have deleted its last key and stopped before starting ingestion.
+        response = await asyncio.to_thread(
+            client.start_ingestion_job,
+            description="nous staged object cleanup",
+            **_kb_ids(),
+        )
+        report["started_job"] = response["ingestionJob"]["ingestionJobId"]
+    return report
 
 
 async def _claim_new_job(

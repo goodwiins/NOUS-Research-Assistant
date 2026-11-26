@@ -1,10 +1,6 @@
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import {
-  ChartBarIcon,
-  ClockIcon,
-  DocumentTextIcon,
-} from '@heroicons/react/24/outline';
+import { BarChart3, Clock, FileText } from 'lucide-react';
 import React from 'react';
 
 interface QualityMetricsCardProps {
@@ -23,9 +19,9 @@ const QUALITY_METRICS = [
 ] as const;
 
 const PERFORMANCE_METRICS = [
-  { key: 'latency', label: 'Latency', Icon: ClockIcon },
-  { key: 'documents', label: 'Documents', Icon: DocumentTextIcon },
-  { key: 'entities', label: 'Entities', Icon: ChartBarIcon },
+  { key: 'latency', label: 'Latency', Icon: Clock },
+  { key: 'documents', label: 'Documents', Icon: FileText },
+  { key: 'entities', label: 'Entities', Icon: BarChart3 },
 ] as const;
 
 /**
@@ -46,7 +42,7 @@ export const QualityMetricsCard: React.FC<QualityMetricsCardProps> = ({
       <CardContent className="p-6">
         <div className="flex items-center gap-3 mb-6">
           <div className="p-2 rounded-lg bg-primary/10 text-primary">
-            <ChartBarIcon aria-hidden="true" className="h-5 w-5" />
+            <BarChart3 aria-hidden="true" className="h-5 w-5" />
           </div>
           <div>
             <h3 className="text-base font-semibold text-foreground">

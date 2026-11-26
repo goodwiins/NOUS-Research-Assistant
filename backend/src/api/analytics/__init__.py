@@ -1,15 +1,13 @@
 """
-Analytics API routes for Knowledge Graph Analytics Dashboard
+Analytics API routes.
+
+The dashboards / metrics / reports routers (and their ``analytics_*`` tables)
+were never mounted and were retired in GOO-690. Only the (also unmounted)
+realtime router remains.
 """
 
-from .dashboards import router as dashboards_router
-from .metrics import router as metrics_router
 from .realtime import router as realtime_router
-from .reports import router as reports_router
 
 __all__ = [
-    "dashboards_router",
-    "metrics_router",
-    "reports_router",
     "realtime_router",
 ]

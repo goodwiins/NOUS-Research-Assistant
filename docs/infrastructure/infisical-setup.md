@@ -184,7 +184,7 @@ operator needs HTTPS egress to `app.infisical.com:443`.
 
 Not verified from the repository alone: the contents of the Infisical project,
 which GitHub secrets currently exist, and whether `Infisical/secrets-action` is
-still used by a workflow (the only workflow found referencing
-`INFISICAL_CLIENT_ID` is `trigger-deploy.yml`, 2026-10-17). The CI integration
+still used by a workflow (no workflow references `INFISICAL_CLIENT_ID` since
+`trigger-deploy.yml` was retired, 2026-11-24). The CI integration
 section above describes the original design and may be stale; the frontend
 deploys through Vercel.

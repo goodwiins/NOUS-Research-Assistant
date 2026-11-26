@@ -1,19 +1,19 @@
 import React, { useState, useCallback } from 'react';
 import {
-  XMarkIcon,
-  DocumentTextIcon,
-  PhotoIcon,
-  MusicalNoteIcon,
-  VideoCameraIcon,
-  ArrowDownTrayIcon,
-  ShareIcon,
-  EyeIcon,
-  InformationCircleIcon,
-  ClockIcon,
-  CheckCircleIcon,
-  XCircleIcon,
-  PencilIcon,
-} from '@heroicons/react/24/outline';
+  X,
+  FileText,
+  ImageIcon,
+  Music,
+  Video,
+  Download,
+  Share2,
+  Eye,
+  Info,
+  Clock,
+  CheckCircle,
+  XCircle,
+  Pencil,
+} from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Document } from '@/types';
 import { cn } from '@/lib/utils';
@@ -43,10 +43,13 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
   const [isRetrying, setIsRetrying] = useState(false);
   const [localDocument, setLocalDocument] = useState<Document | null>(document);
 
-  // Update local document when prop changes
-  React.useEffect(() => {
+  // Update local document when prop changes — adjusting state during render
+  // instead of in an effect avoids cascading renders (lint set-state rule).
+  const [prevDocument, setPrevDocument] = useState<Document | null>(document);
+  if (document !== prevDocument) {
+    setPrevDocument(document);
     setLocalDocument(document);
-  }, [document]);
+  }
 
   const handleRetry = useCallback(async () => {
     if (!localDocument || isRetrying) return;
@@ -94,19 +97,19 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
     const iconClass = 'h-8 w-8';
     switch (document?.file_type) {
       case 'pdf':
-        return <DocumentTextIcon className={cn(iconClass, 'text-red-600')} />;
+        return <FileText className={cn(iconClass, 'text-red-600')} />;
       case 'txt':
-        return <DocumentTextIcon className={cn(iconClass, 'text-blue-600')} />;
+        return <FileText className={cn(iconClass, 'text-blue-600')} />;
       case 'jpg':
       case 'png':
-        return <PhotoIcon className={cn(iconClass, 'text-green-600')} />;
+        return <ImageIcon className={cn(iconClass, 'text-green-600')} />;
       case 'mp3':
-        return <MusicalNoteIcon className={cn(iconClass, 'text-purple-600')} />;
+        return <Music className={cn(iconClass, 'text-purple-600')} />;
       case 'mp4':
-        return <VideoCameraIcon className={cn(iconClass, 'text-orange-600')} />;
+        return <Video className={cn(iconClass, 'text-orange-600')} />;
       default:
         return (
-          <DocumentTextIcon className={cn(iconClass, 'text-foreground')} />
+          <FileText className={cn(iconClass, 'text-foreground')} />
         );
     }
   };
@@ -114,15 +117,15 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
   const getStatusIcon = () => {
     switch (document?.processing_status) {
       case 'queued':
-        return <ClockIcon className="h-4 w-4 text-yellow-600" />;
+        return <Clock className="h-4 w-4 text-yellow-600" />;
       case 'processing':
         return (
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
         );
       case 'indexed':
-        return <CheckCircleIcon className="h-4 w-4 text-green-600" />;
+        return <CheckCircle className="h-4 w-4 text-green-600" />;
       case 'failed':
-        return <XCircleIcon className="h-4 w-4 text-red-600" />;
+        return <XCircle className="h-4 w-4 text-red-600" />;
       default:
         return null;
     }
@@ -211,7 +214,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
             />
           ) : (
             <div className="text-center">
-              <PhotoIcon className="h-16 w-16 text-muted-foreground mx-auto mb-2" />
+              <ImageIcon className="h-16 w-16 text-muted-foreground mx-auto mb-2" />
               <p className="text-muted-foreground">No preview available</p>
             </div>
           )}
@@ -224,7 +227,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
       return (
         <div className="flex items-center justify-center bg-muted rounded-lg p-8">
           <div className="text-center">
-            <DocumentTextIcon className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
+            <FileText className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
             <p className="text-lg font-medium text-foreground mb-2">
               {document.title}
             </p>
@@ -238,7 +241,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
               disabled={isLoading}
               variant="outline"
             >
-              <ArrowDownTrayIcon className="h-4 w-4 mr-2" />
+              <Download className="h-4 w-4 mr-2" />
               {isLoading ? 'Downloading...' : 'Download to view'}
             </Button>
           </div>
@@ -251,7 +254,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
       return (
         <div className="flex items-center justify-center bg-muted rounded-lg p-8">
           <div className="text-center">
-            <MusicalNoteIcon className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
+            <Music className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
             <p className="text-lg font-medium text-foreground mb-2">
               {document.title}
             </p>
@@ -263,7 +266,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
               disabled={isLoading}
               variant="outline"
             >
-              <ArrowDownTrayIcon className="h-4 w-4 mr-2" />
+              <Download className="h-4 w-4 mr-2" />
               {isLoading ? 'Downloading...' : 'Download audio'}
             </Button>
           </div>
@@ -276,7 +279,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
       return (
         <div className="flex items-center justify-center bg-muted rounded-lg p-8">
           <div className="text-center">
-            <VideoCameraIcon className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
+            <Video className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
             <p className="text-lg font-medium text-foreground mb-2">
               {document.title}
             </p>
@@ -288,7 +291,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
               disabled={isLoading}
               variant="outline"
             >
-              <ArrowDownTrayIcon className="h-4 w-4 mr-2" />
+              <Download className="h-4 w-4 mr-2" />
               {isLoading ? 'Downloading...' : 'Download video'}
             </Button>
           </div>
@@ -300,7 +303,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
     return (
       <div className="flex items-center justify-center bg-muted rounded-lg p-8">
         <div className="text-center">
-          <DocumentTextIcon className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
+          <FileText className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
           <p className="text-lg font-medium text-foreground mb-2">
             {document.title}
           </p>
@@ -312,7 +315,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
             disabled={isLoading}
             variant="outline"
           >
-            <ArrowDownTrayIcon className="h-4 w-4 mr-2" />
+            <Download className="h-4 w-4 mr-2" />
             {isLoading ? 'Downloading...' : 'Download file'}
           </Button>
         </div>
@@ -352,7 +355,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
               size="sm"
               className="h-8 w-8 p-0"
             >
-              <XMarkIcon className="h-5 w-5" />
+              <X className="h-5 w-5" />
             </Button>
           </div>
 
@@ -461,7 +464,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
                       className="w-full"
                       variant="outline"
                     >
-                      <ArrowDownTrayIcon className="h-4 w-4 mr-2" />
+                      <Download className="h-4 w-4 mr-2" />
                       {isLoading ? 'Downloading...' : 'Download'}
                     </Button>
                     {onEditMetadata && (
@@ -470,7 +473,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
                         className="w-full"
                         variant="outline"
                       >
-                        <PencilIcon className="h-4 w-4 mr-2" />
+                        <Pencil className="h-4 w-4 mr-2" />
                         Edit Metadata
                       </Button>
                     )}
@@ -480,7 +483,7 @@ export const DocumentPreview: React.FC<DocumentPreviewProps> = ({
                         className="w-full"
                         variant="outline"
                       >
-                        <ShareIcon className="h-4 w-4 mr-2" />
+                        <Share2 className="h-4 w-4 mr-2" />
                         Share
                       </Button>
                     )}

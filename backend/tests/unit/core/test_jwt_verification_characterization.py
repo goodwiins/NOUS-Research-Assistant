@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Union
 from unittest.mock import MagicMock
 
 import jwt
@@ -86,6 +87,16 @@ def _unsigned(claims: Dict[str, Any], alg: str = "none") -> str:
     header = _b64(json.dumps({"alg": alg, "typ": "JWT"}).encode())
     payload = _b64(json.dumps(claims).encode())
     return f"{header}.{payload}."
+
+
+# Parametrize lists run at collection, so a token whose claims come from
+# ``_now()`` goes in as a zero-argument factory and is built in the test body.
+# Constant string tokens stay plain strings (GOO-801).
+TokenCase = Union[str, Callable[[], str]]
+
+
+def _token(case: TokenCase) -> str:
+    return case() if callable(case) else case
 
 
 @pytest.fixture(autouse=True)
@@ -319,16 +330,16 @@ def test_malformed_token_returns_none(token: str) -> None:
     "token",
     _MALFORMED
     + [
-        _hs(_supabase_claims(exp=_now() - 2)),
-        _hs(_supabase_claims(aud="anon")),
-        _hs(_supabase_claims(), alg="HS512"),
-        _unsigned(_supabase_claims()),
+        lambda: _hs(_supabase_claims(exp=_now() - 2)),
+        lambda: _hs(_supabase_claims(aud="anon")),
+        lambda: _hs(_supabase_claims(), alg="HS512"),
+        lambda: _unsigned(_supabase_claims()),
     ],
 )
-def test_every_rejection_maps_to_401(token: str) -> None:
+def test_every_rejection_maps_to_401(token: TokenCase) -> None:
     with pytest.raises(HTTPException) as exc:
         get_current_user_token(
-            HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials=_token(token))
         )
     assert exc.value.status_code == 401
     assert exc.value.headers == {"WWW-Authenticate": "Bearer"}
@@ -369,12 +380,40 @@ async def test_ws_expired_token_with_bad_signature_still_closes_4002() -> None:
     assert await _ws_code(token) == 4002
 
 
-@pytest.mark.parametrize(
-    "token",
-    ["garbage", "a.b.c", _hs(_supabase_claims(aud="anon"))],
-)
-async def test_ws_invalid_token_closes_4003(token: str) -> None:
-    assert await _ws_code(token) == 4003
+def _ws_invalid_token_cases() -> list[TokenCase]:
+    return ["garbage", "a.b.c", lambda: _hs(_supabase_claims(aud="anon"))]
+
+
+@pytest.mark.parametrize("token", _ws_invalid_token_cases())
+async def test_ws_invalid_token_closes_4003(token: TokenCase) -> None:
+    assert await _ws_code(_token(token)) == 4003
+
+
+async def test_ws_invalid_token_cases_survive_slow_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GOO-801: a slow suite must not turn the 4003 cases into 4002.
+
+    ``_now`` is shifted back 11 minutes while the case list is built, which
+    models collection happening 11 minutes before the test body runs. The
+    shift is undone before the tokens are verified, so only relative offsets
+    matter and the result does not depend on wall-clock time.
+
+    Mutation check: put ``_hs(_supabase_claims(aud="anon"))`` back as a plain
+    entry in ``_ws_invalid_token_cases()``; this test then fails with close
+    code 4002 instead of 4003. Focused command, from the repo root:
+
+        pytest -q -c backend/pytest.ini \
+            "backend/tests/unit/core/test_jwt_verification_characterization.py" \
+            -k "slow_collection or invalid_token_closes_4003"
+    """
+    module = sys.modules[__name__]
+    real_now = _now
+    with monkeypatch.context() as m:
+        m.setattr(module, "_now", lambda: real_now() - 660)
+        cases = _ws_invalid_token_cases()
+    for case in cases:
+        assert await _ws_code(_token(case)) == 4003
 
 
 # ---------------------------------------------------------------------------
@@ -400,17 +439,19 @@ async def test_legacy_ws_valid_token_maps_role(legacy_ws: Any) -> None:
 @pytest.mark.parametrize(
     "token",
     [
-        _hs(_supabase_claims(exp=_now() - 2)),
-        _hs(_supabase_claims(aud="anon")),
-        _hs(_supabase_claims(), secret="y" * 40),
-        _hs(_supabase_claims(), alg="HS512"),
-        _unsigned(_supabase_claims()),
-        _hs(_supabase_claims(sub=None)),
+        lambda: _hs(_supabase_claims(exp=_now() - 2)),
+        lambda: _hs(_supabase_claims(aud="anon")),
+        lambda: _hs(_supabase_claims(), secret="y" * 40),
+        lambda: _hs(_supabase_claims(), alg="HS512"),
+        lambda: _unsigned(_supabase_claims()),
+        lambda: _hs(_supabase_claims(sub=None)),
         "garbage",
     ],
 )
-async def test_legacy_ws_rejections_return_none(legacy_ws: Any, token: str) -> None:
-    assert await legacy_ws._validate_jwt_token(token) is None
+async def test_legacy_ws_rejections_return_none(
+    legacy_ws: Any, token: TokenCase
+) -> None:
+    assert await legacy_ws._validate_jwt_token(_token(token)) is None
 
 
 async def test_legacy_ws_future_iat_still_accepted(legacy_ws: Any) -> None:
@@ -460,14 +501,14 @@ async def test_auth_service_expired_token(auth_service: Any) -> None:
     "token",
     [
         "garbage",
-        _unsigned({"sub": "u", "type": "access", "exp": _now() + 60}),
+        lambda: _unsigned({"sub": "u", "type": "access", "exp": _now() + 60}),
     ],
 )
-async def test_auth_service_invalid_token(auth_service: Any, token: str) -> None:
+async def test_auth_service_invalid_token(auth_service: Any, token: TokenCase) -> None:
     from src.shared.exceptions import AuthenticationError
 
     with pytest.raises(AuthenticationError, match="^Invalid token"):
-        await auth_service.verify_token(token, "access")
+        await auth_service.verify_token(_token(token), "access")
 
 
 async def test_auth_service_wrong_algorithm(auth_service: Any) -> None:

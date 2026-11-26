@@ -15,12 +15,10 @@ Loader and deploy path (checked 2026-10-17): the root `trigger.config.ts` and
 `dirs: ["./src/trigger"]`, relative to the directory the Trigger CLI runs from.
 Run from the repo root, that is this tree (14 `.ts` files including `_lib/`).
 Run from `frontend/`, it is `frontend/src/trigger/`, which holds only
-`example.ts`. The deploy workflow `.github/workflows/trigger-deploy.yml` runs
-`pnpm dlx trigger.dev@4.4.6 deploy` from the repo root with no
-`working-directory`, so the root `src/trigger/` tree is what gets deployed. It
-triggers on pushes to `main` only (paths `src/trigger/**`, `trigger.config.ts`,
-`package.json`) and uses Node 20. Jobs are therefore deployed from `main`, not
-from `develop`; do not treat `frontend/src/trigger/` as a job location.
+`example.ts`. `pnpm trigger:deploy` run from the repo root deploys the root
+`src/trigger/` tree. No CI workflow deploys Trigger.dev tasks
+(`trigger-deploy.yml` was retired, GOO-480). Do not treat
+`frontend/src/trigger/` as a job location.
 
 ## Invalid patterns
 
@@ -62,6 +60,10 @@ policy live in `tests/trigger/` (Node built-in test runner, SDK mocked):
 node --experimental-transform-types --experimental-test-module-mocks \
   --test tests/trigger/*.test.mjs
 ```
+
+CI (`Require Trigger.dev test files`) and `run_local_ci.sh` fail when
+`tests/trigger/*.test.mjs` matches no file, because `node --test` would
+otherwise pass with zero tests.
 
 The backend client retries GET by default and never retries a POST unless the
 caller passes `{ idempotent: true }` (a read over POST, or an endpoint that

@@ -65,11 +65,7 @@ from src.api.quality import (
     quality_recommendations_router,
     user_behavior_router,
 )
-from src.api.realtime import (
-    realtime_quality_metrics_router,
-    realtime_status_router,
-    websocket_v2_router,
-)
+from src.api.realtime import realtime_status_router, websocket_v2_router
 from src.api.research import (
     chat_router,
     citations_router,
@@ -637,9 +633,8 @@ app.include_router(
 )  # Retrieval diagnostics endpoints
 app.include_router(websocket_v2_router)  # Enhanced WebSocket v2 routes
 app.include_router(realtime_status_router)  # Real-time document status API
-app.include_router(
-    realtime_quality_metrics_router, prefix="/api/v2"
-)  # Real-time quality metrics API
+# The realtime quality-metrics route (/api/v2/realtime/quality) is not
+# mounted: it streamed simulated scores and no client calls it (GOO-653).
 app.include_router(arxiv_router)  # ArXiv integration endpoints
 app.include_router(arxiv_papers_router)
 app.include_router(

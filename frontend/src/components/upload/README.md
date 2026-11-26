@@ -263,7 +263,7 @@ pnpm --dir frontend exec vitest run src/services/__tests__/uploadService.test.ts
 - React 18+
 - TypeScript 4.9+
 - Tailwind CSS
-- Heroicons
+- lucide-react
 - React Dropzone
 
 ## Contributing

@@ -51,12 +51,18 @@ const ALLOWED = new Set([
 describe('console payload scanner', () => {
   it.each([
     ["console.log('[Agent] Tool start:', tool, args);", ['args']],
-    ["console.log('[Agent] Tool end:', tool, result, { isError });", ['result']],
+    [
+      "console.log('[Agent] Tool end:', tool, result, { isError });",
+      ['result'],
+    ],
     ["console.warn('Malformed SSE line', dataLine, err);", ['dataLine']],
     ["console.log('[Chat] Switched to thread:', targetConv.title);", ['title']],
     ['console.log(`title is ${thread.title}`);', ['title']],
     ["console.log('needed:', confirmation);", ['confirmation']],
-    ["console.error('[Chat] Upload failed for', file.name, err);", ['file.name']],
+    [
+      "console.error('[Chat] Upload failed for', file.name, err);",
+      ['file.name'],
+    ],
     ["console.error('Upload failed', item.file.name);", ['file.name']],
     ["console.warn('bad upload', upload.fileName);", ['fileName']],
     ["console.warn('bad upload', filename);", ['filename']],
@@ -85,8 +91,86 @@ describe('console payload scanner', () => {
     "console.warn('frame', { title: 'redacted' });",
     "console.warn('guard', { empty: !content });",
     "console.log('upload', { uploadId: item.id, size: file.size });",
-    "console.log(`plain template, no file.name expression`);",
+    'console.log(`plain template, no file.name expression`);',
   ])('allows %s', (call) => {
+    const [{ args }] = consoleCalls(call);
+    expect(payloadReferences(args)).toEqual([]);
+  });
+
+  // GOO-728: a quote the scanner misread, or a bracket it could not match,
+  // used to hide every later call in the file.
+  it.each([
+    [
+      'an apostrophe in a block comment',
+      "console.log('a', /* don't */ x);\nconsole.log(payload);",
+    ],
+    [
+      'an apostrophe in a line comment',
+      "console.log('a', x); // don't\nconsole.log(payload);",
+    ],
+    [
+      'an apostrophe in a comment inside the call',
+      "console.log('a', // don't\n  x);\nconsole.log(payload);",
+    ],
+    [
+      'a regex containing a quote',
+      "console.log(/'/.test(s));\nconsole.log(payload);",
+    ],
+    [
+      'a regex with a quote in a class',
+      'console.log(s.replace(/["]/g, ""));\nconsole.log(payload);',
+    ],
+    ['an unbalanced call', 'console.log(`oops);\nconsole.log(payload);'],
+    [
+      'an unclosed comment in a call',
+      'console.log(a /* oops);\nconsole.log(payload);',
+    ],
+    [
+      'a long unbalanced call',
+      `console.log(f(${'x'.repeat(5_000)});\nconsole.log(payload);`,
+    ],
+    [
+      'a long balanced call',
+      `console.log(${'x'.repeat(5_000)});\nconsole.log(payload);`,
+    ],
+  ])('finds a later call after %s', (_shape, source) => {
+    const calls = consoleCalls(source);
+    const flagged = calls.filter(({ args }) =>
+      payloadReferences(args).includes('payload')
+    );
+    // The payload call is always on the last line, and only it is flagged.
+    expect(flagged.map((c) => c.line)).toEqual([source.split('\n').length]);
+  });
+
+  it.each([
+    ["console.log('a', /* don't */ payload);", ['payload']],
+    ["console.log(a /* don't */, payload);", ['payload']],
+    ["console.log(x, // don't\n  payload);", ['payload']],
+    ["console.log(/'/.test(s), payload);", ['payload']],
+    ['console.log(s.split(/"/), payload);', ['payload']],
+    ['console.log(n / 2, payload);', ['payload']],
+    ["console.log('unterminated\n, payload);", ['payload']],
+    [
+      "console[isProductionBuild ? 'warn' : 'log' + loggingLevelSuffixForThisCall](payload);",
+      ['payload'],
+    ],
+    ['console[\n  level\n](payload);', ['payload']],
+    ['console[levels[kind]](payload);', ['payload']],
+    ["console[']'.length ? 'log' : 'warn'](payload);", ['payload']],
+  ])('flags %s (GOO-728)', (call, names) => {
+    const [{ args }] = consoleCalls(call);
+    expect(payloadReferences(args)).toEqual(names);
+  });
+
+  it.each([
+    "console.log('x', /* the args */ id);",
+    // After an identifier a `/` is a division, so only comment handling
+    // keeps these words out.
+    'console.log(id /* not the payload */);',
+    'console.log(id // not the payload\n);',
+    "console.log('x', id); // log the payload",
+    'console.log(/title|query/.test(s));',
+  ])('ignores comments and regex text: %s', (call) => {
     const [{ args }] = consoleCalls(call);
     expect(payloadReferences(args)).toEqual([]);
   });
@@ -96,7 +180,7 @@ describe('console payload scanner', () => {
       '(x.title),(f({ y: 1 })), z'
     );
     expect(stripStringText(`'it\\'s args', "say \\"query\\""`)).toBe(
-      "'', \"\""
+      '\'\', ""'
     );
   });
 
@@ -108,8 +192,19 @@ describe('console payload scanner', () => {
     ['many calls on many lines', 'console.log(a);\n'.repeat(20_000)],
     ['unclosed templates', '`${'.repeat(20_000)],
     ['escapes', "'" + '\\a'.repeat(50_000)],
-    ['backslash and brace runs', '`' + '\\'.repeat(50_000) + '{'.repeat(20_000)],
+    [
+      'backslash and brace runs',
+      '`' + '\\'.repeat(50_000) + '{'.repeat(20_000),
+    ],
     ['name then whitespace', ('title' + ' '.repeat(50)).repeat(20_000)],
+    // GOO-728: each unbalanced call is rescanned from its own arguments.
+    ['unclosed comments in calls', 'console.log(/*'.repeat(20_000)],
+    ['unclosed templates in calls', 'console.log(`'.repeat(20_000)],
+    ['unclosed regex classes', 'console.log(/['.repeat(20_000)],
+    ['regex starts on one line', '(/['.repeat(50_000)],
+    ['unclosed quoted brackets', "console['".repeat(20_000)],
+    ['long bracket bodies', ('console[' + 'x'.repeat(200)).repeat(2_000)],
+    ['line comments in calls', 'console.log(//\n'.repeat(20_000)],
   ])(
     'stays linear on adversarial input: %s (CodeQL js/redos)',
     (_shape, hostile) => {
@@ -124,7 +219,7 @@ describe('console payload scanner', () => {
 
   it('reports the right line for each call', () => {
     expect(
-      consoleCalls("a;\nconsole.log(x);\n\nconsole.warn(y);").map((c) => c.line)
+      consoleCalls('a;\nconsole.log(x);\n\nconsole.warn(y);').map((c) => c.line)
     ).toEqual([2, 4]);
   });
 });

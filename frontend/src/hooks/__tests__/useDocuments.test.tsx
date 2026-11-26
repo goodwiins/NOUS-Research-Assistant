@@ -230,7 +230,9 @@ describe('useDocuments', () => {
       );
       const calledUrl = mockGet.mock.calls[0][0] as string;
       expect(calledUrl).toContain('page=1');
-      expect(calledUrl).toContain('page_size=20');
+      const calledQuery = new URL(calledUrl, 'http://localhost').searchParams;
+      expect(calledQuery.get('size')).toBe('20');
+      expect(calledQuery.has('page_size')).toBe(false);
     });
 
     it('refreshes with the latest page, page size, and filters synchronously', async () => {
@@ -257,7 +259,7 @@ describe('useDocuments', () => {
 
       const query = new URL(requestedUrl, 'http://localhost').searchParams;
       expect(query.get('page')).toBe('3');
-      expect(query.get('page_size')).toBe('40');
+      expect(query.get('size')).toBe('40');
       expect(query.get('search')).toBe('Exact Paper Title');
 
       await act(async () => {
@@ -454,12 +456,12 @@ describe('useDocuments', () => {
       });
 
       act(() => {
-        result.current.updateFilters({ file_types: ['pdf'] });
+        result.current.updateFilters({ file_type: 'pdf' });
       });
 
       expect(result.current.filters).toEqual({
         search_term: 'test',
-        file_types: ['pdf'],
+        file_type: 'pdf',
       });
     });
 
@@ -481,7 +483,7 @@ describe('useDocuments', () => {
 
       const query = new URL(requestedUrl, 'http://localhost').searchParams;
       expect(query.get('page')).toBe('1');
-      expect(query.get('page_size')).toBe('50');
+      expect(query.get('size')).toBe('50');
       expect(query.get('search')).toBe('Attention Is All You Need');
       expect(query.get('processing_status')).toBe('indexed');
     });
@@ -494,7 +496,7 @@ describe('useDocuments', () => {
       let secondRequestedUrl = '';
       act(() => {
         result.current.updateFilters({ search_term: 'transformers' });
-        result.current.updateFilters({ file_types: ['pdf'] });
+        result.current.updateFilters({ file_type: 'pdf' });
         secondRequestedUrl = mockGet.mock.calls[1]?.[0] as string;
       });
 
@@ -558,7 +560,7 @@ describe('useDocuments', () => {
 
       const query = new URL(requestedUrl, 'http://localhost').searchParams;
       expect(query.get('page')).toBe('4');
-      expect(query.get('page_size')).toBe('40');
+      expect(query.get('size')).toBe('40');
       expect(query.get('processing_status')).toBe('indexed');
     });
 
@@ -567,7 +569,7 @@ describe('useDocuments', () => {
 
       const { result } = renderHook(() => useDocuments({ autoFetch: false }));
       act(() => {
-        result.current.updateFilters({ file_types: ['pdf'] });
+        result.current.updateFilters({ file_type: 'pdf' });
       });
       mockGet.mockClear();
 
@@ -579,7 +581,7 @@ describe('useDocuments', () => {
 
       const query = new URL(requestedUrl, 'http://localhost').searchParams;
       expect(query.get('page')).toBe('1');
-      expect(query.get('page_size')).toBe('75');
+      expect(query.get('size')).toBe('75');
       expect(query.get('document_type')).toBe('pdf');
     });
   });

@@ -216,10 +216,8 @@ async def _invalidate(
     actor_role: str,
     event_id: UUID,
     kind: str,
-    edges: draft_release_service.ReleaseEdges | None,
 ) -> None:
-    """Write-order step 8 (GOO-307): stale the releases built on ``changed``.
-    ``edges``: the route's snapshot, confirmed under the lock (GOO-721)."""
+    """Write-order step 8 (GOO-307): stale the releases built on ``changed``."""
     await draft_release_service.invalidate_dependents(
         db,
         collection_id=_cid(context),
@@ -227,7 +225,7 @@ async def _invalidate(
         actor_id=actor_id,
         actor_role=actor_role,
         cause={"family": AGGREGATE_TYPE, "event_id": str(event_id), "kind": kind},
-        edges=edges,
+        edges=context.release_edges,
     )
 
 
@@ -512,7 +510,6 @@ async def create_version(
     claim_id: UUID,
     actor_id: UUID,
     data: ClaimVersionCreate,
-    release_edges: draft_release_service.ReleaseEdges | None = None,
 ) -> tuple[ClaimVersionResponse, bool]:
     """Append a reworded passage superseding the claim's tip (EDIT)."""
     key, fingerprint, replay = await _begin(
@@ -553,7 +550,6 @@ async def create_version(
         "editor",
         event_id,
         "claim.versioned",
-        release_edges,
     )
     await db.commit()
     await db.refresh(row)
@@ -694,7 +690,6 @@ async def link(
     claim_id: UUID,
     actor_id: UUID,
     data: ClaimLinkCreate,
-    release_edges: draft_release_service.ReleaseEdges | None = None,
 ) -> tuple[ClaimLinkResponse, bool]:
     """Append a link from the claim's tip version to evidence (EDIT)."""
     key, fingerprint, replay = await _begin(
@@ -802,7 +797,6 @@ async def link(
             "editor",
             event_id,
             "claim.linked",
-            release_edges,
         )
     await db.commit()
     await db.refresh(row)
@@ -962,7 +956,6 @@ async def assess(
     claim_id: UUID,
     actor_id: UUID,
     data: ClaimAssessmentCreate,
-    release_edges: draft_release_service.ReleaseEdges | None = None,
 ) -> tuple[ClaimAssessmentResponse, bool]:
     """An adjudicator's judgement of the tip version (ADJUDICATE only),
     citing its live links and their stance snapshots."""
@@ -1057,7 +1050,6 @@ async def assess(
             "adjudicator",
             event_id,
             "claim.assessed",
-            release_edges,
         )
     await db.commit()
     await db.refresh(row)
@@ -1313,11 +1305,10 @@ async def export_package(
             select(Document.id, Document.title).where(Document.id.in_(document_ids))
         )
     ).all():
-        if document_id not in pins:
-            # Two READ COMMITTED statements can disagree: export only the
-            # documents both reads saw instead of failing with a KeyError.
+        pin = pins.get(document_id)
+        if pin is None:  # two reads; one the pins read missed is skipped
             continue
-        source_hash, text_hash = pins[document_id]
+        source_hash, text_hash = pin
         documents.append(
             {
                 "id": str(document_id),

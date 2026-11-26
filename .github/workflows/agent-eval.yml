@@ -53,11 +53,11 @@ jobs:
       NEO4J_URI: ${{ secrets.EVAL_NEO4J_URI }}
       NEO4J_USER: ${{ secrets.EVAL_NEO4J_USER }}
       NEO4J_PASSWORD: ${{ secrets.EVAL_NEO4J_PASSWORD }}
-      DO_KB_ENABLED: "true"
-      DO_API_TOKEN: ${{ secrets.EVAL_DO_API_TOKEN }}
-      DO_KB_REGION: ${{ secrets.EVAL_DO_KB_REGION }}
-      DO_KB_PROJECT_ID: ${{ secrets.EVAL_DO_KB_PROJECT_ID }}
-      DO_KB_EMBEDDING_MODEL_UUID: ${{ secrets.EVAL_DO_KB_EMBEDDING_MODEL_UUID }}
+      # Mirrors live dev (infrastructure/helm/knowledge-graph-analytics/values-aws.yaml);
+      # change it when that value changes. Live BEDROCK_KB_ID is not mirrored:
+      # the eval has no AWS credentials, so do_kb_retrieve uses the local
+      # full-text fallback.
+      DO_KB_ENABLED: "false"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -95,7 +95,7 @@ jobs:
             python3 -m venv .venv
           fi
           .venv/bin/pip install -q -r requirements.txt -r requirements-ci.txt
-          # Same pins as requirements-test.txt (not installed here).
+          # These pins are installed only here.
           # rerunfailures: the sweep reruns live cases once. timeout: enforces
           # pytest.ini's `timeout = 300`, which is inert without the plugin, so
           # a hung live call (possibly hung twice now) cannot eat the 30m budget.
@@ -122,7 +122,7 @@ jobs:
         # live model behavior, this job goes red. (Per-PR the golden cases run
         # creds-free via AGENT_GOLDEN_REPLAY in test-pipeline.yml.)
         #
-        # --reruns 1: these cases call the live model, which is not
+        # One rerun per failed case: these cases call the live model, which is not
         # deterministic. From 2026-09-07 to 2026-11-09 the job failed 9 of 10
         # weeks, each time on 1-2 of 26 cases, and a DIFFERENT case most
         # weeks (writing_summarize, ingest_arxiv_id_only, retry_after_failed_search,
@@ -131,6 +131,8 @@ jobs:
         # noise passes. It can mask a regression that is itself probabilistic
         # (a case now failing 40% of the time passes ~84% of weeks), so the next
         # step annotates every rerun: green-with-reruns is a warning, not silence.
+        # It also writes the rerun count and case names to the job summary, so
+        # each run's summary page records the count for comparison across runs.
         # A rerun of the dataset sweep re-runs all of its examples and creates
         # a second LangSmith experiment under the same prefix.
         run: |
@@ -142,6 +144,7 @@ jobs:
           [ -f eval-junit.xml ] || exit 0
           python3 - <<'PY'
           import collections
+          import os
           import xml.etree.ElementTree as ET
           # pytest-rerunfailures 16.x writes each attempt as its own <testcase>
           # (no rerun element), so a rerun test appears more than once.
@@ -153,6 +156,13 @@ jobs:
           for name in reruns:
               print(f"::warning::Live eval case needed a rerun (possible drift): {name}")
           print(f"{len(reruns)} case(s) rerun")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("## Live eval reruns\n\n")
+              if reruns:
+                  summary.write(f"{len(reruns)} case(s) rerun:\n\n")
+                  summary.writelines(f"- `{name}`\n" for name in reruns)
+              else:
+                  summary.write("No case was rerun.\n")
           PY
 
       - name: Summary on failure

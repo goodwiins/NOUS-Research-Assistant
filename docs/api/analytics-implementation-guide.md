@@ -33,10 +33,9 @@ To apply it:
 ```bash
 cd /path/to/project/backend
 alembic upgrade head
-
-# Verify tables were created
-psql -h localhost -U postgres -d multimodal_rag -c "\dt analytics_*"
 ```
+
+**Amendment (2026-11-22, GOO-690):** the analytics dashboard backend was retired, and no migration creates the `analytics_*` tables, so the old `\dt analytics_*` verify step was removed. The table list below is historical.
 
 Key tables created:
 - `entity_analytics` - Entity metrics aggregations
@@ -915,8 +914,8 @@ services:
 # Check database connection
 psql -h localhost -U postgres -d multimodal_rag -c "SELECT 1;"
 
-# Check migration status
-psql -h localhost -U postgres -d multimodal_rag -c "\dt analytics_*"
+# Check migration status (from backend/)
+alembic current
 ```
 
 #### 2. Redis Connection Issues

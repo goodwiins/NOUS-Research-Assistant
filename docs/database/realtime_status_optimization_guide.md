@@ -356,6 +356,11 @@ If performance degrades after deployment:
    psql -h localhost -U postgres -d multimodal_rag_dev -f database/deployment/realtime_status_rollback.sql
    ```
 
+   > **Amendment (2026-11-22, GOO-690): do not run the command above.**
+   > `database/deployment/realtime_status_rollback.sql` was deleted. Alembic
+   > owns the schema: roll back with `cd backend && python -m alembic downgrade <revision>`,
+   > and only after reading that revision's `downgrade()`.
+
 ## Monitoring and Alerting
 
 ### Key Metrics to Monitor

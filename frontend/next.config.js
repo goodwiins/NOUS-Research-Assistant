@@ -40,7 +40,6 @@ const nextConfig = {
     optimizePackageImports: [
       'lucide-react',
       '@radix-ui/react-icons',
-      'lodash-es',
       'date-fns',
       'recharts',
     ],

@@ -3,6 +3,8 @@
 Examples:
   python -m scripts.backfill_bedrock_kb            # dry run: counts only
   python -m scripts.backfill_bedrock_kb --apply    # upload + mark pending
+  python -m scripts.backfill_bedrock_kb --prune    # count stale objects
+  python -m scripts.backfill_bedrock_kb --prune --apply  # remove and sync
 
 Stages every non-deleted document that has text and has not been settled by a
 Bedrock ingestion job, organization by organization. Staging
@@ -10,12 +12,15 @@ uploads ``{prefix}{org}/{doc}.txt`` plus its metadata sidecar, removes any
 legacy ``.pdf``/``.png`` object for that document and marks the row
 ``pending``. It never starts an ingestion job: the ``bedrock-kb-sync-tick``
 beat task does that, one job at a time. Re-runs are safe (staging overwrites
-the same keys). Prints counts only, never titles or content.
+the same keys). Prints counts only, never titles or content. The separate
+prune mode checks the configured S3 prefix against Postgres and starts an
+ingestion job after applying deletions.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 from dataclasses import dataclass
@@ -25,11 +30,14 @@ from sqlalchemy.orm import Session
 
 from src.models.document import Document
 from src.services.bedrock_sync import (
+    STAGE_WRITE_COLUMNS,
     StageOutcome,
     bedrock_sync_enabled,
     begin_stage_write,
     finish_stage_write,
+    get_bedrock_agent_client,
     not_indexed_clause,
+    prune_staged_objects,
     stage_document_sync,
 )
 
@@ -91,6 +99,15 @@ def backfill(
                     if document is None:
                         report.skipped += 1
                         continue
+                    db.refresh(
+                        document,
+                        attribute_names=STAGE_WRITE_COLUMNS,
+                        with_for_update=True,
+                    )
+                    if document.is_deleted:
+                        db.rollback()
+                        report.skipped += 1
+                        continue
                     write_token = begin_stage_write(document)
                     db.commit()  # durable before the upload starts
                     outcome = stage(db, document)
@@ -122,12 +139,31 @@ def backfill(
     return reports
 
 
+async def _prune(*, apply: bool) -> dict[str, Any]:
+    from src.core.database import AsyncSessionLocal, async_engine
+    from src.core.s3_client import S3StorageHelper
+    from src.tasks.bedrock_sync_tasks import tick_lock
+
+    async with async_engine.connect() as connection, tick_lock(connection) as acquired:
+        if not acquired:
+            raise RuntimeError("The Bedrock sync tick is active. Retry the prune.")
+        async with AsyncSessionLocal() as db:
+            return await prune_staged_objects(
+                db, get_bedrock_agent_client(), S3StorageHelper(), apply=apply
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Upload and mark documents pending (default is a dry run)",
+        help="Apply staging or pruning (default is a dry run)",
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Reconcile stale S3 objects instead of staging",
     )
     args = parser.parse_args()
     logging.basicConfig(
@@ -139,6 +175,10 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+    if args.prune:
+        print(asyncio.run(_prune(apply=args.apply)))
+        return
+
     from src.core.database import SessionLocal
 
     reports = backfill(SessionLocal, apply=args.apply)
