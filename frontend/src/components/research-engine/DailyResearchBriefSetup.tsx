@@ -101,9 +101,11 @@ export function DailyResearchBriefSetup({
       return;
     }
 
+    // The server compares the confirmation with the saved parameters exactly,
+    // so the question is sent as saved, not trimmed.
     const confirmation: DailyBriefScopeConfirmation = {
       confirmed: true,
-      research_question: researchQuestion.trim(),
+      research_question: researchQuestion,
       inclusion_criteria: inclusionCriteria,
       exclusion_criteria: exclusionCriteria,
       providers,

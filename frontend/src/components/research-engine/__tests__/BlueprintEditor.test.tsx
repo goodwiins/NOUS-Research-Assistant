@@ -582,6 +582,9 @@ describe('BlueprintEditor Daily Research Brief protocol flow', () => {
     await waitFor(() =>
       expect(researchProtocolService.createProtocol).toHaveBeenCalled()
     );
+    expect(vi.mocked(createBlueprint).mock.calls[0][1].parameters).toEqual(
+      expect.objectContaining({ research_question: '  What changed?  ' })
+    );
     expect(researchProtocolService.createQuestion).toHaveBeenCalledWith(
       'project-1',
       { question: 'What changed?', framework: {} }
@@ -805,6 +808,115 @@ describe('BlueprintEditor Daily Research Brief protocol flow', () => {
         blueprint_id: 'blueprint-3',
       })
     );
+    await waitFor(() =>
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    );
+  });
+
+  it('confirms the exact saved question so a padded brief question can start', async () => {
+    vi.mocked(getBlueprint).mockResolvedValue({
+      ...SAVED_BRIEF,
+      parameters: {
+        ...BRIEF_PARAMETERS,
+        research_question: '  What changed?  ',
+      },
+    });
+    vi.mocked(startRun).mockResolvedValue({ id: 'run-1' });
+
+    renderEditor();
+    const start = await screen.findByRole('button', { name: 'Start run' });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Confirm scope' }));
+    fireEvent.click(start);
+
+    expect(startRun).toHaveBeenCalledWith(
+      'blueprint-1',
+      expect.objectContaining({
+        scope_confirmation: expect.objectContaining({
+          research_question: '  What changed?  ',
+        }),
+      })
+    );
+  });
+
+  it('creates the protocol draft for a saved brief even when newer edits keep the editor unsaved', async () => {
+    let resolveSave: (
+      value: Awaited<ReturnType<typeof createBlueprint>>
+    ) => void = () => undefined;
+    vi.mocked(createBlueprint).mockReturnValue(
+      new Promise((resolve) => {
+        resolveSave = resolve;
+      })
+    );
+    vi.mocked(researchProtocolService.listProtocols).mockResolvedValue([]);
+    vi.mocked(researchProtocolService.createQuestion).mockResolvedValue(
+      questionRecord('What changed?', 'question-version-new')
+    );
+    vi.mocked(researchProtocolService.createProtocol).mockResolvedValue(
+      BRIEF_PROTOCOL as never
+    );
+
+    renderEditor();
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Notes' }), {
+      target: { value: 'Added while saving' },
+    });
+    await act(async () => resolveSave(savedBriefResponse('blueprint-2')));
+
+    await waitFor(() =>
+      expect(researchProtocolService.createProtocol).toHaveBeenCalled()
+    );
+    expect(researchProtocolService.createProtocol).toHaveBeenCalledWith(
+      'project-1',
+      expect.objectContaining({
+        blueprint_id: 'blueprint-2',
+        snapshot: EXPECTED_SNAPSHOT,
+      })
+    );
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+    expect(
+      screen.getByText('Save your changes before starting a run.')
+    ).toBeInTheDocument();
+  });
+
+  it('retries only the protocol step from the alert after a protocol failure', async () => {
+    vi.mocked(createBlueprint).mockResolvedValue(
+      savedBriefResponse('blueprint-2')
+    );
+    vi.mocked(researchProtocolService.listProtocols).mockResolvedValue([]);
+    vi.mocked(researchProtocolService.createQuestion).mockResolvedValue(
+      questionRecord('What changed?', 'question-version-new')
+    );
+    vi.mocked(researchProtocolService.createProtocol)
+      .mockRejectedValueOnce(
+        new APIErrorClass({
+          message: 'Protocol service unavailable',
+          status_code: 503,
+          type: 'http_error',
+        })
+      )
+      .mockResolvedValueOnce(BRIEF_PROTOCOL as never);
+
+    renderEditor();
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Protocol service unavailable'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() =>
+      expect(researchProtocolService.createProtocol).toHaveBeenCalledTimes(2)
+    );
+    expect(
+      vi.mocked(researchProtocolService.createProtocol).mock.calls[1][1]
+    ).toEqual(
+      expect.objectContaining({
+        question_version_id: 'question-version-new',
+        blueprint_id: 'blueprint-2',
+      })
+    );
+    expect(createBlueprint).toHaveBeenCalledTimes(1);
+    expect(researchProtocolService.createQuestion).toHaveBeenCalledTimes(1);
+    expect(getBlueprint).toHaveBeenCalledTimes(1);
     await waitFor(() =>
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     );

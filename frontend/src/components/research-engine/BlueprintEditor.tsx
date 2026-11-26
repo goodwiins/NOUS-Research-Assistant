@@ -118,6 +118,12 @@ export function BlueprintEditor({
   const [saving, setSaving] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A brief blueprint that saved but whose protocol step failed: Retry in the
+  // alert re-runs that step instead of reloading the blueprint.
+  const [failedProtocolSync, setFailedProtocolSync] = useState<{
+    blueprintId: string;
+    parameters: Record<string, unknown>;
+  } | null>(null);
 
   const fetchData = useCallback((): Promise<void> => {
     return loadProjectBlueprint(projectId)
@@ -237,6 +243,7 @@ export function BlueprintEditor({
     const parametersAtSave = globalParams;
     setSaving(true);
     setError(null);
+    setFailedProtocolSync(null);
     let savedBrief: BlueprintResponse | null = null;
     try {
       const cleanSteps = steps.map(({ _key, ...rest }) => rest);
@@ -252,9 +259,11 @@ export function BlueprintEditor({
         setTemplateSource(bp.template_source ?? null);
         setTopologyDirty(false);
         onBlueprintSaved?.(bp.id, bp.template_source ?? null);
-        if (bp.template_source === DAILY_BRIEF_TEMPLATE_SOURCE) {
-          savedBrief = bp;
-        }
+      }
+      // The server saved this brief even when newer local edits keep the
+      // editor dirty, so its protocol draft is still created.
+      if (bp?.template_source === DAILY_BRIEF_TEMPLATE_SOURCE) {
+        savedBrief = bp;
       }
     } catch {
       setError('Failed to save blueprint.');
@@ -265,18 +274,42 @@ export function BlueprintEditor({
     // its protocol draft waits for a save that has one.
     const question = parametersAtSave.research_question;
     if (savedBrief && typeof question === 'string' && question.trim()) {
-      try {
-        await syncDailyBriefProtocol(savedBrief.id, parametersAtSave);
-      } catch (err) {
-        setError(
-          getApiErrorMessage(
-            err,
-            'The brief was saved, but its protocol draft could not be created.'
-          )
-        );
-      }
+      await runProtocolSync(savedBrief.id, parametersAtSave);
     }
     setSaving(false);
+  };
+
+  const runProtocolSync = async (
+    blueprintId: string,
+    parameters: Record<string, unknown>
+  ): Promise<void> => {
+    try {
+      await syncDailyBriefProtocol(blueprintId, parameters);
+    } catch (err) {
+      setFailedProtocolSync({ blueprintId, parameters });
+      setError(
+        getApiErrorMessage(
+          err,
+          'The brief was saved, but its protocol draft could not be created.'
+        )
+      );
+    }
+  };
+
+  const handleRetry = async (): Promise<void> => {
+    setError(null);
+    if (failedProtocolSync) {
+      setFailedProtocolSync(null);
+      setSaving(true);
+      await runProtocolSync(
+        failedProtocolSync.blueprintId,
+        failedProtocolSync.parameters
+      );
+      setSaving(false);
+      return;
+    }
+    setLoading(true);
+    void fetchData();
   };
 
   const handleStartRun = async (): Promise<void> => {
@@ -403,7 +436,7 @@ export function BlueprintEditor({
           )}
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={handleSave}
@@ -444,13 +477,13 @@ export function BlueprintEditor({
             </button>
           )}
           {blueprint && isDailyBrief && topologyDirty ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="max-w-56 text-xs text-muted-foreground">
               Save your changes before starting a run.
             </p>
           ) : (
             blueprint &&
             !approvedProtocolVersionId && (
-              <p className="text-xs text-muted-foreground">
+              <p className="max-w-56 text-xs text-muted-foreground">
                 {isDailyBrief
                   ? "An independent supervisor must approve this brief's protocol before it can start."
                   : 'Approve a protocol version before starting a run.'}
@@ -474,11 +507,7 @@ export function BlueprintEditor({
             <p className="text-sm text-foreground">{error}</p>
             <button
               type="button"
-              onClick={() => {
-                setLoading(true);
-                setError(null);
-                void fetchData();
-              }}
+              onClick={() => void handleRetry()}
               className="mt-1 text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
             >
               Retry
