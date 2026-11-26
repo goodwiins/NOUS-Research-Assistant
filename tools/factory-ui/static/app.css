@@ -1,0 +1,205 @@
+/* Layout and components. Colours come from tokens.css only. */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+.brand {
+  font-weight: 600;
+}
+
+nav a {
+  margin-right: 16px;
+  text-decoration: none;
+  color: var(--muted);
+}
+
+nav a.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+main {
+  padding: 16px 24px 48px;
+  max-width: 1400px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 8px 0 12px;
+}
+
+h2 {
+  font-size: 16px;
+  margin: 24px 0 8px;
+}
+
+.banner {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--warn);
+  background: var(--warn-surface);
+}
+
+.asof,
+.title,
+.hold,
+.note {
+  color: var(--muted);
+}
+
+.title {
+  font-size: 12px;
+  max-width: 420px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 4px 0 12px;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+td.json,
+td.mono {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.v-pass {
+  color: var(--pass);
+}
+
+.v-changes {
+  color: var(--changes);
+}
+
+.v-inconclusive {
+  color: var(--inconclusive);
+}
+
+.v-escalated {
+  color: var(--escalated);
+}
+
+.v-warn {
+  color: var(--warn);
+}
+
+.v-active {
+  color: var(--accent);
+}
+
+.v-muted {
+  color: var(--muted);
+}
+
+.go {
+  font-size: 22px;
+}
+
+.error {
+  color: var(--changes);
+}
+
+details.artifact {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 6px 0;
+  padding: 4px 10px;
+}
+
+details.artifact > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.missing {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.controls {
+  margin: 6px 0;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.md pre,
+pre.raw,
+.md code {
+  background: var(--code-surface);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+}
+
+.md pre,
+pre.raw {
+  padding: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.md blockquote {
+  margin: 4px 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.panel {
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 8px 0;
+}

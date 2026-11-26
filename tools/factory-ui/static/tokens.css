@@ -1,0 +1,35 @@
+/* The only file with colour values. Every other file uses var(--...). */
+:root {
+  color-scheme: light dark;
+  --surface: #ffffff;
+  --surface-alt: #f4f5f7;
+  --text: #1c1f24;
+  --muted: #5d6470;
+  --border: #d9dce1;
+  --accent: #2459c7;
+  --pass: #1d7a3e;
+  --changes: #b4361d;
+  --inconclusive: #8a6d00;
+  --escalated: #7a3fb8;
+  --warn: #a64b00;
+  --warn-surface: #fff4e5;
+  --code-surface: #f0f1f4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #16181c;
+    --surface-alt: #1e2127;
+    --text: #e6e8eb;
+    --muted: #9aa1ad;
+    --border: #343842;
+    --accent: #7aa5ff;
+    --pass: #5cc483;
+    --changes: #ff8a70;
+    --inconclusive: #e2c04a;
+    --escalated: #c49bff;
+    --warn: #ffb066;
+    --warn-surface: #33260f;
+    --code-surface: #23262d;
+  }
+}

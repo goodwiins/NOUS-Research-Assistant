@@ -2,8 +2,13 @@
 
 ## Scope and sources of truth
 
-This directory currently contains the standalone
-[`tools/nous-playwright`](nous-playwright/) package. Its
+This directory holds standalone packages, each with its own rules below:
+[`tools/nous-playwright`](nous-playwright/) and
+[`tools/factory-ui`](factory-ui/).
+
+### nous-playwright
+
+The [`tools/nous-playwright`](nous-playwright/) package's
 [`README.md`](nous-playwright/README.md), `CODEX_HANDOFF.md`, package manifest,
 Playwright config, and `.gitignore` are the sources of truth. It is not the
 repository's older global E2E setup and does not inherit seeded credentials,
@@ -14,7 +19,31 @@ The package is pinned to Node 24 and `pnpm@10.18.2`; its isolated install uses
 so a discovery result and the earlier manual walkthrough are not an
 authenticated end-to-end pass.
 
-## Invalid patterns
+### factory-ui
+
+[`tools/factory-ui`](factory-ui/) is a read-only web UI for the SWE factory,
+which lives outside the repo. Its [`README.md`](factory-ui/README.md) is the
+source of truth. Python standard library only; no npm, no build step, no
+third-party package.
+
+- Read-only toward the factory directory: the server opens files read-only,
+  keeps its cache in memory and writes no file. No route, form or button
+  changes factory state.
+- It binds `127.0.0.1` only; nothing changes the bind address.
+- It runs only the helper commands in `factory_ui/runner.py` `ALLOWED`
+  (`doctor`, `budget`), and `runner.py` is the only module that imports
+  `subprocess`. A new command needs a new proof from the helper code that it
+  writes nothing and changes no state, recorded in the README.
+- No committed file holds a home path, a user or host name, a session id, a
+  key or a token. Test fixtures are invented and copy only the shape of the
+  real files; tests never touch `~/.claude`.
+- Colours live only in `static/tokens.css`; file text reaches the page only
+  through text nodes or `static/render.js`.
+- Verify with
+  `python3 -m pytest tools/factory-ui/tests --confcutdir=tools/factory-ui/tests -q -p no:cacheprovider --no-cov`
+  from the repository root. CI does not run these tests.
+
+## Invalid patterns (nous-playwright)
 
 - Keep this package standalone. Do not add its private auth/session or runtime
   artifacts to the root E2E suite, root lockfile, or a commit without an
@@ -38,7 +67,7 @@ authenticated end-to-end pass.
   walkthrough as proof of authenticated persistence, citation, approval,
   reload, or live API behavior. Preserve one worker and zero automatic retries when the real test is authorized.
 
-## Required workflow
+## Required workflow (nous-playwright)
 
 Before editing, read the package README and handoff, then inspect its own
 config and test consumers. Keep the install boundary isolated and use the
@@ -49,7 +78,7 @@ privately. If auth or a live target is unavailable, finish static/discovery
 checks and report the live run as blocked rather than inventing credentials or
 a passing result.
 
-## Verification
+## Verification (nous-playwright)
 
 The only offline structural check for this package is test discovery, run from
 `tools/nous-playwright` with its isolated dependencies installed:
