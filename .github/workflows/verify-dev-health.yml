@@ -10,6 +10,9 @@ name: Verify Dev Health
 # old pod answering. The probe therefore also compares /health git_sha (dev
 # sets HEALTH_EXPOSE_BUILD_SHA) with backend.image.sourceSha in values-aws.yaml
 # on develop, failing once the values file is older than --grace-minutes.
+# A failed wave-1 migration Job (it retries up to 2 times inside its 10 min
+# deadline) blocks wave 2, so it surfaces here as that build mismatch after
+# the 20 min grace, and the error line names the migration Job.
 # The gate is schedule-only; it reports, it does not block releases.
 on:
   schedule:

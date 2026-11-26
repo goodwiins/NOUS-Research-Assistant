@@ -6,8 +6,10 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  # A normal resource participates in ApplyOutOfSyncOnly. Retain completion
-  # until the next config/image identity; TTL would cause self-heal to rerun it.
+  # A normal resource participates in ApplyOutOfSyncOnly. The name hashes the
+  # image, the DB settings and the static pod settings; non-DB backend.env flags
+  # are deliberately excluded. Retain completion until the next identity; TTL
+  # would cause self-heal to rerun it.
   name: {{ printf "%s-migrate-%s" (.Release.Name | trunc 20 | trimSuffix "-") ($pod | sha256sum | trunc 32) }}
   annotations:
     argocd.argoproj.io/sync-wave: "1"
@@ -15,7 +17,7 @@ metadata:
     {{- include "knowledge-graph-analytics.labels" . | nindent 4 }}
     app.kubernetes.io/component: migrations
 spec:
-  backoffLimit: 0
+  backoffLimit: 2
   activeDeadlineSeconds: 600
   template:
     {{- $pod | nindent 4 }}

@@ -368,7 +368,13 @@ spec:
 {{- end }}
 {{- end }}
 
-{{/* Hash the exact immutable Job pod definition, including template defaults. */}}
+{{/*
+Hash the exact immutable Job pod definition, including template defaults.
+The identity is the image, the DB settings and the static pod settings. The
+pod carries only the DB entries of backend.env, because Alembic get_url()
+reads only DATABASE_URL and SUPABASE_DB_URL. Non-DB flags are deliberately
+excluded, so flipping one neither reruns Alembic nor changes the Job.
+*/}}
 {{- define "knowledge-graph-analytics.migrationPod" -}}
 metadata:
   {{- if .Values.backend.image.sourceSha }}
@@ -397,8 +403,16 @@ spec:
       command: ["alembic", "upgrade", "heads"]
       envFrom:
         {{- toYaml .Values.backend.envFrom | nindent 8 }}
+      {{- $dbEnv := list }}
+      {{- range .Values.backend.env }}
+      {{- if has .name (list "DATABASE_URL" "SUPABASE_DB_URL") }}
+      {{- $dbEnv = append $dbEnv . }}
+      {{- end }}
+      {{- end }}
+      {{- with $dbEnv }}
       env:
-        {{- include "knowledge-graph-analytics.mergedEnv" (dict "base" .Values.backend.env) | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       resources:
         requests:
           cpu: 100m

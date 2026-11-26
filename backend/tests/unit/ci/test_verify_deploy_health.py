@@ -156,8 +156,14 @@ def _healthy_with(sha: str) -> Response:
     return (200, ('{"status":"healthy","git_sha":"%s"}' % sha).encode())
 
 
-def _check(url: str, *, age_seconds: float, grace_minutes: float = 20) -> bool:
-    lines: list[str] = []
+def _check(
+    url: str,
+    *,
+    age_seconds: float,
+    grace_minutes: float = 20,
+    lines: list[str] | None = None,
+) -> bool:
+    lines = [] if lines is None else lines
     ok = health.check_build(
         url,
         expected_sha=SHA_A,
@@ -192,6 +198,19 @@ def test_build_check_fails_a_mismatch_after_the_grace_window(
     url, script = server
     script.responses = [_healthy_with(SHA_B)]
     assert _check(url, age_seconds=21 * 60) is False
+
+
+def test_build_check_names_the_migration_job_after_the_grace_window(
+    server: tuple[str, _Script],
+) -> None:
+    url, script = server
+    script.responses = [_healthy_with(SHA_B)]
+    lines: list[str] = []
+    assert _check(url, age_seconds=21 * 60, lines=lines) is False
+    assert any(
+        line.startswith("::error::") and "migrate-*" in line and "migration Job" in line
+        for line in lines
+    )
 
 
 def test_build_check_fails_a_mismatch_when_the_values_file_is_undated(

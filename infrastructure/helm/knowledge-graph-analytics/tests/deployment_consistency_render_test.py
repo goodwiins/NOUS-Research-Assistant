@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Iterator
@@ -63,9 +64,15 @@ class DeploymentConsistency(unittest.TestCase):
         self.assertEqual(wave, 1, "secrets and service accounts must sync first")
         self.assertNotIn("argocd.argoproj.io/hook", job["metadata"]["annotations"])
         self.assertNotIn("ttlSecondsAfterFinished", job["spec"])
-        self.assertEqual(job["spec"]["backoffLimit"], 0)
+        self.assertEqual(job["spec"]["backoffLimit"], 2)
+        self.assertEqual(job["spec"]["activeDeadlineSeconds"], 600)
         migration = job["spec"]["template"]["spec"]["containers"][0]
         self.assertEqual(migration["command"], ["alembic", "upgrade", "heads"])
+        migration_env = migration.get("env") or []
+        self.assertLessEqual(
+            {e["name"] for e in migration_env}, {"DATABASE_URL", "SUPABASE_DB_URL"}
+        )
+        self.assertIn({"name": "SUPABASE_DB_URL", "value": ""}, migration_env)
         consumers = []
         for doc, pod in pod_specs(docs):
             component = doc["metadata"]["labels"].get("app.kubernetes.io/component")
@@ -91,10 +98,33 @@ class DeploymentConsistency(unittest.TestCase):
         )
 
     def test_job_identity_changes_with_image_and_config(self) -> None:
+        def migration_job(*extra: str) -> dict[str, Any]:
+            return next(d for d in render(*extra) if d["kind"] == "Job")
+
         def name(*extra: str) -> str:
-            return next(
-                str(d["metadata"]["name"]) for d in render(*extra) if d["kind"] == "Job"
-            )
+            return str(migration_job(*extra)["metadata"]["name"])
+
+        aws_env = yaml.safe_load((CHART / "values-aws.yaml").read_text())["backend"][
+            "env"
+        ]
+
+        def with_env(entry_name: str, value: str) -> dict[str, Any]:
+            """Render with one backend.env entry edited.
+
+            ``--set backend.env[N]`` replaces the whole list, so the override is
+            the full AWS list in an extra values file.
+            """
+            env = [dict(e) for e in aws_env]
+            matches = [e for e in env if e["name"] == entry_name]
+            self.assertEqual(len(matches), 1, entry_name)
+            self.assertNotEqual(matches[0]["value"], value)
+            matches[0]["value"] = value
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".yaml", encoding="utf-8"
+            ) as override:
+                yaml.safe_dump({"backend": {"env": env}}, override)
+                override.flush()
+                return migration_job("-f", override.name)
 
         original = name()
         self.assertEqual(original, name())
@@ -108,14 +138,15 @@ class DeploymentConsistency(unittest.TestCase):
         self.assertNotEqual(
             original, name("--set", "backend.image.digest=sha256:" + "a" * 64)
         )
+        flag = next(e for e in aws_env if e["name"] == "AGENT_FAST_PATH_ENABLED")
+        flipped = with_env(
+            "AGENT_FAST_PATH_ENABLED", "false" if flag["value"] == "true" else "true"
+        )
+        self.assertEqual(original, flipped["metadata"]["name"])
+        self.assertEqual(job, flipped, "non-DB flags must not change the Job")
         self.assertNotEqual(
             original,
-            name(
-                "--set",
-                "backend.env[0].name=ENVIRONMENT",
-                "--set",
-                "backend.env[0].value=changed",
-            ),
+            with_env("SUPABASE_DB_URL", "postgresql://changed")["metadata"]["name"],
         )
 
     def test_unique_env_and_synthetic_override_precedence(self) -> None:
