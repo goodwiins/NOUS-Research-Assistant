@@ -17,11 +17,33 @@ over what the caller would have done once it finishes (GOO-698):
 * it runs ``on_cancel(result)`` (the upload's orphan delete), or logs the
   work's exception, instead of leaving it as "Task exception was never
   retrieved";
-* with ``guard_session``, the Session is marked abandoned: a later commit on
-  it raises ``AbandonedSessionError``, ``get_db_sync`` leaves it open instead
-  of closing it under the thread, and the thread rolls it back and closes it
-  when it is done. Closing it under the thread used to drop the work done so
-  far while the rest of it went on in a fresh transaction and could commit.
+* with ``guard_session``, the Session is marked abandoned: ``get_db_sync``
+  leaves it open instead of closing it under the thread, and the thread rolls
+  it back and closes it when it is done. Closing it under the thread used to
+  drop the work done so far while the rest of it went on in a fresh
+  transaction and could commit.
+
+What an abandoned thread can still commit (GOO-766). A commit is refused at
+two points: when it starts (``before_commit``), and again right before the
+DBAPI COMMIT is sent (the engine ``commit`` event, for every commit the
+offloaded thread issues, after commit's own flush). The second check and the
+abandon decide under one lock, so once the abandon is decided no COMMIT is
+started from the thread. A COMMIT the gate admitted before the abandon is
+already on its way to the database and cannot be called back: that write may
+land, and the abandon logs a warning saying so. This is the only way an
+abandoned thread's write lands.
+
+Scope of the gate (GOO-783). The two checks are keyed differently:
+
+* ``before_commit`` is per Session: it refuses any commit on the Session
+  passed as ``guard_session`` once it is abandoned, from whatever thread.
+* The engine ``commit`` gate is per thread: it reads the ``_Handoff`` stored
+  in a thread-local (``_offloaded``) by the offloaded call's own thread, and
+  applies to every COMMIT that thread sends on any connection, whether it
+  comes from the guarded Session or another one. A COMMIT sent from a
+  different thread (work the offloaded function hands to its own pool, say)
+  carries no handoff and is not gated: only the ``before_commit`` check on
+  the guarded Session covers it.
 
 Whether the thread is abandoned or still returns its result to the caller is
 decided under one lock (``_Handoff``), so exactly one side does the cleanup.
@@ -34,6 +56,7 @@ import threading
 from typing import Any, Callable, Optional, Tuple, TypeVar
 
 from sqlalchemy import event
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session
 
@@ -44,6 +67,11 @@ _T = TypeVar("_T")
 _DEFAULT_MAX_WAIT_SECONDS = 30.0
 _MAX_WAIT_ENV = "THREAD_OFFLOAD_CANCEL_MAX_WAIT_SECONDS"
 _ABANDONED_KEY = "thread_offload.abandoned"
+
+# The _Handoff of the guarded call this thread is running, if any. The commit
+# gate reads it: the engine ``commit`` event knows the connection and the
+# thread, not the Session.
+_offloaded = threading.local()
 
 
 class AbandonedSessionError(InvalidRequestError):
@@ -61,10 +89,39 @@ def session_is_abandoned(session: Session) -> bool:
 @event.listens_for(Session, "before_commit")
 def _refuse_abandoned_commit(session: Session) -> None:
     if session_is_abandoned(session):
-        raise AbandonedSessionError(
-            "refusing to commit: the request that owned this Session was "
-            "cancelled and stopped waiting for this thread"
-        )
+        raise AbandonedSessionError(_REFUSAL)
+
+
+_REFUSAL = (
+    "refusing to commit: the request that owned this Session was "
+    "cancelled and stopped waiting for this thread"
+)
+
+
+@event.listens_for(Engine, "commit")
+def _gate_abandoned_commit(_connection: Connection) -> None:
+    """Last check before the DBAPI COMMIT of a guarded offloaded call.
+
+    The abandon may land after ``before_commit`` passed, while commit flushes
+    (GOO-766). Roll back on the driver connection before refusing: SQLAlchemy
+    marks the transaction inactive when this event raises, so closing the
+    Session would no longer roll it back, and the pool would skip its reset
+    and hand the open transaction to the next checkout."""
+    handoff: Optional[_Handoff] = getattr(_offloaded, "handoff", None)
+    if handoff is not None and not handoff.admit_commit():
+        try:
+            _connection.dialect.do_rollback(_connection.connection)
+        except Exception:
+            logger.warning("rolling back a refused commit failed", exc_info=True)
+            _connection.invalidate()  # never return that connection to the pool
+        raise AbandonedSessionError(_REFUSAL)
+
+
+@event.listens_for(Session, "after_commit")
+def _commit_landed(_session: Session) -> None:
+    handoff: Optional[_Handoff] = getattr(_offloaded, "handoff", None)
+    if handoff is not None:
+        handoff.commit_done()
 
 
 def _default_max_wait() -> float:
@@ -86,7 +143,14 @@ class _Handoff:
         self._lock = threading.Lock()
         self._finished = False
         self._abandoned = False
+        self._committing = False
+        self._admitted = False
         self._session = guard_session
+        # Set when the abandon found a COMMIT already admitted (in flight).
+        self.abandoned_mid_commit = False
+        # Set when any COMMIT was admitted before the abandon was decided,
+        # in flight or already done: the only writes an abandon may let land.
+        self.admitted_before_abandon = False
 
     def abandon(self) -> bool:
         """Caller side: give the outcome to the thread, unless it is done."""
@@ -96,7 +160,24 @@ class _Handoff:
             self._abandoned = True
             if self._session is not None:
                 self._session.info[_ABANDONED_KEY] = True
+            self.abandoned_mid_commit = self._committing
+            self.admitted_before_abandon = self._admitted
             return True
+
+    def admit_commit(self) -> bool:
+        """Thread side, right before COMMIT is sent: False once abandoned."""
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._committing = True
+            self._admitted = True
+            return True
+
+    def commit_done(self) -> None:
+        """Thread side: the admitted COMMIT returned (``after_commit``, or the
+        work ended); an abandon from now on finds none in flight."""
+        with self._lock:
+            self._committing = False
 
     def finish(self) -> bool:
         """Thread side: True if the caller abandoned us and we must clean up."""
@@ -151,13 +232,18 @@ def _start(
     handoff = _Handoff(guard_session)
 
     def _run() -> Any:
+        _offloaded.handoff = handoff if guard_session is not None else None
         try:
             result = fn(*args, **kwargs)
         except BaseException as error:
+            _offloaded.handoff = None
+            handoff.commit_done()
             if handoff.finish():
                 _finish_abandoned(name, None, error, on_cancel, guard_session)
                 return None  # nobody awaits it: never leave it unretrieved
             raise
+        _offloaded.handoff = None
+        handoff.commit_done()  # a COMMIT that raised never reached after_commit
         if handoff.finish():
             _finish_abandoned(name, result, None, on_cancel, guard_session)
             return None
@@ -199,9 +285,20 @@ async def _wait_through_cancellation(
         remaining = deadline - loop.time()
         if remaining <= 0:
             if handoff.abandon():
+                if handoff.abandoned_mid_commit:
+                    logger.warning(
+                        "abandoned an offloaded call whose COMMIT was already "
+                        "admitted; that write may still land"
+                    )
                 return True, True
             # The thread returned just now; its result reaches the loop soon.
+            # Wait for it here: with a zero bound, looping back would spin
+            # without yielding, and the result could never arrive (GOO-766).
             deadline = loop.time() + max_wait
+            try:
+                await asyncio.wait({future})
+            except asyncio.CancelledError:
+                pass  # a further cancel: the result is still on its way
             continue
         try:
             await asyncio.wait({future}, timeout=remaining)
@@ -228,7 +325,9 @@ async def to_thread_finish_on_cancel(
     thread is abandoned and does all of that itself when it finishes.
 
     Pass the request's Session as ``guard_session`` when ``fn`` uses it, so an
-    abandoned thread can never commit on it and is the one to close it.
+    abandoned thread is the one to close it and starts no COMMIT once the
+    abandon is decided. A COMMIT already admitted at that moment may still
+    land, and is logged (see the module docstring).
 
     Without a cancellation it behaves exactly like ``asyncio.to_thread``.
     """

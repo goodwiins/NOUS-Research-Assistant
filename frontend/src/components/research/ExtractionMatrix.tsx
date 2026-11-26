@@ -1,6 +1,7 @@
 'use client';
 
 import { toCsv } from '@/utils/csv';
+import { extractionCellText } from '@/utils/extractionCellText';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Download, Pencil, Play, Trash2, X } from 'lucide-react';
 import type {
@@ -333,7 +334,7 @@ export function ExtractionMatrix({
         const cell = matrix.cells.find(
           (c) => c.document_id === doc.id && c.column_name === col.name
         );
-        return cell?.value ?? '';
+        return extractionCellText(cell?.value);
       });
       return [doc.title, ...docCells];
     });
@@ -618,7 +619,7 @@ export function ExtractionMatrix({
                               </span>
                             ) : (
                               <span className="flex-1">
-                                {cell?.value ?? ''}
+                                {extractionCellText(cell?.value)}
                               </span>
                             )}
                             {cell?.stale && (

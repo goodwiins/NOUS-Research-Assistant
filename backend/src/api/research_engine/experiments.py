@@ -25,6 +25,7 @@ from src.schemas.research_engine import (
     FigureResponse,
     RunManifestV2Response,
 )
+from src.services.research import draft_release_service
 from src.services.research_engine import experiment_service
 from src.services.research_engine.project_access import (
     ResearchAction,
@@ -114,7 +115,9 @@ async def register_figure_route(
     db: AsyncSession = Depends(get_db),
 ) -> FigureResponse:
     user_id = cast(UUID, current_user.id)
-    context = await resolve_project(db, project_id, user_id, ResearchAction.EDIT)
+    context = await draft_release_service.resolve_for_staling(
+        db, project_id, user_id, ResearchAction.EDIT
+    )
     row, replayed = await experiment_service.register_figure(db, context, user_id, body)
     if replayed:
         response.status_code = 200

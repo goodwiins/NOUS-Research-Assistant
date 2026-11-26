@@ -10,7 +10,7 @@ import {
   useChatRuntimeAdapter,
   type ChatRuntimeProps,
 } from '@nous/chat-runtime';
-import { NousToolUIs } from './toolUIs';
+import { NOUS_TOOLS_CONFIG } from './toolUIs';
 
 export interface ChatRuntimeProviderProps extends ChatRuntimeProps {
   children: ReactNode;
@@ -27,8 +27,7 @@ export function ChatRuntimeProvider({
     })
   );
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <NousToolUIs />
+    <AssistantRuntimeProvider runtime={runtime} config={NOUS_TOOLS_CONFIG}>
       {children}
     </AssistantRuntimeProvider>
   );

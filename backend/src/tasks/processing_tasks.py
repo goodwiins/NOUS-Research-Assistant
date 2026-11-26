@@ -27,7 +27,9 @@ from src.models.graph import EntityType as GraphEntityType
 from src.models.graph import ExtractionMethod as GraphExtractionMethod
 from src.models.graph import RelationshipType as GraphRelationshipType
 from src.models.processing import JobStatus, JobType, ProcessingJob
+from src.services.bedrock_sync import STAGE_WRITE_COLUMNS
 from src.services.bedrock_sync import WRITE_SATELLITE as BEDROCK_WRITE_SATELLITE
+from src.services.bedrock_sync import StageOutcome as BedrockStageOutcome
 from src.services.bedrock_sync import (
     bedrock_sync_enabled,
     begin_stage_write,
@@ -714,6 +716,9 @@ def process_document_ingestion(self, job_id: str):
             # Recorded durably first: if the document is deleted while the
             # upload is in flight, the stopped handler re-queues its removal,
             # and if this worker dies instead the queue tick does.
+            db.refresh(
+                document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
+            )
             bedrock_token = begin_stage_write(document)
             commit_if_active()
             remote_writes.add("bedrock_kb")
@@ -1071,11 +1076,16 @@ def generate_embeddings(self, job_id: str):
 
         if bedrock_sync_enabled():
             # Staged, not indexed: the Bedrock queue tick owns completion.
-            write_token = begin_stage_write(document)
-            db.commit()  # durable before the upload starts
-            outcome = stage_document_sync(db, document)
-            finish_stage_write(document, write_token)
-            db.commit()
+            db.refresh(
+                document, attribute_names=STAGE_WRITE_COLUMNS, with_for_update=True
+            )
+            outcome = BedrockStageOutcome.SKIPPED
+            if not document.is_deleted:
+                write_token = begin_stage_write(document)
+                db.commit()  # durable before the upload starts
+                outcome = stage_document_sync(db, document)
+                finish_stage_write(document, write_token)
+                db.commit()
             result = {"status": outcome.value, "backend": "bedrock_kb"}
             job.complete_job(result=result)
             db.commit()
@@ -1193,6 +1203,16 @@ def index_in_graph(self, job_id: str):
         db.close()
 
 
+# Private ProcessingJob.result key the KG batch dispatcher sets once its
+# per-document group is published. retry_job() -> RETRYING clears it.
+_KG_FANOUT_PUBLISHED_KEY = "_kg_fanout_published"
+_KG_DISPATCHER_LOST_MESSAGE = (
+    "KG batch dispatcher worker was lost before batch fanout was confirmed; "
+    "an explicit retry is required"
+)
+_KG_DISPATCHER_LOST_ERROR_TYPE = "DispatcherWorkerLost"
+
+
 def _skip_if_terminal_under_lock(db: Any, job: Any, job_id: str) -> dict | None:
     """Re-read ``job`` under a row lock; return a skip result if it is terminal.
 
@@ -1249,17 +1269,36 @@ def kg_extract_entities_job(self, job_id: str, document_index: int | None = None
         if skipped is not None:
             return skipped
         if document_index is None:
-            # The dispatcher has already published its document tasks. A late
-            # broker ack must not publish a second copy of the batch.
+            # A RUNNING batch is a second dispatcher delivery. A message with
+            # another task id is a separate duplicate (say a reconciler
+            # re-enqueue) while the owner may still be publishing: skip it.
+            # For the owner's own redelivery, the fanout marker written after
+            # the publish, or a child checkpoint, proves the document tasks
+            # exist; then a late broker ack must not publish a second copy.
+            # Without either the worker died between start_job and the
+            # publish, possibly mid-publish, so fail honestly under the lock
+            # and require an explicit retry rather than replay or drop it.
             if (
                 job.status == JobStatus.RUNNING
                 and len((job.parameters or {}).get("document_ids", [])) > 1
             ):
-                return {
-                    "status": "running",
-                    "job_id": job_id,
-                    "skipped": "duplicate_delivery",
-                }
+                dispatch_state = job.result or {}
+                if (
+                    job.celery_task_id != self.request.id
+                    or dispatch_state.get(_KG_FANOUT_PUBLISHED_KEY)
+                    or dispatch_state.get("_kg_document_results")
+                ):
+                    return {
+                        "status": "running",
+                        "job_id": job_id,
+                        "skipped": "duplicate_delivery",
+                    }
+                job.fail_job(
+                    _KG_DISPATCHER_LOST_MESSAGE,
+                    error_type=_KG_DISPATCHER_LOST_ERROR_TYPE,
+                )
+                db.commit()
+                return {"status": "failed", "job_id": job_id}
             # retry_job() leaves result intact. Its per-document checkpoints
             # belong to the previous attempt and must not skip this one.
             if job.status == JobStatus.RETRYING:
@@ -1291,6 +1330,22 @@ def kg_extract_entities_job(self, job_id: str, document_index: int | None = None
                     for index in range(batch_total_docs)
                 ]
             ).apply_async()
+            # Record the fanout under the row lock, merged with any child
+            # checkpoint already written. A terminal job keeps its final result.
+            # The group is already published, so a failed write must not fail
+            # the batch; a later redelivery falls back to child checkpoints.
+            try:
+                db.refresh(job, with_for_update=True)
+                if job.status not in _TERMINAL_PROCESSING_STATUSES:
+                    fanout_state = dict(job.result or {})
+                    fanout_state[_KG_FANOUT_PUBLISHED_KEY] = True
+                    job.result = fanout_state
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Job %s: could not record KG batch fanout after publish", job_id
+                )
             return {"status": "running", "job_id": job_id}
 
         if document_index is not None:

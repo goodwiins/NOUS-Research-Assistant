@@ -1289,3 +1289,45 @@ def test_graph_acknowledgement_with_single_connection_pool(
                 .get("pending_satellite_writes", {})
                 .get("graph")
             )
+
+
+@pytest.mark.parametrize("stage_crashes", [False, True])
+def test_late_bedrock_upload_settles_only_its_own_token(
+    stubbed: pytest.MonkeyPatch, stage_crashes: bool
+) -> None:
+    """Both compensation calls in process_document_ingestion need bedrock_token.
+
+    Focus: pytest -q backend/tests/unit/tasks/test_ingestion_stage_guard_postgres.py
+    -k late_bedrock_upload (with ORCHESTRATION_TEST_DATABASE_URL).
+    """
+    from src.services import bedrock_sync
+    from src.services.documents.satellite_state import begin_write, pending_writes
+
+    stubbed.setattr(pt.settings, "BEDROCK_KB_ID", "KBID")
+    stubbed.setattr(pt.settings, "BEDROCK_KB_DATA_SOURCE_ID", "DSID")
+    with _ingestion() as env:
+
+        def delete_during_stage(db: Session, doc: Document) -> None:
+            with env.Session() as other:
+                current = other.get(Document, env.doc_id)
+                tokens = pending_writes(current, bedrock_sync.WRITE_SATELLITE)
+                assert len(tokens) == 1
+                assert "other-writer" not in tokens
+                begin_write(current, bedrock_sync.WRITE_SATELLITE, "other-writer")
+                current.soft_delete()
+                other.commit()
+            if stage_crashes:
+                raise RuntimeError("stage crashed after the remote write")
+
+        stubbed.setattr(pt, "stage_document_sync", delete_during_stage)
+        result = _run(env, stubbed)
+        if stage_crashes:
+            assert result.failed()
+        else:
+            assert result.get()["skipped"] == "deleted"
+        with env.Session() as check:
+            doc = check.get(Document, env.doc_id)
+            assert set(pending_writes(doc, bedrock_sync.WRITE_SATELLITE)) == {
+                "other-writer"
+            }
+            assert doc.do_kb_sync_status == "pending"

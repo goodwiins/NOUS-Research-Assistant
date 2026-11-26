@@ -207,13 +207,13 @@ def test_each_probe_writes_to_step_summary() -> None:
 
 
 def test_install_step_annotates_outcome_in_summary() -> None:
-    """The probe-deps install writes its own outcome line so a failed install is
-    visible in the record and readers know the probes below are unreliable."""
+    """The probe-deps install blocks and writes its own outcome line, so a failed
+    install fails the job at its root cause instead of in the probes below."""
     step = _step_named("Install backend requirements (for execution probes)")
     assert "pip install --build-constraint" in (step.get("run") or "")
-    assert step.get("continue-on-error") is True, (
-        "install must stay advisory (continue-on-error: true) so a dependency "
-        "hiccup never fails the blocking static guard that already ran"
+    assert "continue-on-error" not in step, (
+        "the blocking probes below need these dependencies, so a failed install "
+        "must fail the job here rather than be masked"
     )
     assert "GITHUB_STEP_SUMMARY" in (
         step.get("run") or ""

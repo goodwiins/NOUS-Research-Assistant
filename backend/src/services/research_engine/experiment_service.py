@@ -806,6 +806,7 @@ async def register_figure(
                 "event_id": str(result.event.id),
                 "kind": "figure.registered",
             },
+            edges=context.release_edges,
         )
     await db.commit()
     await db.refresh(row)

@@ -425,7 +425,8 @@ class SearchAnalyticsApiService {
           )
         ).map(([type, count]) => toType(type, count)),
         totalSearches: requireNumber(analytics.total_searches, 'total_searches'),
-        avgResponseTimeMs: requireNumber(
+        // GOO-761: null when no search in the window was timed.
+        avgResponseTimeMs: nullableNumber(
           analytics.average_search_time_ms,
           'average_search_time_ms'
         ),

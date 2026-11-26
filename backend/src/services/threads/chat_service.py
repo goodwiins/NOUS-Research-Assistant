@@ -253,8 +253,12 @@ class ChatService:
         search_query: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> Tuple[List[Conversation], int]:
+    ) -> Optional[Tuple[List[Conversation], int]]:
         """List conversations in a workspace.
+
+        Returns ``None`` when the workspace was not found or is not
+        accessible to ``user_id`` (router callers map it to 404); an
+        accessible workspace with no conversations returns ``([], 0)``.
 
         Delegates with ``order_pinned_first=True`` — this class's pre-4.3
         ordering (pinned conversations float to the top). The router-inline
@@ -271,7 +275,7 @@ class ChatService:
             order_pinned_first=True,
         )
         if result is None:
-            return [], 0
+            return None
         conversations, total, _counts = result
         return conversations, total
 
@@ -366,6 +370,14 @@ class ChatService:
             authorize_bound_document=authorize_bound_document,
         )
 
+    async def get_thread_with_recent_messages(
+        self, thread_id: UUID, user_id: UUID
+    ) -> Optional[Tuple[Thread, bool]]:
+        """Thread with its newest live messages, and whether older ones exist."""
+        return await thread_service.get_thread_with_recent_messages(
+            self.db, thread_id, user_id
+        )
+
     async def list_threads(
         self,
         conversation_id: UUID,
@@ -373,8 +385,13 @@ class ChatService:
         status_filter: Optional[ThreadStatus] = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> Tuple[List[Thread], int]:
-        """List threads in a conversation."""
+    ) -> Optional[Tuple[List[Thread], int]]:
+        """List threads in a conversation.
+
+        Returns ``None`` when the conversation was not found or is not
+        accessible to ``user_id`` (router callers map it to 404); an
+        accessible conversation with no threads returns ``([], 0)``.
+        """
         result = await thread_service.list_threads(
             self.db,
             conversation_id,
@@ -385,7 +402,7 @@ class ChatService:
             with_preview=False,
         )
         if result is None:
-            return [], 0
+            return None
         threads, total, _previews = result
         return threads, total
 
@@ -636,8 +653,13 @@ class ChatService:
             thread_ids: List of thread UUIDs to summarize
             user_id: User performing the operation
 
+        Summarization runs later in a Celery task, so nothing is summarized
+        when this returns.
+
         Returns:
-            List of (thread_id, success, error_msg, thread) tuples.
+            List of (thread_id, queued, error_msg, thread) tuples. ``queued``
+            is ``True`` when the summarization task was enqueued, not when a
+            summary was written.
         """
         results = []
 
@@ -916,23 +938,24 @@ class ChatService:
                         )
                         doc_id = None
 
-                try:
-                    citation = Citation(
-                        message_id=message.id,
-                        document_id=doc_id,
-                        external_reference_id=cit.get("external_reference_id"),
-                        chunk_index=cit.get("chunk_index"),
-                        chunk_id=cit.get("chunk_id"),
-                        snippet=cit.get("snippet"),
-                        page_number=cit.get("page_number"),
-                        score=cit.get("score"),
-                        rerank_score=cit.get("rerank_score"),
-                        document_title=cit.get("document_title"),
-                        document_type=cit.get("document_type"),
-                    )
-                    self.db.add(citation)
-                except Exception as cit_exc:
-                    logger.warning(f"Failed to create citation: {cit_exc}")
+                # A citation failure propagates before commit, so the message
+                # and its thread-counter update are not persisted without it
+                # (same atomicity as create_message); the session owner rolls
+                # back.
+                citation = Citation(
+                    message_id=message.id,
+                    document_id=doc_id,
+                    external_reference_id=cit.get("external_reference_id"),
+                    chunk_index=cit.get("chunk_index"),
+                    chunk_id=cit.get("chunk_id"),
+                    snippet=cit.get("snippet"),
+                    page_number=cit.get("page_number"),
+                    score=cit.get("score"),
+                    rerank_score=cit.get("rerank_score"),
+                    document_title=cit.get("document_title"),
+                    document_type=cit.get("document_type"),
+                )
+                self.db.add(citation)
 
         # Update thread stats (eagerly load conversation to avoid lazy-load
         # MissingGreenlet errors in async context)
@@ -996,8 +1019,12 @@ class ChatService:
         order: Literal["asc", "desc"] = "asc",
         selected_message_id: Optional[UUID] = None,
         branch_metadata: Optional["MessagePageMetadata"] = None,
-    ) -> Tuple[List[ChatMessage], int]:
+    ) -> Optional[Tuple[List[ChatMessage], int]]:
         """List messages in a thread.
+
+        Returns ``None`` when the thread was not found or is not accessible
+        to ``user_id`` (router callers map it to 404); an accessible thread
+        with no messages returns ``([], 0)``.
 
         ``since`` (optional) filters to messages with ``created_at > since``
         (strict). Used by clients (CLI, web) to delta-fetch only rows newer
@@ -1022,7 +1049,7 @@ class ChatService:
             branch_metadata=branch_metadata,
         )
         if result is None:
-            return [], 0
+            return None
         messages, total, _has_more = result
         return messages, total
 
@@ -1212,25 +1239,30 @@ class ChatService:
                     effective_max_tokens = int(limit * 0.75)
                     break
 
-        thread = await self.get_thread(thread_id, user_id, include_messages=True)
-        if not thread:
+        # Only the newest ``effective_max_messages`` live rows can reach the
+        # context, so fetch just those (bounded in SQL) instead of the whole
+        # thread. ``total`` counts every live row under the same deleted and
+        # superseded predicates the page uses.
+        result = await message_service.list_messages(
+            self.db,
+            thread_id,
+            user_id,
+            limit=effective_max_messages,
+            order="desc",
+        )
+        if result is None:
             # R5-M10: signal "not found / no access" distinctly so the route
             # can 404; the old fake empty-context dict made that branch dead.
             return None
 
         messages = []
         total_tokens = 0
-        all_message_count = len(
-            [
-                m
-                for m in thread.messages
-                if not m.is_deleted and m.superseded_by_message_id is None
-            ]
-        )
+        newest_first, all_message_count, _has_more = result
+        thread_messages = list(reversed(newest_first))
         truncated = False
 
         # Get messages in reverse order (newest first) for token limiting
-        for msg in reversed(thread.messages):
+        for msg in reversed(thread_messages):
             if msg.is_deleted:
                 continue
             # Edit-and-resend tombstone — skip exactly like a soft delete, else

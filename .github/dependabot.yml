@@ -91,7 +91,7 @@ updates:
         update-types:
           - "major"
     ignore:
-      # numpy 2.5+ requires Python >=3.12. requirements.txt, -test, -minimal and
+      # numpy 2.5+ requires Python >=3.12. requirements.txt, -minimal and
       # constraints-ci.txt install on 3.11 (CI, Dockerfile.prod), which broke
       # #2055. The graph-* images run 3.14 and could take 2.5, but one update
       # config covers every pip manifest, so the ignore is global (it also

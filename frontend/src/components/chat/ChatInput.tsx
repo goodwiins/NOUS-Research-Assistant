@@ -50,8 +50,9 @@ interface ChatInputProps {
   /** Sends the composed turn. Receives the document ids of the attachment
    * chips still present, so removing a chip un-attaches its document. */
   /** Return false when the host handled the draft locally and the runtime
-   * must not send it. */
-  onSubmit: (attachmentIds: string[]) => boolean | void;
+   * must not send it. Return 'rejected' when the host refused the send: the
+   * runtime does not send it and the draft and attachments stay as typed. */
+  onSubmit: (attachmentIds: string[]) => boolean | 'rejected' | void;
   isLoading: boolean;
   /** Hard-disables the composer without swapping Send for Stop — used while
    * the session is still initializing, when a submit would be dropped. */
@@ -354,6 +355,15 @@ export function ChatInput({
     command: SlashCommand,
     discardDraft = false
   ): void => {
+    // While a turn is busy the host refuses the commands that send (with a
+    // toast), so clearing the draft for them first would only lose it.
+    if (isLoading && commandSendsTurn(command)) {
+      menu.dismiss();
+      onCommand?.(command.id);
+      restoreDraftSelection();
+      draftSelectionRef.current = null;
+      return;
+    }
     const typedSlash = isSlashTrigger(value);
     if (typedSlash || discardDraft) onChange('');
     menu.dismiss();
@@ -363,6 +373,13 @@ export function ChatInput({
     }
     draftSelectionRef.current = null;
   };
+
+  const commandSendsTurn = (command: SlashCommand): boolean =>
+    command.id === 'retry' ||
+    command.id === 'summarize' ||
+    command.id === 'keypoints' ||
+    command.id === 'gaps' ||
+    command.id === 'timeline';
 
   const commandReplacesDraft = (command: SlashCommand): boolean =>
     command.id === 'new' ||
@@ -453,7 +470,12 @@ export function ChatInput({
     }
 
     const attachmentIds = attachedDocumentIds();
-    if (onSubmit(attachmentIds) === false) {
+    const outcome = onSubmit(attachmentIds);
+    if (outcome === 'rejected') {
+      e.preventDefault();
+      return false;
+    }
+    if (outcome === false) {
       e.preventDefault();
       aui.composer.setText('');
       clearAttachments();
@@ -904,7 +926,8 @@ export function ChatInput({
                 <button
                   type="button"
                   onClick={openCommands}
-                  className="hidden @min-[480px]:inline-flex items-center gap-1.5 rounded-md ml-1.5 min-h-[44px] text-[12px] cursor-pointer transition-colors hover:bg-(--nous-aurum)"
+                  disabled={isLoading}
+                  className="hidden @min-[480px]:inline-flex items-center gap-1.5 rounded-md ml-1.5 min-h-[44px] text-[12px] cursor-pointer transition-colors hover:bg-(--nous-aurum) disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                   style={{
                     padding: '4px 8px',
                     border: '1px solid var(--nous-border-1)',
@@ -913,7 +936,11 @@ export function ChatInput({
                     fontFamily: 'var(--nous-font-ui)',
                   }}
                   aria-label="Open commands"
-                  title="Type / to open commands"
+                  title={
+                    isLoading
+                      ? 'Commands are unavailable until the current reply finishes'
+                      : 'Type / to open commands'
+                  }
                 >
                   <kbd
                     className="font-nous-mono font-bold rounded-sm"

@@ -31,6 +31,8 @@ export interface Document {
   file_size: number;
   upload_timestamp: string;
   processing_status: string;
+  /** Indexed, but some optional processing steps failed (GOO-765). */
+  processing_partial?: boolean;
   metadata?: {
     entities_count?: number;
   };
@@ -53,7 +55,21 @@ interface StatusConfig {
   label: string;
   icon: LucideIcon;
   canRetry: boolean;
+  /** Read after the label by screen readers, and shown as a tooltip. */
+  detail?: string;
 }
+
+// "Processed with warnings" (GOO-765), the list form of the detail page's
+// ProcessedWithWarnings (GOO-744). fg-accent-safe: 4.89:1 on white
+// (sol-safe), helios on dark; text-helios is 1.84:1 on white.
+const PROCESSED_WITH_WARNINGS: StatusConfig = {
+  className:
+    'text-(--nous-fg-accent-safe) bg-(--nous-fg-accent-safe)/10 border-(--nous-fg-accent-safe)/20',
+  label: 'Processed with warnings',
+  icon: AlertTriangle,
+  canRetry: false,
+  detail: "searchable, but some processing steps didn't finish",
+};
 
 const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return '0 B';
@@ -77,10 +93,13 @@ const formatDate = (dateString: string): string => {
   });
 };
 
-const getStatusConfig = (status: string): StatusConfig => {
+const getStatusConfig = (status: string, partial: boolean): StatusConfig => {
   switch (status) {
     case 'indexed':
     case 'completed':
+      // Only an indexed document can be partial; the flag never changes the
+      // badge of a queued, processing or failed one.
+      if (partial) return PROCESSED_WITH_WARNINGS;
       return {
         className:
           'text-(--nous-terra) bg-(--nous-terra)/10 border-(--nous-terra)/20',
@@ -137,7 +156,10 @@ function DocumentRow({
 }: ListChildComponentProps<DocumentRowData>) {
   const router = useRouter();
   const doc = data.documents[index];
-  const status = getStatusConfig(doc.processing_status);
+  const status = getStatusConfig(
+    doc.processing_status,
+    doc.processing_partial === true
+  );
   const StatusIcon = status.icon;
   const isSelected = data.selectedDocuments.has(doc.id);
 
@@ -208,12 +230,16 @@ function DocumentRow({
         <div className="w-28 shrink-0">
           <span
             className={cn(
-              'inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium',
+              'inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium leading-tight',
               status.className
             )}
+            title={status.detail}
           >
-            <StatusIcon aria-hidden="true" className="w-3 h-3" />
+            <StatusIcon aria-hidden="true" className="w-3 h-3 shrink-0" />
             {status.label}
+            {status.detail && (
+              <span className="sr-only">: {status.detail}</span>
+            )}
           </span>
         </div>
 

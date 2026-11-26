@@ -121,10 +121,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "documents: Document processing tests")
 
     # External dependency markers (for testcontainers)
-    config.addinivalue_line(
-        "markers",
-        "requires_postgres: Tests requiring real PostgreSQL (via testcontainers)",
-    )
+    # requires_postgres is registered in pytest.ini (GOO-769).
     config.addinivalue_line(
         "markers", "requires_redis: Tests requiring real Redis (via testcontainers)"
     )
@@ -164,12 +161,12 @@ def pytest_collection_modifyitems(config, items):
         # Add markers based on test file names
         test_path = str(item.fspath)
 
-        # Search security suites exercise full endpoint behavior and externalized
-        # security controls; treat them as integration tests so unit jobs stay stable.
-        if "/tests/security/search_security/" in test_path or test_path.endswith(
-            "/tests/security/test_search_security.py"
-        ):
-            item.add_marker(pytest.mark.integration)
+        # The search-security suites are NOT marked integration (GOO-780): that
+        # mark kept them out of Unit Tests, and no other job collected them, so
+        # 97 tenant-isolation/authz tests ran nowhere. They need no service
+        # (TestClient + a mocked session); their "instability" was the global
+        # API rate limiter's budget leaking across tests, which
+        # tests/security/search_security/conftest.py now resets per test.
 
         # Skip template, standalone, performance, and scaffolding tests if they somehow got collected
         if "/templates/" in test_path:
@@ -626,6 +623,22 @@ def _patch_multi_tenancy_middleware(monkeypatch):
     session_cm.__aenter__ = AsyncMock(return_value=fake_db)
     session_cm.__aexit__ = AsyncMock(return_value=False)
     monkeypatch.setattr(_mt, "AsyncSessionLocal", MagicMock(return_value=session_cm))
+
+
+@pytest.fixture
+def field_encryption():
+    """Field encryption with a fixed test key, for this test only (GOO-785).
+
+    Encrypted columns (``User.first_name``/``last_name``) need the module
+    globals in ``src.core.encryption``. A test that writes them must set them
+    up itself: relying on an earlier test's ``initialize_encryption()`` makes
+    it pass or fail by test order. The globals are restored afterwards, so
+    this test leaks nothing either.
+    """
+    from tests.utils.field_encryption import scoped_field_encryption
+
+    with scoped_field_encryption() as field:
+        yield field
 
 
 def _test_auth_headers() -> dict:

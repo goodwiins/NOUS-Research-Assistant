@@ -196,10 +196,7 @@ ANALYTICS_METRICS_RESOLUTION=1m
 ```
 
 ### Database Migration
-The analytics tables come from the Alembic chain. From `backend/`:
-```bash
-alembic upgrade head
-```
+**Amendment (2026-11-22, GOO-690):** the analytics dashboard backend this document describes was retired. Its models, the `/dashboards`, `/metrics` and `/reports` routers and their services were deleted, because no deployment ever mounted them. No migration creates the `analytics_*` tables, and none ever did; `alembic upgrade head` does not provide them. Existing rows in a database that already has those tables are left alone.
 
 The standalone `007_analytics_schema.sql` was deleted on 2026-11-22 (GOO-685): it failed on every database, including one Alembic built.
 

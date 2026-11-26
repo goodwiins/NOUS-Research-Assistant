@@ -10,13 +10,13 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ComponentHealth } from '@/types/monitoring';
 import {
-  CheckCircleIcon,
-  ExclamationTriangleIcon,
-  XCircleIcon,
-  QuestionMarkCircleIcon,
-  ArrowPathIcon,
-  InformationCircleIcon,
-} from '@heroicons/react/24/outline';
+  CheckCircle,
+  AlertTriangle,
+  XCircle,
+  HelpCircle,
+  RefreshCw,
+  Info,
+} from 'lucide-react';
 
 export interface StatusGridProps {
   components: ComponentHealth[];
@@ -50,7 +50,7 @@ const StatusGrid: React.FC<StatusGridProps> = ({
     switch (status) {
       case 'healthy':
         return {
-          icon: CheckCircleIcon,
+          icon: CheckCircle,
           color: 'text-green-500',
           bgColor: 'bg-green-50',
           borderColor: 'border-green-200',
@@ -59,7 +59,7 @@ const StatusGrid: React.FC<StatusGridProps> = ({
         };
       case 'degraded':
         return {
-          icon: ExclamationTriangleIcon,
+          icon: AlertTriangle,
           color: 'text-yellow-500',
           bgColor: 'bg-yellow-50',
           borderColor: 'border-yellow-200',
@@ -68,7 +68,7 @@ const StatusGrid: React.FC<StatusGridProps> = ({
         };
       case 'unhealthy':
         return {
-          icon: XCircleIcon,
+          icon: XCircle,
           color: 'text-red-500',
           bgColor: 'bg-red-50',
           borderColor: 'border-red-200',
@@ -78,7 +78,7 @@ const StatusGrid: React.FC<StatusGridProps> = ({
       case 'unknown':
       default:
         return {
-          icon: QuestionMarkCircleIcon,
+          icon: HelpCircle,
           color: 'text-muted-foreground',
           bgColor: 'bg-gray-50',
           borderColor: 'border-border',
@@ -231,11 +231,11 @@ const StatusGrid: React.FC<StatusGridProps> = ({
                 onClick={() => onRefresh?.('all')}
                 className="text-muted-foreground hover:text-foreground"
               >
-                <ArrowPathIcon className="h-4 w-4 mr-1" />
+                <RefreshCw className="h-4 w-4 mr-1" />
                 Refresh
               </Button>
               <Button variant="ghost" size="sm">
-                <InformationCircleIcon className="h-4 w-4" />
+                <Info className="h-4 w-4" />
               </Button>
             </div>
           )}
@@ -360,7 +360,7 @@ const StatusGrid: React.FC<StatusGridProps> = ({
                       }}
                       className="h-8 w-8 p-0"
                     >
-                      <ArrowPathIcon className="h-4 w-4" />
+                      <RefreshCw className="h-4 w-4" />
                     </Button>
                   </div>
                 )}
@@ -386,7 +386,7 @@ const StatusGrid: React.FC<StatusGridProps> = ({
 
         {components.length === 0 && (
           <div className="text-center py-8">
-            <QuestionMarkCircleIcon className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+            <HelpCircle className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
             <p className="text-muted-foreground">
               No component status data available
             </p>

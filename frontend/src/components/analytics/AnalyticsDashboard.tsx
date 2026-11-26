@@ -42,6 +42,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { AnalyticsChart } from './AnalyticsChart';
 import { AnalyticsOverview, type AnalyticsOverviewData } from './AnalyticsOverview';
+import { NOT_MEASURED } from '@/utils/analyticsFigure';
 import {
   AnalyticsTable,
   createDocumentAnalyticsTable,
@@ -192,7 +193,12 @@ export async function fetchAnalyticsDashboard(
       overview: {
         documentsIndexed,
         searches24h: overview ? overview.totalSearches : null,
-        avgSearchTimeMs24h: overview ? overview.avgSearchTimeMs : null,
+        // null from a loaded overview = no search was timed, not an outage.
+        avgSearchTimeMs24h: overview
+          ? overview.avgSearchTimeMs === null
+            ? NOT_MEASURED
+            : overview.avgSearchTimeMs
+          : null,
         activeUsers24h: adminFigure(overview?.engagement?.activeUsers),
         searchSessions24h: adminFigure(overview?.engagement?.searchSessions),
       },

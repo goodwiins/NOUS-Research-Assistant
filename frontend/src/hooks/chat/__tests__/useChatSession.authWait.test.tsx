@@ -70,12 +70,15 @@ const unavailable = (): APIErrorClass =>
     type: 'server_error',
   });
 
-async function bootChat(): Promise<void> {
-  renderHook(() => useChatSession());
+async function bootChat(): Promise<{
+  current: ReturnType<typeof useChatSession>;
+}> {
+  const { result } = renderHook(() => useChatSession());
   await act(async () => {
     void useAuthStore.getState().initialize();
     await vi.advanceTimersByTimeAsync(0);
   });
+  return result;
 }
 
 describe('useChatSession waits for the auth profile (GOO-752)', () => {
@@ -154,6 +157,59 @@ describe('useChatSession waits for the auth profile (GOO-752)', () => {
     );
 
     await bootChat();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+
+    expect(navigationMocks.push).toHaveBeenCalledWith('/login?next=%2Fchat');
+  });
+
+  it('shows the outage, not a wait, once every attempt has failed (GOO-759)', async () => {
+    authMocks.apiGet.mockRejectedValue(unavailable());
+
+    const result = await bootChat();
+    // Still retrying: the account is loading, not unavailable.
+    expect(result.current.isProfileUnavailable).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(result.current.isProfileUnavailable).toBe(true);
+
+    // Retry in flight: back to loading.
+    let retry: Promise<void> = Promise.resolve();
+    act(() => {
+      retry = useAuthStore.getState().retryProfile();
+    });
+    expect(result.current.isProfileUnavailable).toBe(false);
+    await act(async () => {
+      await retry;
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(result.current.isProfileUnavailable).toBe(true);
+  });
+
+  it('redirects to login when Retry finds the token rejected (GOO-759)', async () => {
+    authMocks.apiGet.mockRejectedValue(unavailable());
+
+    await bootChat();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(navigationMocks.push).not.toHaveBeenCalled();
+
+    authMocks.apiGet.mockRejectedValue(
+      new APIErrorClass({
+        message: 'Invalid token',
+        status_code: 401,
+        type: 'auth_error',
+      })
+    );
+    await act(async () => {
+      await useAuthStore.getState().retryProfile();
+    });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1500);
     });

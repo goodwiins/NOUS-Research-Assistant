@@ -138,6 +138,24 @@ describe('AnalyticsDashboard (GOO-649)', () => {
     );
   });
 
+  it('shows an untimed average search time as not measured, not as an outage (GOO-768)', async () => {
+    route(
+      routesFor({
+        ...memberOverviewBody,
+        search_performance: {
+          ...memberOverviewBody.search_performance,
+          avg_response_time: null,
+        },
+      })
+    );
+
+    render(<AnalyticsDashboard />);
+
+    expect(await screen.findByText('Not measured yet')).toBeInTheDocument();
+    expect(screen.queryByText('Unavailable right now')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Some data couldn.t be loaded/)).not.toBeInTheDocument();
+  });
+
   it('plots the 7-day daily search series and keeps its first, midnight-truncated day', async () => {
     route(routesFor(memberOverviewBody));
 

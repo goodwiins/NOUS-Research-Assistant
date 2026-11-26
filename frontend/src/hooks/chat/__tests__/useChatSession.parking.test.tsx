@@ -81,6 +81,105 @@ describe('useChatSession overlay parking', () => {
     expect(result.current.messages).toHaveLength(2);
   });
 
+  it.each([
+    ['another thread', 'thread-B'],
+    ['a new chat', null],
+  ] as const)(
+    'restores the in-flight overlay after switching away via %s and back',
+    async (_label, elsewhere) => {
+      const { result } = renderHook(() => useChatSession());
+      await act(async () => {
+        useChatStore.setState({
+          streamingThreadId: null,
+          currentThreadId: 'thread-A',
+        });
+      });
+      const inFlight = [
+        makeChatPageMessage({
+          role: 'user',
+          content: 'streaming question',
+          timestamp: 1,
+          source: 'optimistic',
+        }),
+      ];
+      await act(async () => {
+        result.current.setMessages(inFlight);
+        useChatStore.setState({ streamingThreadId: 'thread-A' });
+      });
+
+      await act(async () => {
+        useChatStore.setState({ currentThreadId: elsewhere });
+      });
+      expect(result.current.messages).toHaveLength(0);
+      await act(async () => {
+        useChatStore.setState({ currentThreadId: 'thread-A' });
+      });
+
+      expect(result.current.messages.map((message) => message.content)).toEqual(
+        ['streaming question']
+      );
+    }
+  );
+
+  describe('an unsent bubble survives switching threads away and back (GOO-772)', () => {
+    const settled = (): ReturnType<typeof makeChatPageMessage>[] => [
+      makeChatPageMessage({
+        id: 'a1',
+        role: 'assistant',
+        content: 'done answer',
+        timestamp: 1,
+        source: 'canonical',
+      }),
+      {
+        ...makeChatPageMessage({
+          role: 'user',
+          content: 'rejected text',
+          timestamp: 2,
+        }),
+        source: 'local-only',
+        sendFailed: { message: 'Not sent.' },
+      },
+    ];
+
+    it.each([
+      ['another thread', 'thread-B'],
+      ['a new chat', null],
+    ] as const)(
+      'via %s, with nothing streaming',
+      async (_label, elsewhere) => {
+        const { result } = renderHook(() => useChatSession());
+        await act(async () => {
+          useChatStore.setState({
+            streamingThreadId: null,
+            currentThreadId: 'thread-A',
+          });
+        });
+        await act(async () => {
+          result.current.setMessages(settled());
+        });
+
+        await act(async () => {
+          useChatStore.setState({ currentThreadId: elsewhere });
+        });
+        expect(result.current.messages).toHaveLength(0);
+        await act(async () => {
+          useChatStore.setState({ currentThreadId: 'thread-A' });
+        });
+
+        // After a rejection nothing streams, so this overlay was wiped and
+        // the text, which existed only in the bubble, was gone.
+        expect(
+          result.current.messages.filter((message) => message.sendFailed)
+        ).toEqual([
+          expect.objectContaining({
+            content: 'rejected text',
+            sendFailed: { message: 'Not sent.' },
+          }),
+        ]);
+      }
+    );
+  });
+
   it('still clears the overlay on a plain thread switch', async () => {
     const { result } = renderHook(() => useChatSession());
 

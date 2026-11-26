@@ -5,7 +5,7 @@
 - `backend/tests/unit/` — fast, isolated unit tests.
 - `backend/tests/unit/ci/` — contract tests for the CI toolchain/quality
   gates themselves (Node/pnpm versions, changed-file selection, tsconfig
-  exclusion ratchet, OpenAPI generation).
+  exclusion ratchet, OpenAPI generation, workflow escape comments).
 - `backend/tests/unit/architecture/` — structural regression guards over
   the codebase's own module boundaries (`test_workspace_boundaries.py`,
   `test_maintenance_contracts.py`).
@@ -100,10 +100,14 @@ over the others.
 | `integration-tests` | Integration Tests (sharded) | Backend integration tests. |
 | `resilience-tests` | Resilience Tests | Retry, circuit-breaker and bulkhead tests. |
 | `frontend-tests` | Frontend Tests | Vitest suite. |
-| `security-scan` | Security Scan | Bandit on `backend/src` and `safety` on `backend/requirements.txt`. |
+| `security-scan` | Security Scan | Bandit on `backend/src` and `safety` on `backend/requirements-cpu-lock.txt`. |
 | `e2e-tests` | E2E Tests | Playwright browser tests. |
 | `performance-tests` | Performance Tests | Performance benchmarks; not listed in the Release Gate `needs`. |
 | `test-summary` | Release Gate | Requires the selected jobs to pass and validates every skip. |
+
+Every `continue-on-error: true` and `|| true` in `test-pipeline.yml` must carry
+a same-line or directly-preceding comment that says why the failure may be
+ignored. `backend/tests/unit/ci/test_workflow_escape_comments.py` enforces this.
 
 `.github/workflows/agent-eval.yml` ("Agent Regression Eval") is separate: a
 weekly (Monday 06:00 UTC) and manually dispatched LangSmith golden-set sweep on a

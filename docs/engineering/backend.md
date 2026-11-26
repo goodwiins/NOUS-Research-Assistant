@@ -35,8 +35,26 @@ Enforced by `backend/tests/unit/architecture/test_workspace_boundaries.py`:
    never calls `.rollback()` / `.flush()` / `.refresh()` (rollback stays
    with the request-scoped session). The shared modules (`dependencies.py`,
    `presenters.py`, `__init__.py`) call none of the four. The test scans
-   only `workspace_routes/`; other `src/api/` modules commit directly and no
-   test constrains them.
+   only `workspace_routes/`. `src/api/agent` has its own, opposite guard,
+   `backend/tests/unit/architecture/test_agent_api_boundaries.py`, with four
+   rules: (a) no call to the four; (b) no `SessionLocal`/`AsyncSessionLocal`;
+   (c) no `Thread`/`Conversation`/`Workspace`/`WorkspaceMember` column
+   reference (scope goes through `workspace_access`); (d) a helper module (any
+   module but `execute.py` and `__init__.py`) does not import the `execute`
+   router module back. The guard walks every top-level statement of each
+   module in `src/api/agent` and records a hit as (module, top-level function
+   or class, rule), with module-level code as `<module>`; that triple is the
+   allowlist key. Rule (b) skips module-level code. Rule (d) catches only
+   `from .execute import ...` and `from src.api.agent.execute import ...`, not
+   `from . import execute`. Existing debt sits in a dated,
+   shrink-only `ALLOWLIST`. Two narrower guards hold more routers to the
+   same no-transaction rule:
+   `backend/tests/unit/architecture/test_integration_boundaries.py` bans the
+   four calls plus `begin()` / `begin_nested()` in `src/api/integrations/*.py`,
+   `src/api/artifacts.py` and `src/api/harness.py`, and
+   `backend/tests/unit/architecture/test_document_file_boundaries.py` bans the
+   same six in the `src/api/documents/files.py` handlers listed in its
+   `SERVICE_OWNED_HANDLERS`.
 2. No resource module imports a sibling resource module directly — cross-
    handler helpers go through `dependencies.py` or `presenters.py` only.
 3. `workspace_routes/__init__.py` and the `workspaces.py` shim resolve
@@ -92,12 +110,43 @@ Keep a compatibility export until every caller has migrated (see
 `backend/src/api/threads/workspaces.py`); removing one is a separate,
 deliberate change, not a side effect of an unrelated refactor.
 
+## Thread message reads
+
+These two chat reads load a bounded page of a thread's messages, not the
+whole thread:
+
+- `GET /api/v2/threads/{thread_id}` returns at most the newest 500 live
+  messages (`THREAD_DETAIL_MAX_MESSAGES` in `thread_service.py`), oldest
+  first. `has_more_messages` is `true` when older live messages exist; page
+  them through `GET /api/v2/threads/{thread_id}/messages?order=desc&before_id=<oldest returned id>`.
+  On a branched thread (`message_branching: true`), also pass the
+  `selected_message_id` the detail response returned; without it, or with a
+  stale one, `/messages` answers 409.
+- `ChatService.get_thread_context` reads only the newest `max_messages`
+  live rows (`message_service.list_messages(order="desc", limit=...)`), and
+  takes `total_messages` from that query's count.
+
+The nested `GET /api/v2/workspaces/{ws}/conversations/{c}/threads/{id}`
+route (`workspace_routes/threads.py`) and `ChatService.get_thread(include_messages=True)`
+still load every message of the thread (the whole selected path on a
+branched thread); that nested route always reports
+`has_more_messages: false`.
+
 ## Ratchets
 
 - **Ruff `F821`/`F823`** (undefined name / used-before-assignment) are
   blocking, repo-wide: `ruff check backend/src`. These are latent
   `NameError`s, not style — the rest of the default rule set is either
   ignored (see `pyproject.toml`'s `[tool.ruff.lint]`) or advisory.
+- **Import direction** (blocking): no module under `backend/src/services/`
+  or `backend/src/tasks/` may import `src.api` — top-level or deferred,
+  absolute or relative. Enforced by
+  `backend/tests/unit/test_import_direction.py`, whose services allowlist is
+  empty and may only stay that way. When a service or task needs code that
+  lives in a router or API schema module, move it into the service layer
+  (e.g. `src/services/evidence/schemas.py`,
+  `src/services/research_engine/run_connectors.py`) and keep a re-export at
+  the old API path while callers still use it.
 - **Changed-file gate** (CI `lint-backend`, blocking): every changed
   `.py` file (`scripts/ci/changed_source_files.py --kind python`) must pass
   `ruff check`, `black --check`, `isort --check-only`. *Added* files only
@@ -141,3 +190,23 @@ pytest -q backend/tests/unit/architecture backend/tests/unit/api
 pytest -q backend/tests/unit/services/threads backend/tests/api/threads
 python scripts/ci/generate_openapi.py --check
 ```
+
+## Python dependencies
+
+- `backend/requirements.txt` is the production set.
+  `backend/requirements-cpu.in` includes it and adds the CPU torch wheel, so
+  it is the source of `backend/requirements-cpu-lock.txt`. After editing it, regenerate
+  the lock from the repo root without `--upgrade`, so existing pins are kept:
+
+  ```sh
+  uv pip compile --python-version 3.11 --python-platform x86_64-manylinux_2_28 --no-annotate backend/requirements-cpu.in -o backend/requirements-cpu-lock.txt
+  ```
+
+- `backend/requirements-ci.txt` holds the test tools CI installs next to the
+  lock (pytest and its plugins, testcontainers).
+- `backend/requirements.dev.txt` is the local dev set: `requirements.txt`,
+  `requirements-ci.txt` and the lint/dev tools.
+- Test and profiling tools never go in `requirements.txt`. Add a package there
+  only when runtime code imports it, or when it is a documented CLI, driver or
+  security-floor pin (for example `flower`, `gunicorn`, `aiosqlite`).
+  `backend/tests/unit/ci/test_requirements_layout.py` guards this layout.

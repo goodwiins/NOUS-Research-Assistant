@@ -17,6 +17,12 @@ vi.mock('@/hooks/useEntityPermissions', () => ({
   useEntityPermissions: () => ({ canCreate: true, canEdit: true, canDelete: true }),
 }));
 
+// Stable like the real useCallback, or the fetch callbacks change every render.
+const { handleAuthError } = vi.hoisted(() => ({ handleAuthError: vi.fn() }));
+vi.mock('@/hooks/useAuth', () => ({
+  useAuth: () => ({ handleAuthError, isAuthenticated: true, isLoading: false }),
+}));
+
 vi.mock('react-hot-toast', () => ({
   default: { error: vi.fn(), success: vi.fn() },
 }));
@@ -102,6 +108,24 @@ describe('entities page graph tab (GOO-749)', () => {
     await waitFor(() => expect(lastPanel()).toMatchObject({ loading: false, failed: false }));
     expect(lastPanel().relationships).toHaveLength(1);
     expect(service.getAllRelationships).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears relationships that loaded earlier when a later load fails (GOO-760)', async () => {
+    service.getAllRelationships
+      .mockResolvedValueOnce([{ id: 'r1', source: 'a', target: 'b', type: 'KNOWS' }])
+      .mockRejectedValueOnce(
+        new APIErrorClass({ message: 'HTTP 500', status_code: 500, type: 'http_error' })
+      );
+
+    render(<EntityManagementPage />);
+    await waitFor(() => expect(lastPanel().relationships).toHaveLength(1));
+
+    await act(async () => {
+      lastPanel().onRetry();
+    });
+
+    await waitFor(() => expect(lastPanel()).toMatchObject({ loading: false, failed: true }));
+    expect(lastPanel().relationships).toEqual([]);
   });
 
   it('is not in the error state after a successful load with no relationships', async () => {

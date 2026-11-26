@@ -80,3 +80,42 @@ Read-only rollout and environment checks (Helm 3.13.0, Python 3 + PyYAML):
 ```sh
 python3 infrastructure/helm/knowledge-graph-analytics/tests/deployment_consistency_render_test.py
 ```
+
+## Container hardening and Celery probes
+
+Every backend-image container (API `backend`, `celery-worker`, `celery-beat`,
+the migration Job's `run-migrations` and `synthetic-traffic`) renders its
+container `securityContext` from the `knowledge-graph-analytics.containerSecurityContext`
+helper: `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]`. The
+pod-level `securityContext` (non-root UID/GID 1001) still comes from
+`.Values.securityContext`. The helper adds no filesystem restriction; these
+processes write only under `/app`, which the image's UID 1001 owns.
+
+The worker's liveness and readiness probes both run
+`celery ... inspect ping -d celery@$HOSTNAME`. The ping asks only the pod's own
+node, and a stuck consumer stops answering. They differ in how they reach the
+broker:
+
+- Liveness (`celeryWorker.livenessProbe.*`) uses `-A src.tasks.celery_app` and
+  restarts the container. That import is not light: it runs
+  `src/tasks/__init__.py`, which loads the task modules, the SQLAlchemy models
+  and the DB engine. Measured locally, one probe process took about 13 s and
+  about 750 MB of resident memory.
+- Readiness (`celeryWorker.readinessProbe.*`, default 30 s ping timeout, 45 s
+  probe timeout, every 60 s, 3 failures) uses `-b "$REDIS_URL"` and imports no
+  application code: about 0.7 s and 70 MB for the same ping. It gates rollout
+  availability and the worker PDB. `REDIS_URL` is the variable the worker
+  itself reads its broker from (`backend.env`, or an `envFrom` secret on AWS).
+  For a `rediss://` URL Kombu applies the same no-verify TLS that `celery_app`
+  sets.
+
+Both probes go through the broker. During a broker outage every worker pod
+turns not ready at once (after 3 failed probes), Argo CD shows the app as
+Degraded, and the worker PDB blocks voluntary disruptions such as node drains
+until the broker is back.
+
+Beat runs with `--schedule=/app/celerybeat-schedule`, the same path as Celery's
+implicit default. Its liveness probe fails when no `celerybeat-schedule*` file in
+`/app` was modified in the last 10 minutes. The PersistentScheduler rewrites the
+file about every 180 s while it ticks, so a stalled scheduler loop gets
+restarted. Beat is PID 1, so a process check (`pgrep`) could never fail.

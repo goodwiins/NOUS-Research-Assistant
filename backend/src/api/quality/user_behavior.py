@@ -30,6 +30,7 @@ from src.services.quality.user_behavior_service import (
     analytics_window,
     user_behavior_service,
 )
+from src.utils.csv_safety import needs_formula_quote
 
 logger = logging.getLogger(__name__)
 
@@ -68,17 +69,14 @@ def _naive_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-# A spreadsheet runs a cell that starts with one of these as a formula.
-_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
-
-
 def _csv_cell(value: Any) -> Any:
     """Make user-controlled text (titles, names) literal in a spreadsheet.
 
-    Only strings are prefixed, so a negative number stays a number (GOO-691).
+    A number, or a string that is strictly a plain number, stays a number
+    (GOO-691, GOO-753).
     """
-    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
-        return "'" + value
+    if needs_formula_quote(value):
+        return "'" + str(value)
     return value
 
 

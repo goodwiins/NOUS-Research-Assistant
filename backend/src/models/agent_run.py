@@ -83,7 +83,12 @@ class AgentRun(Base):
     # String(255) (uuid or job-id fallback); the run-events migration nulls
     # dangling correlations and converts to a real FK.
     thread_id = Column(
-        GUID(), ForeignKey("threads.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("threads.id", ondelete="SET NULL"),
+        nullable=True,
+        # uq_agent_runs_active_thread is partial (active runs only), so it
+        # cannot serve the purge's SET NULL check (GOO-655).
+        index=True,
     )
     conversation_id = Column(
         GUID(), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
@@ -95,10 +100,16 @@ class AgentRun(Base):
     # Transcript linkage — the committed user turn that started the run and
     # (once terminal) the assistant message it projected.
     user_message_id = Column(
-        GUID(), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     assistant_message_id = Column(
-        GUID(), ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+        GUID(),
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     # Frozen tool registry + approved skill versions for the whole run;

@@ -119,3 +119,26 @@ async def test_active_documents_without_project_stay_org_wide() -> None:
     assert set(title_by_key) == {"a.pdf", "b.pdf"}
     assert chunks_to_emit == chunks
     assert len(session.statements) == 1
+
+
+@pytest.mark.asyncio
+async def test_bedrock_ids_require_a_live_canonical_document() -> None:
+    deleted_id, live_id = uuid4(), uuid4()
+    # A live document's legacy object path ends in the deleted row's UUID.
+    # Bedrock's metadata contains the deleted row's ID, not a storage alias.
+    session = _session([(live_id, f"legacy/{deleted_id}", "Live document")])
+    deleted = Chunk(text="deleted", score=1, document_id=str(deleted_id), metadata={})
+    live = Chunk(text="live", score=0.5, document_id=str(live_id), metadata={})
+
+    titles, chunks = await resolve_and_filter_chunks(
+        chunks=[deleted, live],
+        org_id=uuid4(),
+        session=session,
+        canonical_ids_only=True,
+    )
+
+    assert titles == {str(live_id): (str(live_id), "Live document")}
+    assert chunks == [live]
+    sql = _compiled_where(session.statements[0]).split("where", 1)[1]
+    assert "documents.storage_path" not in sql
+    assert "documents.is_deleted = false" in sql

@@ -782,3 +782,46 @@ test("cancelled thread pages never publish late results", async () => {
   );
   assert.ok(error instanceof Error);
 });
+
+test("a saved thread that answers 404 is unselected with an accurate notice", async () => {
+  const { openSavedThread } = await import("./session");
+  mock.method(globalThis, "fetch", async () =>
+    Response.json(
+      { detail: "Thread not found or access denied" },
+      { status: 404 },
+    ),
+  );
+  const opened = await openSavedThread("thread-1");
+  assert.equal(loadConfig()?.thread_id, null);
+  assert.deepEqual(opened.messages, []);
+  assert.deepEqual(opened.history, { headId: null, nodes: [] });
+  assert.match(opened.notice, /no longer available/);
+  assert.doesNotMatch(opened.notice, /connection/);
+});
+
+test("a failed thread refresh keeps the saved thread and local history", async () => {
+  const { openSavedThread } = await import("./session");
+  const saved: BranchHistory = {
+    headId: "local-1",
+    nodes: [
+      {
+        parentId: null,
+        message: {
+          runtimeId: "local-1",
+          threadId: "thread-1",
+          role: "user",
+          content: "Saved prompt",
+          timestamp: 1,
+        },
+      },
+    ],
+  };
+  await saveBranches(saved);
+  mock.method(globalThis, "fetch", async () =>
+    Response.json({ detail: "Internal Server Error" }, { status: 500 }),
+  );
+  const opened = await openSavedThread("thread-1");
+  assert.equal(loadConfig()?.thread_id, "thread-1");
+  assert.equal(opened.history.headId, "local-1");
+  assert.match(opened.notice, /check your connection/);
+});

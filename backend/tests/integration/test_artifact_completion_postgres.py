@@ -102,6 +102,19 @@ _ADDED: list[Any] = [ArtifactShare, ArtifactShareAudience, NativeArtifactIntent]
 CONTENT = "# Saved review\n"
 
 
+def _later_indexes() -> set[str]:
+    """Indexes on these tables that fk01_purge_path_fk_indexes adds after aw03."""
+    path = Path(__file__).parents[2] / "alembic/versions/fk01_purge_path_fk_indexes.py"
+    spec = importlib.util.spec_from_file_location("fk01_for_aw03", path)
+    assert spec is not None and spec.loader is not None
+    fk01 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fk01)
+    return {fk01._name(table, column) for table, column in fk01.FK_COLUMNS}
+
+
+_LATER_INDEXES = _later_indexes()
+
+
 def _migrate(connection: Connection, direction: str) -> None:
     path = Path(__file__).parents[2] / "alembic/versions/aw03_artifact_completion.py"
     spec = importlib.util.spec_from_file_location("artifact_completion_migration", path)
@@ -559,11 +572,13 @@ def _assert_migration_contract(connection: Connection) -> None:
                 assert getattr(columns[column.name]["type"], "timezone") == getattr(
                     column.type, "timezone"
                 )
+        # aw03 builds the model's indexes except the purge-path FK indexes
+        # that the later revision fk01 adds (only aw03 runs here).
         assert {
             index["name"]
             for index in inspector.get_indexes(table.name)
             if not index.get("duplicates_constraint")
-        } == {index.name for index in table.indexes}
+        } == {index.name for index in table.indexes} - _LATER_INDEXES
         actual_fks = {
             (
                 tuple(fk["constrained_columns"]),
