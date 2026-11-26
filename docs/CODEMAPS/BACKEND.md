@@ -1,7 +1,7 @@
 # NOUS — Backend CODEMAP
 
 > FastAPI app: entry point, package layout, top endpoints, top services, how to add a domain.
-> Last generated: 2026-04-26; package layout, services and endpoint tables corrected 2026-10-17 against `ls backend/src` and `backend/openapi.json`. For exact paths use `backend/openapi.json`.
+> Last generated: 2026-04-26; package layout, services and endpoint tables corrected 2026-10-17 against `ls backend/src` and `backend/openapi.json`; transaction notes corrected 2026-11-25 against `backend/tests/unit/architecture/test_workspace_boundaries.py`. For exact paths use `backend/openapi.json`.
 
 ## Entry point
 
@@ -12,7 +12,7 @@
 ```
 src/
   main.py             FastAPI app + router wiring (see backend/src/api/README.md)
-  api/                Route handlers (transport only); one subpackage or module per area
+  api/                Route handlers (transaction rule: docs/engineering/backend.md); one subpackage or module per area
                       agent, analytics, arxiv, auth, connectors, diagnostics, documents,
                       evidence, infrastructure, integrations, quality, realtime, research,
                       research_engine, search, security, threads, artifacts.py, harness.py
@@ -73,7 +73,7 @@ Config: `backend/alembic.ini`, env: `backend/alembic/env.py`
 ## Adding a new domain
 
 1. Create `src/api/<domain>/` with thin handlers that import the service (routers never commit).
-2. Create `src/services/<domain>/` with the business logic; the service owns exactly one transaction boundary per method.
+2. Create `src/services/<domain>/` with the business logic; the service owns the transaction. The `threads/workspace_routes` handlers are the exception: there the handler commits at most once and the leaf services only flush (see `docs/engineering/backend.md`).
 3. Add ORM models to `src/models/<domain>.py` (until domain split is complete).
 4. Add Pydantic schemas to `src/schemas/<domain>.py`.
 5. Register router in `src/main.py`: `app.include_router(<domain>_router, prefix="/api/v1")`.

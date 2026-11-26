@@ -1,6 +1,6 @@
 # Thread and workspace services
 
-Persistence and access control for the workspace hierarchy: workspace, conversation, thread, message, plus workspace collections. The routers under `backend/src/api/threads/workspace_routes/` are transport only and call into these services; the services own persistence and exactly one transaction boundary per method.
+Persistence and access control for the workspace hierarchy: workspace, conversation, thread, message, plus workspace collections. The routers under `backend/src/api/threads/workspace_routes/` call into these services and own the request's commit: a handler calls `await db.commit()` at most once, at the end of a write. The five leaf services (`workspace_service.py`, `conversation_service.py`, `thread_service.py`, `message_service.py`, `collection_service.py`) do the writes but only flush; they never commit. `ChatService` commits only in the functions in `CHAT_SERVICE_COMMIT_ALLOWLIST`, so a route that delegates its write to one of them, such as `create_message_standalone`, must not commit. `message_branches.py` (`select_branch`) and `thread_summarization_service.py` own their own commits and are outside this rule.
 
 ## Files
 
@@ -23,4 +23,4 @@ Persistence and access control for the workspace hierarchy: workspace, conversat
 
 ## Enforcement
 
-`backend/tests/unit/architecture/test_workspace_boundaries.py` fails if a router commits, imports a sibling resource module, or an access getter stops requiring the caller identity. `test_thread_purge_fk_contract.py` pins the foreign-key delete rules for tables that the 30-day thread purge touches. Run `pytest -q backend/tests/unit/architecture backend/tests/unit/services/threads backend/tests/api/threads`. See `backend/AGENTS.md` and `docs/engineering/backend.md` for the rules.
+`backend/tests/unit/architecture/test_workspace_boundaries.py` fails if a workspace route handler commits more than once, a resource route module has no commit or calls `rollback`/`flush`/`refresh`, a resource module imports a sibling, a leaf service commits, or `ChatService` commits outside its allowlist. It does not catch a write handler that leaves out its commit while another handler in its module commits. `test_maintenance_contracts.py` fails if an access getter stops requiring the caller identity. `test_thread_purge_fk_contract.py` pins the foreign-key delete rules for tables that the 30-day thread purge touches. Run `pytest -q backend/tests/unit/architecture backend/tests/unit/services/threads backend/tests/api/threads`. See `backend/AGENTS.md` and `docs/engineering/backend.md` for the rules.
